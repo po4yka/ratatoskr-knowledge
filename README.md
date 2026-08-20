@@ -1,10 +1,21 @@
 # Ratatoskr Knowledge
 
-`ratatoskr-knowledge` is the interpretation and retrieval bounded context for Ratatoskr Next. It turns already captured, provenance-preserving source material into versioned structured analyses, searchable projections, embeddings, entities, topics, and cross-source relationships.
+`ratatoskr-knowledge` is the interpretation and retrieval bounded context for Ratatoskr. It turns already captured, provenance-preserving source material into versioned structured analyses, searchable projections, embeddings, entities, topics, and cross-source relationships.
 
 > **Status:** architecture bootstrap. The analysis state machines, provider adapters, database schema, and search indexes described below are planned and are not implemented yet.
 
-## Role in Ratatoskr Next
+> [!IMPORTANT]
+> **Ratatoskr is in development.** No database holds data that has to survive a schema change.
+> While this status holds, these two rules replace what the documents below plan:
+>
+> - the API and the database keep their first version. There is no `v2` and no later major
+>   version.
+> - the database has no migrations. One schema definition exists, and a schema change edits it in
+>   place.
+>
+> Only the repository owner changes this status.
+
+## Role in Ratatoskr
 
 Knowledge starts **after** a source-owning service has produced a stable input:
 
@@ -31,7 +42,7 @@ Knowledge does not fetch arbitrary web pages, run Chromium, synchronize provider
 
 ## Explicit state machines
 
-Ratatoskr Next intentionally avoids rebuilding framework-driven graph orchestration. Each analysis type uses an explicit, durable state machine:
+Ratatoskr intentionally avoids rebuilding framework-driven graph orchestration. Each analysis type uses an explicit, durable state machine:
 
 ```text
 queued
