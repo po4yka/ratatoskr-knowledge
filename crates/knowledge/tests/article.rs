@@ -1,6 +1,8 @@
 //! Article result contract tests.
 
-use ratatoskr_knowledge::{article_analysis_schema, validate_article_json};
+use ratatoskr_knowledge::{
+    PreparedContext, article_analysis_schema, validate_article_citations, validate_article_json,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -48,6 +50,35 @@ fn article_schema_matches_committed_file() -> Result<(), Box<dyn std::error::Err
     ))?;
     assert_eq!(article_analysis_schema()?, committed);
     Ok(())
+}
+
+#[test]
+fn citations_must_name_supplied_unique_blocks() -> Result<(), Box<dyn std::error::Error>> {
+    let context = PreparedContext {
+        source: "blocks 0 and 1".to_owned(),
+        included_block_indexes: vec![0, 1],
+        omitted_block_indexes: vec![2],
+        character_budget: 100,
+        truncated: true,
+    };
+    let valid = article_with_citations(&[0, 1]);
+    let missing = article_with_citations(&[99]);
+    let duplicate = article_with_citations(&[0, 0]);
+    let omitted = article_with_citations(&[2]);
+
+    assert!(validate_article_citations(&validate_article_json(&valid)?, &context).is_ok());
+    for value in [missing, duplicate, omitted] {
+        let article = validate_article_json(&value)?;
+        assert!(validate_article_citations(&article, &context).is_err());
+    }
+    Ok(())
+}
+
+fn article_with_citations(indexes: &[u32]) -> Value {
+    json!({
+        "summary": "A bounded summary.",
+        "key_points": [{"text": "One point.", "source_block_indexes": indexes}]
+    })
 }
 
 fn valid_point() -> Value {

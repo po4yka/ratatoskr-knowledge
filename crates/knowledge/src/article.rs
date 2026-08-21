@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::PreparedContext;
+
 /// Strict version-one article analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,9 @@ pub enum ArticleValidationError {
     /// A structurally valid value could not be decoded.
     #[error("the article response could not be decoded")]
     Decode,
+    /// A citation is duplicate or not present in provider-visible context.
+    #[error("the article response contains an invalid citation")]
+    Citation,
 }
 
 /// Generates the canonical version-one article JSON Schema.
@@ -70,4 +75,25 @@ pub fn validate_article_json(
         .validate(value)
         .map_err(|_| ArticleValidationError::Structural)?;
     serde_json::from_value(value.clone()).map_err(|_| ArticleValidationError::Decode)
+}
+
+/// Applies citation checks after structural validation.
+///
+/// # Errors
+///
+/// Returns [`ArticleValidationError`] when a citation is duplicated, omitted, or absent.
+pub fn validate_article_citations(
+    article: &ArticleAnalysis,
+    context: &PreparedContext,
+) -> Result<(), ArticleValidationError> {
+    for point in &article.key_points {
+        let mut seen = Vec::with_capacity(point.source_block_indexes.len());
+        for &index in &point.source_block_indexes {
+            if seen.contains(&index) || !context.included_block_indexes.contains(&index) {
+                return Err(ArticleValidationError::Citation);
+            }
+            seen.push(index);
+        }
+    }
+    Ok(())
 }

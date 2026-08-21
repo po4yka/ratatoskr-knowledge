@@ -5,6 +5,7 @@
 
 mod article;
 mod config;
+mod context;
 mod database;
 mod runs;
 mod telemetry;
@@ -14,9 +15,10 @@ pub mod test_support;
 
 pub use article::{
     ArticleAnalysis, ArticleValidationError, KeyPoint, article_analysis_schema,
-    validate_article_json,
+    validate_article_citations, validate_article_json,
 };
 pub use config::{AdminConfig, Config, ConfigError, Limits};
+pub use context::PreparedContext;
 pub use database::{Database, PersistenceError};
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
