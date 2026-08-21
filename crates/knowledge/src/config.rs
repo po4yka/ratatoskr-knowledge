@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::{error, fmt};
 
 use serde::Serialize;
@@ -10,6 +11,8 @@ const ENV_PREFIX: &str = "RATATOSKR__";
 pub struct Config {
     /// Operator listener configuration.
     pub admin: AdminConfig,
+    /// Owned durable storage configuration.
+    pub storage: StorageConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
 }
@@ -19,6 +22,17 @@ pub struct Config {
 pub struct AdminConfig {
     /// Socket address for health, metrics, and build identity routes.
     pub listen_address: SocketAddr,
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// `PostgreSQL` and content-addressed storage locations.
+pub struct StorageConfig {
+    /// Knowledge `PostgreSQL` connection URL.
+    #[serde(skip_serializing)]
+    pub database_url: String,
+    /// Knowledge-owned blob root.
+    #[serde(skip_serializing)]
+    pub blob_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +140,18 @@ fn apply_entry(config: &mut Config, key: &str, value: &str) -> Result<(), Config
             }
             config.admin.listen_address = address;
         }
+        "RATATOSKR__STORAGE__DATABASE_URL" => {
+            value
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .map_err(|_| ConfigError::new(key, "must be a PostgreSQL connection URL"))?;
+            value.clone_into(&mut config.storage.database_url);
+        }
+        "RATATOSKR__STORAGE__BLOB_ROOT" => {
+            if value.is_empty() {
+                return Err(ConfigError::new(key, "must be a non-empty path"));
+            }
+            config.storage.blob_root = PathBuf::from(value);
+        }
         "RATATOSKR__LIMITS__DATABASE_CONNECTIONS" => {
             config.limits.database_connections = parse_positive(key, value)?;
         }
@@ -170,6 +196,10 @@ impl Default for Config {
         Self {
             admin: AdminConfig {
                 listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9081),
+            },
+            storage: StorageConfig {
+                database_url: "postgres://knowledge:knowledge@127.0.0.1:5432/knowledge".to_owned(),
+                blob_root: PathBuf::from("data/blobs"),
             },
             limits: Limits {
                 database_connections: 8,

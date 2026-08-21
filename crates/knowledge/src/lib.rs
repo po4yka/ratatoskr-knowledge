@@ -21,7 +21,7 @@ pub use article::{
     validate_article_citations, validate_article_json,
 };
 pub use blob_store::{BlobError, BlobStore};
-pub use config::{AdminConfig, Config, ConfigError, Limits};
+pub use config::{AdminConfig, Config, ConfigError, Limits, StorageConfig};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };

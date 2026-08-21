@@ -8,9 +8,13 @@ repository.workspace = true
 
 [dependencies]
 axum.workspace = true
+ratatoskr-knowledge = { path = "../../crates/knowledge" }
+tokio.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+ratatoskr-knowledge = { path = "../../crates/knowledge", features = ["test-support"] }
+sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
 

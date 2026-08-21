@@ -51,7 +51,7 @@
 
 ## 5. Process and final gates
 
-- [ ] 5.1 Add failing test `services/knowledge/tests/boot.rs::configured_process_serves_admin_without_inference_credentials`; start the real binary with disposable storage, assert `check-config` does not bind, readiness arrives, only admin routes exist, and termination is bounded. Run it and confirm readiness never arrives.
-- [ ] 5.2 Wire configuration, storage, PostgreSQL, telemetry, admin listener, and joined shutdown without a public analysis endpoint; make 5.1 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 5.1 Add failing test `services/knowledge/tests/boot.rs::configured_process_serves_admin_without_inference_credentials`; start the real binary with disposable storage, assert `check-config` does not bind, readiness arrives, only admin routes exist, and termination is bounded. Run it and confirm readiness never arrives.
+- [x] 5.2 Wire configuration, storage, PostgreSQL, telemetry, admin listener, and joined shutdown without a public analysis endpoint; make 5.1 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 5.3 Update README, data model, interfaces, testing, deployment notes, and mark implementation-plan items 1 through 4 complete while replacing the obsolete migration wording with editable `schema.sql`. No test: documentation; verify every statement against built code and commit atomically on `main`.
 - [ ] 5.4 Run the exact `DEVELOPMENT.md` gate order, real PostgreSQL tests, schema and prompt-schema drift checks, `openspec validate build-first-article-analysis --strict`, source-length, dependency, forbidden-panic, secret, cross-schema, and external-request audits. Push `main` only after all checks pass and verify the remote SHA and GitHub Actions.
