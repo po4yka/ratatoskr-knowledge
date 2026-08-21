@@ -23,6 +23,9 @@ pub enum PersistenceError {
     /// Source identity or provenance is inconsistent.
     #[error("a source reference is invalid")]
     InvalidSource,
+    /// Analysis identity contains an invalid bounded version.
+    #[error("an analysis identity is invalid")]
+    InvalidAnalysisIdentity,
     /// A contract value could not be encoded for owned storage.
     #[error("a contract value could not be encoded")]
     Encode(#[source] serde_json::Error),
