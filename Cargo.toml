@@ -10,10 +10,16 @@ license = "BSD-3-Clause"
 repository = "https://github.com/po4yka/ratatoskr-knowledge"
 
 [workspace.dependencies]
+ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d56c6891ce9b4fca2c65d43205080d9a666ab5a0" }
+ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d56c6891ce9b4fca2c65d43205080d9a666ab5a0" }
+
 axum = { version = "=0.8.9", default-features = false }
 http-body-util = "=0.1.5"
+jsonschema = { version = "=0.50.0", default-features = false }
+schemars = "=1.2.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+sha2 = "=0.10.9"
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid"] }
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }

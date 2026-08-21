@@ -10,7 +10,7 @@
 - [x] 1.8 Add the finite SQLx pool, editable `schema.sql`, and disposable-database harness with no migration tooling; make 1.7 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [x] 1.9 Add failing test `crates/knowledge/tests/telemetry.rs::validation_telemetry_excludes_source_and_response_text`; record a failure containing `LEAKME` and assert only the bounded class is captured. Run it and confirm the safe event is absent or content leaks.
 - [x] 1.10 Implement one telemetry bootstrap and closed analysis fields, make 1.9 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 1.11 Add vetted exact dependencies, keep `schemars = 1.2.2`, generate and inspect `Cargo.lock`, add CI and the exact matching `DEVELOPMENT.md` command list. No test: build and policy files; verify with `cargo metadata --locked`, `cargo deny --locked check`, and the command-list drift check, then commit atomically on `main`.
+- [x] 1.11 Add vetted exact dependencies, keep `schemars = 1.2.2`, generate and inspect `Cargo.lock`, add CI and the exact matching `DEVELOPMENT.md` command list. No test: build and policy files; verify with `cargo metadata --locked`, `cargo deny --locked check`, and the command-list drift check, then commit atomically on `main`.
 
 ## 2. Source references and analysis runs
 

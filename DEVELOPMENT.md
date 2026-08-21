@@ -1,17 +1,38 @@
 # Developing Ratatoskr Knowledge
 
-> Status: Proposed  
-> Last reviewed: 2026-08-20
+> Status: Active
+> Last reviewed: 2026-08-21
 
-Architecture bootstrap: analysis workers, prompts, providers, schemas, search indices, and evaluations are not implemented.
+The first article-analysis slice uses a scripted provider and a disposable `PostgreSQL` 17 database.
+Real providers, search indices, and external message handling are not implemented.
 
-## Intended toolchain
+## Toolchain and gate
 
-Rust/Tokio, SQLx/PostgreSQL, PostgreSQL FTS and pgvector, JSON Schema validation, versioned prompt resources, provider adapters, BlobStore, tracing/OpenTelemetry, deterministic fixtures, and evaluation tooling.
+`rust-toolchain.toml` pins Rust 1.97. Every command uses the committed lock file.
+
+### Rust - the CI gate
+
+```bash
+cargo fetch --locked
+cargo deny --locked check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo test --workspace --locked --doc
+cargo build --workspace --locked --release
+```
+
+The file-size ratchet is the one check that Cargo cannot express:
+
+```bash
+git ls-files -z "*.rs" | xargs -0 -r wc -l | awk '$2 != "total" && $1 > 850 { print; bad = 1 } END { exit bad }'
+```
 
 ## Code size limits
 
-There is no code here yet, so no limit is enforced yet. The commit that brings the first manifest brings the configuration that carries the limits with it: `clippy.toml` beside a `Cargo.toml`, `eslint.config.js` beside a `package.json`. `fleet.yml` fails the gate when a manifest arrives without one, so the rule has a check behind it and not only this paragraph.
+`clippy.toml` carries the function, nesting, and signature limits. CI also rejects a tracked Rust
+source file above 850 lines.
 
 `ratatoskr-workspace/docs/QUALITY_GATES.md` holds the numbers the repositories with code use today, the command that measured each one, and the limits that were rejected with the reason. Read it before you choose numbers, then measure this tree. Each limit is set at the worst case the tree already has, so that the check fails on a regression and not on work that has not been done yet.
 
@@ -23,7 +44,8 @@ There is no code here yet, so no limit is enforced yet. The commit that brings t
 4. Add grounding/citation, injection, cost, latency, and authorization tests.
 5. Reindex or backfill through explicit versioned jobs, never hidden request-time mutation.
 
-The first scaffold PR must define exact format/lint/test/eval/migration/local-provider commands. Tests use fakes or explicitly enabled test providers; production API keys are never required for default CI.
+Default tests use the scripted provider and need no inference credentials. Database tests create
+disposable databases from the current `schema.sql`; this development repository has no migrations.
 
 ## What a clone needs before you plan a change
 
