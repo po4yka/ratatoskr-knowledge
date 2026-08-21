@@ -44,8 +44,8 @@
 - [x] 4.6 Implement the finite provider timeout and one-extra-attempt transient classifier, make 4.5 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [x] 4.7 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::one_invalid_response_repairs_once`; script invalid then valid output and assert two raw blobs, repair reason, accepted result, and completion. Run it and confirm repair is absent.
 - [x] 4.8 Implement bounded repair using validation codes and no source-policy mutation, make 4.7 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 4.9 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::second_invalid_response_fails_without_a_third_call`; script two invalid responses and assert failed state, two attempts, no output, and no third call. Run it and confirm the call budget is not enforced.
-- [ ] 4.10 Enforce the shared two-call retry-or-repair budget and permanent failure rules, make 4.9 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 4.9 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::second_invalid_response_fails_without_a_third_call`; script two invalid responses and assert failed state, two attempts, no output, and no third call. Run it and confirm the call budget is not enforced.
+- [x] 4.10 Enforce the shared two-call retry-or-repair budget and permanent failure rules, make 4.9 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 4.11 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::completed_replay_returns_one_atomic_result_without_provider_call`; replay one complete identity and assert one output, completed state, and unchanged call count. Run it and confirm another call or output occurs.
 - [ ] 4.12 Commit accepted output with the persisted transition and resume persisted runs without a provider call, make 4.11 pass, run format and Clippy, and commit this TDD pair on `main`.
 

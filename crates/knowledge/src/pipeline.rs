@@ -122,7 +122,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                 }
                 Ok(Ok(response)) => {
                     let outcome = self
-                        .process_response(run_id, attempt.ordinal, &response, context)
+                        .process_or_fail(run_id, attempt.ordinal, &response, context)
                         .await?;
                     match outcome {
                         ResponseOutcome::Accepted(article) => return Ok(article),
@@ -159,6 +159,29 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             }
         }
         Err(PersistenceError::AttemptBudgetExhausted.into())
+    }
+
+    async fn process_or_fail(
+        &self,
+        run_id: Uuid,
+        ordinal: i16,
+        response: &crate::ProviderResponse,
+        context: &PreparedContext,
+    ) -> Result<ResponseOutcome, PipelineError> {
+        match self
+            .process_response(run_id, ordinal, response, context)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(PipelineError::Blob(error)) => {
+                self.database
+                    .update_attempt_failure(run_id, ordinal, AttemptOutcome::PermanentFailure)
+                    .await?;
+                self.fail_requested_run(run_id).await?;
+                Err(error.into())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn process_response(

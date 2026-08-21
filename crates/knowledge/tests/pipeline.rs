@@ -194,6 +194,111 @@ async fn one_invalid_response_repairs_once() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+#[tokio::test]
+async fn second_invalid_response_fails_without_a_third_call()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context) = run_and_context(&database).await?;
+    let invalid = ProviderResponse {
+        bytes: br#"{"summary":"","key_points":[]}"#.to_vec(),
+        request_id: Some("request-invalid".to_owned()),
+        usage: ProviderUsage {
+            input_tokens: 20,
+            output_tokens: 4,
+        },
+    };
+    let provider = ScriptedProvider::new([
+        Ok(invalid.clone()),
+        Ok(invalid),
+        Ok(valid_response("must-not-run")),
+    ]);
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+
+    let result = pipeline
+        .execute(run_id, build_generation_request(&context)?, &context)
+        .await;
+    assert!(matches!(result, Err(PipelineError::Invalid)));
+    assert_eq!(provider.call_count()?, 2);
+    let (state, attempt_count, output_count): (String, i64, i64) = sqlx::query_as(
+        "select state,
+                (select count(*) from knowledge.analysis_attempts where run_id = $1),
+                (select count(*) from knowledge.analysis_outputs where run_id = $1)
+         from knowledge.analysis_runs where run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(state, "failed");
+    assert_eq!(attempt_count, 2);
+    assert_eq!(output_count, 0);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn permanent_failures_end_without_an_extra_call() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 1);
+
+    let (provider_run_id, provider_context) = run_and_context(&database).await?;
+    let permanent = ScriptedProvider::new([Err(ProviderError::Permanent)]);
+    let provider_pipeline = ArticlePipeline::new(
+        &database.database,
+        &permanent,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    assert!(
+        provider_pipeline
+            .execute(
+                provider_run_id,
+                build_generation_request(&provider_context)?,
+                &provider_context,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(permanent.call_count()?, 1);
+
+    let (raw_run_id, raw_context) = run_and_context(&database).await?;
+    let oversized = ScriptedProvider::new([Ok(valid_response("oversized"))]);
+    let raw_pipeline = ArticlePipeline::new(
+        &database.database,
+        &oversized,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    assert!(matches!(
+        raw_pipeline
+            .execute(
+                raw_run_id,
+                build_generation_request(&raw_context)?,
+                &raw_context,
+            )
+            .await,
+        Err(PipelineError::Blob(_))
+    ));
+    assert_eq!(oversized.call_count()?, 1);
+    let states: Vec<String> = sqlx::query_scalar(
+        "select state from knowledge.analysis_runs where run_id = any($1) order by run_id",
+    )
+    .bind(vec![provider_run_id, raw_run_id])
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(states, ["failed", "failed"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn run_and_context(
     database: &TestDatabase,
 ) -> Result<(uuid::Uuid, ratatoskr_knowledge::PreparedContext), Box<dyn std::error::Error>> {
