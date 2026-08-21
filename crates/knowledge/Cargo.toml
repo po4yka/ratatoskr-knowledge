@@ -10,6 +10,8 @@ repository.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [features]

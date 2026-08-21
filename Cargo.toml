@@ -18,6 +18,8 @@ sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-toki
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "=0.5.3", features = ["util"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "registry"] }
 uuid = { version = "=1.24.1", features = ["v7"] }
 
 [workspace.lints.rust]

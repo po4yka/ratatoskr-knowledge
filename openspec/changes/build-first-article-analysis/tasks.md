@@ -8,8 +8,8 @@
 - [x] 1.6 Implement the admin router and atomic lifecycle state, make 1.5 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [x] 1.7 Add failing real-PostgreSQL test `crates/knowledge/tests/schema.rs::owned_schema_applies_twice_without_cross_schema_objects`; assert the four planned tables, constraints, and idempotent second apply on PostgreSQL 17. Run it and confirm the schema is absent.
 - [x] 1.8 Add the finite SQLx pool, editable `schema.sql`, and disposable-database harness with no migration tooling; make 1.7 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 1.9 Add failing test `crates/knowledge/tests/telemetry.rs::validation_telemetry_excludes_source_and_response_text`; record a failure containing `LEAKME` and assert only the bounded class is captured. Run it and confirm the safe event is absent or content leaks.
-- [ ] 1.10 Implement one telemetry bootstrap and closed analysis fields, make 1.9 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 1.9 Add failing test `crates/knowledge/tests/telemetry.rs::validation_telemetry_excludes_source_and_response_text`; record a failure containing `LEAKME` and assert only the bounded class is captured. Run it and confirm the safe event is absent or content leaks.
+- [x] 1.10 Implement one telemetry bootstrap and closed analysis fields, make 1.9 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 1.11 Add vetted exact dependencies, keep `schemars = 1.2.2`, generate and inspect `Cargo.lock`, add CI and the exact matching `DEVELOPMENT.md` command list. No test: build and policy files; verify with `cargo metadata --locked`, `cargo deny --locked check`, and the command-list drift check, then commit atomically on `main`.
 
 ## 2. Source references and analysis runs
