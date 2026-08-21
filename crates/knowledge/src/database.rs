@@ -20,6 +20,12 @@ pub enum PersistenceError {
     /// A Knowledge-owned query failed.
     #[error("a knowledge database query failed")]
     Query(#[source] sqlx::Error),
+    /// Source identity or provenance is inconsistent.
+    #[error("a source reference is invalid")]
+    InvalidSource,
+    /// A contract value could not be encoded for owned storage.
+    #[error("a contract value could not be encoded")]
+    Encode(#[source] serde_json::Error),
 }
 
 /// One finite database pool owned by Knowledge.
