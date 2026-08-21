@@ -133,6 +133,67 @@ async fn one_transient_failure_retries_once() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+#[tokio::test]
+async fn one_invalid_response_repairs_once() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context) = run_and_context(&database).await?;
+    let provider = ScriptedProvider::new([
+        Ok(ProviderResponse {
+            bytes: br#"{"summary":"","key_points":[]}"#.to_vec(),
+            request_id: Some("request-invalid".to_owned()),
+            usage: ProviderUsage {
+                input_tokens: 20,
+                output_tokens: 4,
+            },
+        }),
+        Ok(valid_response("request-repair")),
+    ]);
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+
+    let result = pipeline
+        .execute(run_id, build_generation_request(&context)?, &context)
+        .await?;
+    assert_eq!(result.summary, "A grounded summary.");
+    let attempts: Vec<(i16, String, serde_json::Value, String)> = sqlx::query_as(
+        "select ordinal, reason, raw_response, outcome
+         from knowledge.analysis_attempts where run_id = $1 order by ordinal",
+    )
+    .bind(run_id)
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].1, "initial");
+    assert_eq!(attempts[1].1, "repair");
+    assert_ne!(attempts[0].2, attempts[1].2);
+    assert_eq!(attempts[0].3, "invalid");
+    assert_eq!(attempts[1].3, "accepted");
+
+    let requests = provider.requests()?;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].system_policy, requests[1].system_policy);
+    assert_eq!(requests[0].source_content, requests[1].source_content);
+    assert!(
+        requests[1]
+            .task_instruction
+            .contains("Repair validation code: schema.")
+    );
+    let output_count: i64 =
+        sqlx::query_scalar("select count(*) from knowledge.analysis_outputs where run_id = $1")
+            .bind(run_id)
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(output_count, 1);
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn run_and_context(
     database: &TestDatabase,
 ) -> Result<(uuid::Uuid, ratatoskr_knowledge::PreparedContext), Box<dyn std::error::Error>> {

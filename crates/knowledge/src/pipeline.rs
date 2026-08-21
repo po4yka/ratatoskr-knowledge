@@ -37,6 +37,11 @@ pub struct ArticlePipeline<'a, P> {
     provider_timeout: std::time::Duration,
 }
 
+enum ResponseOutcome {
+    Accepted(ArticleAnalysis),
+    Invalid(&'static str),
+}
+
 impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
     /// Creates the finite first-slice pipeline.
     #[must_use]
@@ -62,7 +67,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
     pub async fn execute(
         &self,
         run_id: Uuid,
-        request: GenerationRequest,
+        mut request: GenerationRequest,
         context: &PreparedContext,
     ) -> Result<ArticleAnalysis, PipelineError> {
         self.database
@@ -116,9 +121,40 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                     }
                 }
                 Ok(Ok(response)) => {
-                    return self
+                    let outcome = self
                         .process_response(run_id, attempt.ordinal, &response, context)
-                        .await;
+                        .await?;
+                    match outcome {
+                        ResponseOutcome::Accepted(article) => return Ok(article),
+                        ResponseOutcome::Invalid(code) if call == 0 => {
+                            self.database
+                                .transition_run(
+                                    run_id,
+                                    RunState::ResponseReceived,
+                                    RunState::Repaired,
+                                )
+                                .await?;
+                            self.database
+                                .transition_run(
+                                    run_id,
+                                    RunState::Repaired,
+                                    RunState::ModelRequested,
+                                )
+                                .await?;
+                            request = repair_request(&request, code);
+                            reason = AttemptReason::Repair;
+                        }
+                        ResponseOutcome::Invalid(_) => {
+                            self.database
+                                .transition_run(
+                                    run_id,
+                                    RunState::ResponseReceived,
+                                    RunState::Failed,
+                                )
+                                .await?;
+                            return Err(PipelineError::Invalid);
+                        }
+                    }
                 }
             }
         }
@@ -131,7 +167,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         ordinal: i16,
         response: &crate::ProviderResponse,
         context: &PreparedContext,
-    ) -> Result<ArticleAnalysis, PipelineError> {
+    ) -> Result<ResponseOutcome, PipelineError> {
         let reference = self.blobs.store_raw(&response.bytes).await?;
         self.database
             .update_attempt(
@@ -152,10 +188,10 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             .await?;
 
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&response.bytes) else {
-            self.reject(run_id, ordinal, &reference, response, "json_syntax")
+            self.mark_invalid(run_id, ordinal, &reference, response, "json_syntax")
                 .await?;
             record_validation_failure(ValidationClass::JsonSyntax, "", "");
-            return Err(PipelineError::Invalid);
+            return Ok(ResponseOutcome::Invalid("json_syntax"));
         };
         let article = match crate::validate_article_json(&value).and_then(|article| {
             crate::validate_article_citations(&article, context)?;
@@ -164,9 +200,10 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             Ok(article) => article,
             Err(error) => {
                 let code = validation_code(error);
-                self.reject(run_id, ordinal, &reference, response, code)
+                self.mark_invalid(run_id, ordinal, &reference, response, code)
                     .await?;
-                return Err(PipelineError::Invalid);
+                record_validation_failure(validation_class(error), "", "");
+                return Ok(ResponseOutcome::Invalid(code));
             }
         };
         self.database
@@ -194,10 +231,10 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         self.database
             .transition_run(run_id, RunState::Persisted, RunState::Completed)
             .await?;
-        Ok(article)
+        Ok(ResponseOutcome::Accepted(article))
     }
 
-    async fn reject(
+    async fn mark_invalid(
         &self,
         run_id: Uuid,
         ordinal: i16,
@@ -218,9 +255,6 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                     validation_code: Some(code),
                 },
             )
-            .await?;
-        self.database
-            .transition_run(run_id, RunState::ResponseReceived, RunState::Failed)
             .await?;
         Ok(())
     }
@@ -287,10 +321,29 @@ fn attempt_input(reason: AttemptReason) -> AttemptInput {
     }
 }
 
+fn repair_request(request: &GenerationRequest, code: &str) -> GenerationRequest {
+    let mut repaired = request.clone();
+    repaired
+        .task_instruction
+        .push_str("\nRepair validation code: ");
+    repaired.task_instruction.push_str(code);
+    repaired.task_instruction.push('.');
+    repaired
+}
+
 const fn validation_code(error: ArticleValidationError) -> &'static str {
     match error {
         ArticleValidationError::SchemaDefinition | ArticleValidationError::Structural => "schema",
         ArticleValidationError::Decode => "decode",
         ArticleValidationError::Citation => "citation",
+    }
+}
+
+const fn validation_class(error: ArticleValidationError) -> ValidationClass {
+    match error {
+        ArticleValidationError::Citation => ValidationClass::Citation,
+        ArticleValidationError::SchemaDefinition
+        | ArticleValidationError::Structural
+        | ArticleValidationError::Decode => ValidationClass::Schema,
     }
 }
