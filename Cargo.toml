@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/knowledge", "services/knowledge"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "BSD-3-Clause"
+repository = "https://github.com/po4yka/ratatoskr-knowledge"
+
+[workspace.dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+
+[profile.release]
+debug = 1
