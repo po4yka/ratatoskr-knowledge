@@ -5,7 +5,7 @@ use ratatoskr_identifiers::{
     TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
-use ratatoskr_knowledge::{AnalysisIdentity, SourceReference};
+use ratatoskr_knowledge::{AnalysisIdentity, RunState, SourceReference};
 
 #[tokio::test]
 async fn changed_source_digest_creates_an_immutable_revision()
@@ -67,6 +67,56 @@ async fn complete_analysis_identity_is_idempotent() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[tokio::test]
+async fn terminal_state_cannot_regress() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let source = database
+        .database
+        .register_source(&source(
+            TenantRef::of_user(UserId::new_v7()),
+            DocumentId::new_v7(),
+            'd',
+        )?)
+        .await?;
+    let legal = [
+        (RunState::Queued, RunState::ContextPrepared),
+        (RunState::ContextPrepared, RunState::ModelRequested),
+        (RunState::ModelRequested, RunState::ResponseReceived),
+        (RunState::ResponseReceived, RunState::SchemaValidated),
+        (RunState::ResponseReceived, RunState::Repaired),
+        (RunState::Repaired, RunState::ModelRequested),
+        (RunState::SchemaValidated, RunState::Persisted),
+        (RunState::Persisted, RunState::Completed),
+        (RunState::Queued, RunState::Failed),
+        (RunState::ContextPrepared, RunState::Failed),
+        (RunState::ModelRequested, RunState::Failed),
+        (RunState::ResponseReceived, RunState::Failed),
+        (RunState::Repaired, RunState::Failed),
+        (RunState::SchemaValidated, RunState::Failed),
+    ];
+    let illegal = [
+        (RunState::Queued, RunState::Completed),
+        (RunState::ContextPrepared, RunState::Persisted),
+        (RunState::Completed, RunState::Queued),
+        (RunState::Failed, RunState::ModelRequested),
+    ];
+
+    for (ordinal, &(from, to)) in legal.iter().chain(&illegal).enumerate() {
+        let identity = identity(source.id, format!("policy_{ordinal}"));
+        let run = database.database.create_run(&identity).await?;
+        sqlx::query("update knowledge.analysis_runs set state = $2 where run_id = $1")
+            .bind(run.id)
+            .bind(from.as_str())
+            .execute(database.database.pool())
+            .await?;
+        let changed = database.database.transition_run(run.id, from, to).await?;
+        assert_eq!(changed, ordinal < legal.len(), "{from:?} -> {to:?}");
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 fn source(
     tenant: TenantRef,
     document_id: DocumentId,
@@ -88,4 +138,14 @@ fn source(
             length_bytes: 128,
         },
     })
+}
+
+fn identity(source_revision_id: uuid::Uuid, model_policy: String) -> AnalysisIdentity {
+    AnalysisIdentity {
+        source_revision_id,
+        contract_version: "article_v1".to_owned(),
+        prompt_version: "article_prompt_v1".to_owned(),
+        context_builder_version: "document_context_v1".to_owned(),
+        model_policy,
+    }
 }

@@ -49,7 +49,76 @@ pub struct AnalysisRun {
     pub id: Uuid,
 }
 
+/// Persisted monotonic analysis state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    /// The complete identity was accepted.
+    Queued,
+    /// Deterministic source context was prepared.
+    ContextPrepared,
+    /// A provider request was started.
+    ModelRequested,
+    /// Raw response bytes were stored.
+    ResponseReceived,
+    /// Structural and semantic validation passed.
+    SchemaValidated,
+    /// One repair call was authorized.
+    Repaired,
+    /// Accepted output was committed.
+    Persisted,
+    /// The run reached successful terminal state.
+    Completed,
+    /// The run reached failed terminal state.
+    Failed,
+}
+
+impl RunState {
+    /// Returns the stable database spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::ContextPrepared => "context_prepared",
+            Self::ModelRequested => "model_requested",
+            Self::ResponseReceived => "response_received",
+            Self::SchemaValidated => "schema_validated",
+            Self::Repaired => "repaired",
+            Self::Persisted => "persisted",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 impl Database {
+    /// Applies one expected-state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PersistenceError`] when the update fails.
+    pub async fn transition_run(
+        &self,
+        run_id: Uuid,
+        expected: RunState,
+        next: RunState,
+    ) -> Result<bool, PersistenceError> {
+        if !legal_transition(expected, next) {
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "update knowledge.analysis_runs
+             set state = $3, updated_at = now()
+             where run_id = $1 and state = $2",
+        )
+        .bind(run_id)
+        .bind(expected.as_str())
+        .bind(next.as_str())
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Returns the existing run for a complete identity or creates it once.
     ///
     /// # Errors
@@ -151,4 +220,26 @@ fn validate_version(value: &str) -> Result<(), PersistenceError> {
     } else {
         Err(PersistenceError::InvalidAnalysisIdentity)
     }
+}
+
+const fn legal_transition(from: RunState, to: RunState) -> bool {
+    matches!(
+        (from, to),
+        (
+            RunState::Queued,
+            RunState::ContextPrepared | RunState::Failed
+        ) | (
+            RunState::ContextPrepared | RunState::Repaired,
+            RunState::ModelRequested | RunState::Failed
+        ) | (
+            RunState::ModelRequested,
+            RunState::ResponseReceived | RunState::Failed
+        ) | (
+            RunState::ResponseReceived,
+            RunState::SchemaValidated | RunState::Repaired | RunState::Failed
+        ) | (
+            RunState::SchemaValidated,
+            RunState::Persisted | RunState::Failed
+        ) | (RunState::Persisted, RunState::Completed)
+    )
 }
