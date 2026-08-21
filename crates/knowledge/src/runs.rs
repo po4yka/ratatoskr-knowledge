@@ -5,6 +5,15 @@ use uuid::Uuid;
 
 use crate::{Database, PersistenceError};
 
+pub(crate) struct AttemptUpdate<'a> {
+    pub raw_response: &'a BlobRef,
+    pub request_id: Option<&'a str>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub outcome: AttemptOutcome,
+    pub validation_code: Option<&'a str>,
+}
+
 /// Immutable source evidence presented to Knowledge.
 #[derive(Debug, Clone)]
 pub struct SourceReference {
@@ -164,6 +173,43 @@ impl AttemptOutcome {
 }
 
 impl Database {
+    pub(crate) async fn update_attempt(
+        &self,
+        run_id: Uuid,
+        ordinal: i16,
+        update: &AttemptUpdate<'_>,
+    ) -> Result<(), PersistenceError> {
+        let raw_response =
+            serde_json::to_value(update.raw_response).map_err(PersistenceError::Encode)?;
+        let input_tokens =
+            i64::try_from(update.input_tokens).map_err(|_| PersistenceError::ValueOverflow)?;
+        let output_tokens =
+            i64::try_from(update.output_tokens).map_err(|_| PersistenceError::ValueOverflow)?;
+        let result = sqlx::query(
+            "update knowledge.analysis_attempts
+             set provider_request_id = $3, raw_response = $4,
+                 input_tokens = $5, output_tokens = $6,
+                 outcome = $7, validation_code = $8
+             where run_id = $1 and ordinal = $2",
+        )
+        .bind(run_id)
+        .bind(ordinal)
+        .bind(update.request_id)
+        .bind(raw_response)
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(update.outcome.as_str())
+        .bind(update.validation_code)
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PersistenceError::InvalidAnalysisIdentity)
+        }
+    }
+
     /// Persists the next attempt ordinal and its safe metadata.
     ///
     /// # Errors

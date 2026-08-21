@@ -29,6 +29,9 @@ pub enum PersistenceError {
     /// The shared two-call budget is exhausted.
     #[error("the provider call budget is exhausted")]
     AttemptBudgetExhausted,
+    /// A numeric value cannot fit its database representation.
+    #[error("an analysis value exceeds its database representation")]
+    ValueOverflow,
     /// A contract value could not be encoded for owned storage.
     #[error("a contract value could not be encoded")]
     Encode(#[source] serde_json::Error),

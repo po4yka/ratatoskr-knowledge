@@ -6,6 +6,12 @@ use uuid::Uuid;
 
 use crate::{Database, PersistenceError};
 
+/// Temporary Knowledge-owned blob root.
+#[derive(Debug)]
+pub struct TemporaryBlobRoot {
+    path: std::path::PathBuf,
+}
+
 /// An isolated disposable Knowledge database.
 #[derive(Debug)]
 pub struct TestDatabase {
@@ -66,6 +72,31 @@ impl TestDatabase {
             .map_err(PersistenceError::Query)?;
         admin.close().await;
         Ok(())
+    }
+}
+
+impl TemporaryBlobRoot {
+    /// Creates a unique empty blob root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the root cannot be created.
+    pub async fn create() -> Result<Self, std::io::Error> {
+        let path = std::env::temp_dir().join(format!("ratatoskr-knowledge-{}", Uuid::now_v7()));
+        tokio::fs::create_dir_all(&path).await?;
+        Ok(Self { path })
+    }
+
+    /// Returns the root path.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryBlobRoot {
+    fn drop(&mut self) {
+        let _ignored = std::fs::remove_dir_all(&self.path);
     }
 }
 
