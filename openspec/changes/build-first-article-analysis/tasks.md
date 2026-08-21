@@ -25,8 +25,8 @@
 
 ## 3. Article contract and context
 
-- [ ] 3.1 Add failing test `crates/knowledge/tests/article.rs::schema_rejects_unknown_and_out_of_bounds_fields`; table unknown fields, empty and oversized summaries, key-point counts, text lengths, and citation counts. Run it and confirm at least one invalid value is accepted.
-- [ ] 3.2 Implement the strict typed article result, exact `schemars 1.2.2` schema generation, schema-first validation, and value limits; make 3.1 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 3.1 Add failing test `crates/knowledge/tests/article.rs::schema_rejects_unknown_and_out_of_bounds_fields`; table unknown fields, empty and oversized summaries, key-point counts, text lengths, and citation counts. Run it and confirm at least one invalid value is accepted.
+- [x] 3.2 Implement the strict typed article result, exact `schemars 1.2.2` schema generation, schema-first validation, and value limits; make 3.1 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 3.3 Add failing test `crates/knowledge/tests/article.rs::citations_must_name_supplied_unique_blocks`; assert missing, duplicate, and omitted block indexes fail after structural validation. Run it and confirm an invalid citation passes.
 - [ ] 3.4 Implement semantic citation validation against the exact prepared context, make 3.3 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 3.5 Add failing test `crates/knowledge/tests/context.rs::builder_is_deterministic_and_omits_only_complete_tail_blocks`; build twice under a small budget and assert byte equality, ordered included indexes, complete omitted indexes, and no partial block text. Run it and confirm the builder is absent.

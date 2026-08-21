@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "KeyPoint": {
+      "additionalProperties": false,
+      "description": "One source-grounded article key point.",
+      "properties": {
+        "source_block_indexes": {
+          "description": "Unique zero-based indexes into the supplied Document IR blocks.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "text": {
+          "description": "Human-readable key point text.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "source_block_indexes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Strict version-one article analysis.",
+  "properties": {
+    "key_points": {
+      "description": "Ordered source-grounded key points.",
+      "items": {
+        "$ref": "#/$defs/KeyPoint"
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+    },
+    "summary": {
+      "description": "Human-readable source-grounded summary.",
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary",
+    "key_points"
+  ],
+  "title": "ArticleAnalysis",
+  "type": "object"
+}

@@ -3,6 +3,7 @@
 
 //! Durable first-slice article analysis for Ratatoskr Knowledge.
 
+mod article;
 mod config;
 mod database;
 mod runs;
@@ -11,6 +12,10 @@ mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+pub use article::{
+    ArticleAnalysis, ArticleValidationError, KeyPoint, article_analysis_schema,
+    validate_article_json,
+};
 pub use config::{AdminConfig, Config, ConfigError, Limits};
 pub use database::{Database, PersistenceError};
 pub use runs::{
