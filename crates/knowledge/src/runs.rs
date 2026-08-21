@@ -72,6 +72,56 @@ pub enum RunState {
     Failed,
 }
 
+/// Why one provider attempt exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptReason {
+    /// First provider request.
+    Initial,
+    /// One retry after a transient failure.
+    Retry,
+    /// One repair after invalid output.
+    Repair,
+}
+
+/// Safe durable outcome of one provider attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptOutcome {
+    /// The request started and has no response yet.
+    Requested,
+    /// A retryable provider failure occurred.
+    TransientFailure,
+    /// A permanent provider failure occurred.
+    PermanentFailure,
+    /// Raw response bytes were stored.
+    ResponseReceived,
+    /// Stored response failed validation.
+    Invalid,
+    /// Stored response was accepted.
+    Accepted,
+}
+
+/// Safe metadata persisted for one provider call.
+#[derive(Debug, Clone)]
+pub struct AttemptInput {
+    /// Why this call was made.
+    pub reason: AttemptReason,
+    /// Provider adapter identity.
+    pub provider: String,
+    /// Provider-neutral model policy identity.
+    pub model_policy: String,
+    /// Provider request identity when received.
+    pub provider_request_id: Option<String>,
+    /// Safe attempt outcome.
+    pub outcome: AttemptOutcome,
+}
+
+/// Stored provider-attempt identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attempt {
+    /// One-based ordinal unique within the run.
+    pub ordinal: i16,
+}
+
 impl RunState {
     /// Returns the stable database spelling.
     #[must_use]
@@ -90,7 +140,98 @@ impl RunState {
     }
 }
 
+impl AttemptReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Retry => "retry",
+            Self::Repair => "repair",
+        }
+    }
+}
+
+impl AttemptOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::TransientFailure => "transient_failure",
+            Self::PermanentFailure => "permanent_failure",
+            Self::ResponseReceived => "response_received",
+            Self::Invalid => "invalid",
+            Self::Accepted => "accepted",
+        }
+    }
+}
+
 impl Database {
+    /// Persists the next attempt ordinal and its safe metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PersistenceError`] when validation or persistence fails.
+    pub async fn record_attempt(
+        &self,
+        run_id: Uuid,
+        input: &AttemptInput,
+    ) -> Result<Attempt, PersistenceError> {
+        validate_version(&input.provider)?;
+        validate_version(&input.model_policy)?;
+        if input
+            .provider_request_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 128)
+        {
+            return Err(PersistenceError::InvalidAnalysisIdentity);
+        }
+
+        let mut transaction = self.pool().begin().await.map_err(PersistenceError::Query)?;
+        let present = sqlx::query_scalar::<_, Uuid>(
+            "select run_id from knowledge.analysis_runs where run_id = $1 for update",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        if present.is_none() {
+            return Err(PersistenceError::InvalidAnalysisIdentity);
+        }
+        let previous: i16 = sqlx::query_scalar(
+            "select coalesce(max(ordinal), 0)::smallint
+             from knowledge.analysis_attempts where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        let ordinal = previous
+            .checked_add(1)
+            .ok_or(PersistenceError::AttemptBudgetExhausted)?;
+        if ordinal > 2 {
+            return Err(PersistenceError::AttemptBudgetExhausted);
+        }
+        sqlx::query(
+            "insert into knowledge.analysis_attempts (
+                run_id, ordinal, reason, provider, model_policy,
+                provider_request_id, outcome
+             ) values ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(run_id)
+        .bind(ordinal)
+        .bind(input.reason.as_str())
+        .bind(&input.provider)
+        .bind(&input.model_policy)
+        .bind(&input.provider_request_id)
+        .bind(input.outcome.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        transaction
+            .commit()
+            .await
+            .map_err(PersistenceError::Query)?;
+        Ok(Attempt { ordinal })
+    }
+
     /// Applies one expected-state transition.
     ///
     /// # Errors

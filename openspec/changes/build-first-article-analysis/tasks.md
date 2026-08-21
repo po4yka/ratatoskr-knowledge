@@ -20,8 +20,8 @@
 - [x] 2.4 Implement the natural run key and idempotent creation, make 2.3 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [x] 2.5 Add failing PostgreSQL test `crates/knowledge/tests/runs.rs::terminal_state_cannot_regress`; table every legal transition and assert illegal skips and completed-to-active transitions affect no row. Run it and confirm state can regress.
 - [x] 2.6 Implement typed states and expected-state SQL transitions, make 2.5 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 2.7 Add failing PostgreSQL test `crates/knowledge/tests/runs.rs::attempt_ordinals_and_reasons_are_durable`; record initial and repair attempts and assert increasing unique ordinals plus safe metadata. Run it and confirm attempts cannot be stored.
-- [ ] 2.8 Implement attempt persistence and bounded vocabularies, make 2.7 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 2.7 Add failing PostgreSQL test `crates/knowledge/tests/runs.rs::attempt_ordinals_and_reasons_are_durable`; record initial and repair attempts and assert increasing unique ordinals plus safe metadata. Run it and confirm attempts cannot be stored.
+- [x] 2.8 Implement attempt persistence and bounded vocabularies, make 2.7 pass, run format and Clippy, and commit this TDD pair on `main`.
 
 ## 3. Article contract and context
 

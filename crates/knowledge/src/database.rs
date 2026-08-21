@@ -26,6 +26,9 @@ pub enum PersistenceError {
     /// Analysis identity contains an invalid bounded version.
     #[error("an analysis identity is invalid")]
     InvalidAnalysisIdentity,
+    /// The shared two-call budget is exhausted.
+    #[error("the provider call budget is exhausted")]
+    AttemptBudgetExhausted,
     /// A contract value could not be encoded for owned storage.
     #[error("a contract value could not be encoded")]
     Encode(#[source] serde_json::Error),

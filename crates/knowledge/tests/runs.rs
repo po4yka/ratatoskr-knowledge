@@ -5,7 +5,9 @@ use ratatoskr_identifiers::{
     TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
-use ratatoskr_knowledge::{AnalysisIdentity, RunState, SourceReference};
+use ratatoskr_knowledge::{
+    AnalysisIdentity, AttemptInput, AttemptOutcome, AttemptReason, RunState, SourceReference,
+};
 
 #[tokio::test]
 async fn changed_source_digest_creates_an_immutable_revision()
@@ -117,6 +119,60 @@ async fn terminal_state_cannot_regress() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+#[tokio::test]
+async fn attempt_ordinals_and_reasons_are_durable() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let source = database
+        .database
+        .register_source(&source(
+            TenantRef::of_user(UserId::new_v7()),
+            DocumentId::new_v7(),
+            'e',
+        )?)
+        .await?;
+    let run = database
+        .database
+        .create_run(&identity(source.id, "attempt_policy".to_owned()))
+        .await?;
+
+    let first = database
+        .database
+        .record_attempt(run.id, &attempt(AttemptReason::Initial, "request-1"))
+        .await?;
+    let repair = database
+        .database
+        .record_attempt(run.id, &attempt(AttemptReason::Repair, "request-2"))
+        .await?;
+    assert_eq!((first.ordinal, repair.ordinal), (1, 2));
+
+    let rows: Vec<(i16, String, String, String)> = sqlx::query_as(
+        "select ordinal, reason, provider, provider_request_id
+         from knowledge.analysis_attempts where run_id = $1 order by ordinal",
+    )
+    .bind(run.id)
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(
+        rows,
+        [
+            (
+                1,
+                "initial".to_owned(),
+                "fake".to_owned(),
+                "request-1".to_owned()
+            ),
+            (
+                2,
+                "repair".to_owned(),
+                "fake".to_owned(),
+                "request-2".to_owned()
+            )
+        ]
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 fn source(
     tenant: TenantRef,
     document_id: DocumentId,
@@ -147,5 +203,15 @@ fn identity(source_revision_id: uuid::Uuid, model_policy: String) -> AnalysisIde
         prompt_version: "article_prompt_v1".to_owned(),
         context_builder_version: "document_context_v1".to_owned(),
         model_policy,
+    }
+}
+
+fn attempt(reason: AttemptReason, request_id: &str) -> AttemptInput {
+    AttemptInput {
+        reason,
+        provider: "fake".to_owned(),
+        model_policy: "attempt_policy".to_owned(),
+        provider_request_id: Some(request_id.to_owned()),
+        outcome: AttemptOutcome::Requested,
     }
 }

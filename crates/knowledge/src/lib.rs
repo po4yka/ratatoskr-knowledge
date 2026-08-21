@@ -13,5 +13,8 @@ pub mod test_support;
 
 pub use config::{AdminConfig, Config, ConfigError, Limits};
 pub use database::{Database, PersistenceError};
-pub use runs::{AnalysisIdentity, AnalysisRun, RunState, SourceReference, SourceRevision};
+pub use runs::{
+    AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
+    SourceReference, SourceRevision,
+};
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};
