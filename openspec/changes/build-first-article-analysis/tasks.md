@@ -2,8 +2,8 @@
 
 - [x] 1.1 Add failing test `crates/knowledge/tests/config.rs::defaults_are_finite_and_security_cannot_be_disabled`; assert loopback admin, finite database/provider/context/raw-response/shutdown/blob limits, and no policy-disable field. Run it and confirm the scaffold defaults do not satisfy the assertions.
 - [x] 1.2 Create the two-package Rust workspace, strict lint/toolchain files, typed defaults, and crate safety attributes; make 1.1 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 1.3 Add failing test `crates/knowledge/tests/config.rs::invalid_environment_is_reported_without_its_value`; use an unknown key and a wrong value containing `LEAKME`, and assert both fail while no diagnostic contains `LEAKME`. Run it and confirm one value is accepted or exposed.
-- [ ] 1.4 Implement the strict `RATATOSKR__` loader and semantic validation, make 1.3 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 1.3 Add failing test `crates/knowledge/tests/config.rs::invalid_environment_is_reported_without_its_value`; use an unknown key and a wrong value containing `LEAKME`, and assert both fail while no diagnostic contains `LEAKME`. Run it and confirm one value is accepted or exposed.
+- [x] 1.4 Implement the strict `RATATOSKR__` loader and semantic validation, make 1.3 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 1.5 Add failing test `services/knowledge/tests/admin.rs::readiness_follows_storage_startup_and_drain`; assert liveness stays 200, readiness is 503/200/503, metrics and version respond, and all responses use `Cache-Control: no-store`. Run it and confirm the scaffold routes fail.
 - [ ] 1.6 Implement the admin router and atomic lifecycle state, make 1.5 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 1.7 Add failing real-PostgreSQL test `crates/knowledge/tests/schema.rs::owned_schema_applies_twice_without_cross_schema_objects`; assert the four planned tables, constraints, and idempotent second apply on PostgreSQL 17. Run it and confirm the schema is absent.

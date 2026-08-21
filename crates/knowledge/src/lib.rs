@@ -5,4 +5,4 @@
 
 mod config;
 
-pub use config::{AdminConfig, Config, Limits};
+pub use config::{AdminConfig, Config, ConfigError, Limits};

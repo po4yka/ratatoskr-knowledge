@@ -20,3 +20,17 @@ fn defaults_are_finite_and_security_cannot_be_disabled() -> Result<(), serde_jso
     assert!(!encoded.contains("disable"));
     Ok(())
 }
+
+#[test]
+fn invalid_environment_is_reported_without_its_value() {
+    let unknown = Config::from_environment([("RATATOSKR__LIMITS__MYSTERY", "LEAKME")]);
+    let wrong = Config::from_environment([("RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS", "LEAKME")]);
+
+    let unknown_diagnostic = unknown.expect_err("unknown key must fail").to_string();
+    let wrong_diagnostic = wrong.expect_err("invalid value must fail").to_string();
+
+    assert!(unknown_diagnostic.contains("RATATOSKR__LIMITS__MYSTERY"));
+    assert!(wrong_diagnostic.contains("RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS"));
+    assert!(!unknown_diagnostic.contains("LEAKME"));
+    assert!(!wrong_diagnostic.contains("LEAKME"));
+}
