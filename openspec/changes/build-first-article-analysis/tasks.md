@@ -36,8 +36,8 @@
 
 ## 4. Fake-provider pipeline
 
-- [ ] 4.1 Add failing test `crates/knowledge/tests/provider.rs::fake_provider_consumes_scripts_and_records_requests`; script two outcomes and assert ordered responses and captured bounded requests. Run it and confirm no fake boundary exists.
-- [ ] 4.2 Implement the narrow provider trait and hand-written scripted fake without a mocking crate, make 4.1 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 4.1 Add failing test `crates/knowledge/tests/provider.rs::fake_provider_consumes_scripts_and_records_requests`; script two outcomes and assert ordered responses and captured bounded requests. Run it and confirm no fake boundary exists.
+- [x] 4.2 Implement the narrow provider trait and hand-written scripted fake without a mocking crate, make 4.1 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 4.3 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::malformed_response_is_stored_before_json_validation`; return malformed JSON and assert a Knowledge-owned digest-matching `BlobRef` and validation outcome exist while telemetry contains no raw text. Run it and confirm no blob is stored.
 - [ ] 4.4 Implement bounded content-addressed raw-response storage and attempt linkage before parsing, make 4.3 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [ ] 4.5 Add failing PostgreSQL test `crates/knowledge/tests/pipeline.rs::one_transient_failure_retries_once`; script transient failure then valid output and assert exactly two attempts and completion. Run it and confirm retry is absent.

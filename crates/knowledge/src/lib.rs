@@ -7,6 +7,7 @@ mod article;
 mod config;
 mod context;
 mod database;
+mod provider;
 mod runs;
 mod telemetry;
 
@@ -22,6 +23,7 @@ pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
 pub use database::{Database, PersistenceError};
+pub use provider::{LlmProvider, ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider};
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,
