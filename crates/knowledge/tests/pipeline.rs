@@ -1,6 +1,6 @@
 //! Durable fake-provider pipeline tests.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, Once};
 
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
 use ratatoskr_identifiers::{
@@ -13,6 +13,9 @@ use ratatoskr_knowledge::{
     ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider, SourceReference,
     build_generation_request, prepare_context,
 };
+
+static TELEMETRY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static TELEMETRY_INIT: Once = Once::new();
 
 #[tokio::test(flavor = "current_thread")]
 async fn malformed_response_is_stored_before_json_validation()
@@ -35,13 +38,14 @@ async fn malformed_response_is_stored_before_json_validation()
         &blobs,
         std::time::Duration::from_secs(1),
     );
-    let telemetry = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_writer(SharedWriter(Arc::clone(&telemetry)))
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
+    TELEMETRY_INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(SharedWriter(&TELEMETRY))
+            .finish();
+        let _ignored = tracing::subscriber::set_global_default(subscriber);
+    });
+    TELEMETRY.lock().map_err(lock_error)?.clear();
     assert!(
         pipeline
             .execute(run_id, build_generation_request(&context)?, &context)
@@ -59,7 +63,7 @@ async fn malformed_response_is_stored_before_json_validation()
     assert_eq!(reference.owner_service.as_str(), "ratatoskr-knowledge");
     assert_eq!(row.1.as_deref(), Some("json_syntax"));
     assert_eq!(blobs.read(&reference).await?, b"{malformed LEAKME");
-    let captured = String::from_utf8(telemetry.lock().map_err(lock_error)?.clone())?;
+    let captured = String::from_utf8(TELEMETRY.lock().map_err(lock_error)?.clone())?;
     assert!(captured.contains("json_syntax"));
     assert!(!captured.contains("LEAKME"));
 
@@ -404,7 +408,7 @@ fn valid_response(request_id: &str) -> ProviderResponse {
 }
 
 #[derive(Debug, Clone)]
-struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+struct SharedWriter(&'static Mutex<Vec<u8>>);
 
 impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for SharedWriter {
     type Writer = Self;
