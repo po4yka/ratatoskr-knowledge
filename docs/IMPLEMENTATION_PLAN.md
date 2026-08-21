@@ -1,14 +1,20 @@
 # Knowledge implementation plan
 
-1. Scaffold Rust service, config, telemetry, errors, health, and `knowledge` migrations.
-2. Implement source references and explicit analysis-run state machine.
-3. Define first article-analysis contract with versioned prompt/context builder.
-4. Add fake provider, structured validation, attempts, bounded retry/repair, and protected raw output.
-5. Add one real provider adapter behind policy/budget controls.
-6. Implement PostgreSQL FTS and authorization-aware search documents.
-7. Add pgvector embeddings, chunk/model versioning, and hybrid ranking.
-8. Add citations, evaluation harness, privacy deletion, and reindex jobs.
-9. Add repository/social/AI archive analysis families incrementally.
-10. Backfill legacy summaries and compare quality/cost before cutover.
+- [x] 1. Scaffold the Rust service, finite config, telemetry, errors, health routes, and editable
+  `schema.sql`.
+- [x] 2. Implement immutable source references and the explicit idempotent analysis-run state
+  machine.
+- [x] 3. Define the first article-analysis contract with a versioned deterministic prompt and
+  context builder.
+- [x] 4. Add the scripted provider, strict validation, durable attempts, bounded retry and repair,
+  protected raw output, atomic persistence, and replay.
+- [ ] 5. Add one real provider adapter behind privacy, timeout, rate, cancellation, and budget
+  controls.
+- [ ] 6. Implement PostgreSQL FTS and authorization-aware search documents.
+- [ ] 7. Add pgvector embeddings, chunk and model versioning, and hybrid ranking.
+- [ ] 8. Add an evaluation harness, privacy deletion, and explicit reindex jobs.
+- [ ] 9. Add repository, social, and AI archive analysis families through separate changesets.
+- [ ] 10. Define legacy import only if real legacy data exists and has measured value.
 
-Definition of Done: contracts, state, grounding, evaluation gates, authorization, budgets, migrations, telemetry, and workspace integration pass. Deferred: broad autonomous tools and unbounded chat-over-everything.
+Items 1 through 4 are the implemented first article-analysis slice. Later items are not part of the
+current runtime.

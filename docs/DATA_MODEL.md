@@ -1,16 +1,27 @@
 # Knowledge data model
 
-## Owned schema: `knowledge.*`
+## Current owned schema
 
-- `source_refs`: owner, source authority/type, external reference, content/provenance hash.
-- `analysis_runs` and `analysis_attempts`: state, all versions, timestamps, provider/model, usage, safe errors.
-- `analysis_outputs`: validated typed JSON, raw-response blob reference, quality metadata.
-- `claims`, `citations`, `entities`, `topics`, and relations where contracts require them.
-- `embedding_sets`, `chunks`, `vectors`, `search_documents`, `index_generations`.
-- `prompt_versions`, model/provider policies, evaluations, outbox/inbox.
+[`../schema.sql`](../schema.sql) is the one editable and idempotent schema definition. It creates
+only `knowledge.*` objects:
+
+- `source_refs` stores an immutable tenant-scoped Document IR revision, its digest, and the
+  source-owner `BlobRef`;
+- `analysis_runs` stores the complete source, contract, prompt, context-builder, and model-policy
+  identity plus its monotonic state;
+- `analysis_attempts` stores at most two ordered calls with a closed reason and outcome vocabulary,
+  safe request metadata, token counts, validation code, and a Knowledge-owned raw-response
+  `BlobRef`;
+- `analysis_outputs` stores the accepted typed JSON and its raw-response reference.
 
 ## Constraints
 
-Run uniqueness includes owner, source revision, analysis family/contract, prompt, context builder, and policy/model identity. Historical outputs are immutable. Authorization scope is stored on every searchable root. Raw private text stays in authorized blobs or bounded text fields; telemetry never stores it.
+The complete analysis identity is unique. Attempt ordinals are unique per run and limited to one or
+two. A partial unique index permits one accepted output per run. Expected-state updates prevent a
+replay from moving a terminal run backwards.
 
-Retention and deletion propagate from source authority through analyses, chunks, vectors, caches, and blobs with auditable status.
+The accepted output insert and transition to `persisted` use one transaction. A replay changes a
+persisted run to `completed` and returns its existing output without a provider call.
+
+No table writes another schema or has a foreign key to another service. Search, embeddings,
+entities, topics, outbox, inbox, deletion propagation, and retention automation are not implemented.

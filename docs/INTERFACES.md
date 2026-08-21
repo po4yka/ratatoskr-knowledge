@@ -1,21 +1,27 @@
 # Knowledge interfaces
 
-## Inbound
+## Current process interface
 
-Versioned analysis commands and source-upsert events referencing authorized immutable document/social/repository/archive content; reindex/reconcile commands; authorized public queries through Platform.
+The loopback admin listener exposes only:
 
-## Outbound
+- `GET /live`;
+- `GET /ready`;
+- `GET /metrics`;
+- `GET /version`.
 
-Analysis completed/failed events, safe progress, analysis/search projections, usage/cost audit, and index-generation status.
+Every response uses `Cache-Control: no-store`. There is no public or internal analysis HTTP route.
+The process accepts strict `RATATOSKR__` configuration and a `check-config` command that does not
+bind a socket.
 
-## Internal interfaces
+## Current library interfaces
 
-- `ContextBuilder`: deterministic bounded context plus provenance.
-- `LlmProvider`: structured generation request/response and usage.
-- `OutputValidator`: JSON Schema/typed validation and bounded repair.
-- `EmbeddingProvider`: model/version-aware batches.
-- `SearchIndex`: authorized FTS/vector upsert/delete/query.
+- `prepare_context` consumes canonical Document IR and keeps complete blocks in source order.
+- `build_generation_request` separates fixed policy, task text, untrusted source content, and the
+  generated output schema.
+- `LlmProvider` is the narrow structured-generation seam. Only `ScriptedProvider` exists.
+- `ArticlePipeline` records attempts, stores raw bytes before parsing, validates the result, and
+  persists one accepted output.
+- `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
 
-## Rules
-
-Commands include owner, source revision, family/contract, policy, operation, and idempotency. Provider raw responses are stored as protected blobs where policy permits. Errors distinguish policy, unavailable source, provider transient/permanent, budget, invalid output, indexing, and privacy deletion. No provider-specific response shape leaks into public contracts.
+There are no commands, events, search queries, model SDK adapters, or external network requests in
+this slice. Those interfaces need their own changesets.

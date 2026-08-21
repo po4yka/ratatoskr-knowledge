@@ -1,6 +1,7 @@
 # Ratatoskr Knowledge Architecture
 
-> Status: target architecture. The repository is in architecture bootstrap; this document defines the intended analysis, indexing, retrieval, and model-provider boundaries.
+> Status: target architecture. The first article-analysis slice is implemented; later analysis,
+> indexing, retrieval, and model-provider sections remain targets.
 
 ## 1. Purpose
 
@@ -72,7 +73,7 @@ ratatoskr-knowledge/
 │   └── knowledge/
 ├── prompts/
 ├── evaluations/
-├── migrations/
+├── schema.sql
 ├── fixtures/
 ├── tests/
 └── docs/
@@ -539,7 +540,8 @@ Events contain references and bounded results, not full private source content.
 
 ## 17. Persistence and consistency
 
-Knowledge uses its own PostgreSQL schema and SQLx migrations.
+Knowledge uses its own PostgreSQL schema. During development, one editable and idempotent
+`schema.sql` defines it; there are no database migrations or migration tooling.
 
 Transactions group:
 
@@ -678,7 +680,7 @@ Provider or prompt changes cannot become default solely because examples look su
 
 ### Integration
 
-- PostgreSQL migrations and vector operations;
+- current-schema application and PostgreSQL state operations;
 - outbox/inbox replay;
 - fake LLM and embedding providers;
 - BlobStore context/response storage;
@@ -703,25 +705,15 @@ Provider or prompt changes cannot become default solely because examples look su
 
 ## 24. Deployment architecture
 
-A default deployment contains one Knowledge service with bounded worker pools:
+The current deployment is one admin-only process. It requires PostgreSQL 17 and a writable owned
+blob directory. It does not require NATS, model credentials, FTS, pgvector, or Qdrant.
 
-```text
-analysis consumers
-embedding consumers
-index/reconciliation consumers
-public/internal search endpoints
-```
+The admin listener is loopback-only. `check-config` validates strict environment settings without
+binding. Readiness becomes successful after storage and the current schema are ready. `SIGINT` and
+`SIGTERM` start drain; the process joins server shutdown within its configured bound.
 
-Pools may become separate binaries only when scaling or security profiles justify it. All use the same bounded context and schema.
-
-Required dependencies:
-
-- PostgreSQL with FTS and pgvector;
-- NATS JetStream;
-- BlobStore;
-- configured model providers or local inference endpoints.
-
-Qdrant remains an optional `VectorIndex` adapter, not a default dependency.
+Analysis consumers, model adapters, indexing workers, and public or internal search endpoints are
+future deployment changes. Split processes only after a measured scaling or security need exists.
 
 ## 25. Migration architecture
 
