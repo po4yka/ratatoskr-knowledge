@@ -173,6 +173,35 @@ impl AttemptOutcome {
 }
 
 impl Database {
+    pub(crate) async fn update_attempt_failure(
+        &self,
+        run_id: Uuid,
+        ordinal: i16,
+        outcome: AttemptOutcome,
+    ) -> Result<(), PersistenceError> {
+        if !matches!(
+            outcome,
+            AttemptOutcome::TransientFailure | AttemptOutcome::PermanentFailure
+        ) {
+            return Err(PersistenceError::InvalidAnalysisIdentity);
+        }
+        let result = sqlx::query(
+            "update knowledge.analysis_attempts set outcome = $3
+             where run_id = $1 and ordinal = $2",
+        )
+        .bind(run_id)
+        .bind(ordinal)
+        .bind(outcome.as_str())
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PersistenceError::InvalidAnalysisIdentity)
+        }
+    }
+
     pub(crate) async fn update_attempt(
         &self,
         run_id: Uuid,
