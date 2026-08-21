@@ -1,4 +1,11 @@
 use ratatoskr_document_contracts::{Document, DocumentBlock};
+use serde::Serialize;
+
+use crate::{ArticleValidationError, article_analysis_schema};
+
+const PROMPT_VERSION: &str = "article_prompt_v1";
+const SYSTEM_POLICY: &str = include_str!("../../../prompts/article-analysis.v1/system.txt");
+const TASK_INSTRUCTION: &str = include_str!("../../../prompts/article-analysis.v1/task.txt");
 
 /// Deterministic source context supplied to one provider call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +22,21 @@ pub struct PreparedContext {
     pub truncated: bool,
 }
 
+/// Provider-neutral bounded request with separated trust domains.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GenerationRequest {
+    /// Stable prompt identity.
+    pub prompt_version: String,
+    /// Fixed policy that source content cannot change.
+    pub system_policy: String,
+    /// Fixed article-analysis task.
+    pub task_instruction: String,
+    /// Generated strict result schema.
+    pub output_schema: serde_json::Value,
+    /// Untrusted provider-visible source evidence.
+    pub source_content: String,
+}
+
 /// Deterministic context preparation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -28,6 +50,23 @@ pub enum ContextError {
     /// A Document IR string could not be encoded deterministically.
     #[error("the document context could not be encoded")]
     Encode,
+}
+
+/// Builds a provider-neutral request from prepared source context.
+///
+/// # Errors
+///
+/// Returns [`ArticleValidationError`] when the generated output schema cannot be built.
+pub fn build_generation_request(
+    context: &PreparedContext,
+) -> Result<GenerationRequest, ArticleValidationError> {
+    Ok(GenerationRequest {
+        prompt_version: PROMPT_VERSION.to_owned(),
+        system_policy: SYSTEM_POLICY.to_owned(),
+        task_instruction: TASK_INSTRUCTION.to_owned(),
+        output_schema: article_analysis_schema()?,
+        source_content: context.source.clone(),
+    })
 }
 
 /// Prepares version-one provider-visible source context.

@@ -18,7 +18,9 @@ pub use article::{
     validate_article_citations, validate_article_json,
 };
 pub use config::{AdminConfig, Config, ConfigError, Limits};
-pub use context::{ContextError, PreparedContext, prepare_context};
+pub use context::{
+    ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
+};
 pub use database::{Database, PersistenceError};
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,

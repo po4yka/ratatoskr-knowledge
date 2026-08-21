@@ -31,8 +31,8 @@
 - [x] 3.4 Implement semantic citation validation against the exact prepared context, make 3.3 pass, run format and Clippy, and commit this TDD pair on `main`.
 - [x] 3.5 Add failing test `crates/knowledge/tests/context.rs::builder_is_deterministic_and_omits_only_complete_tail_blocks`; build twice under a small budget and assert byte equality, ordered included indexes, complete omitted indexes, and no partial block text. Run it and confirm the builder is absent.
 - [x] 3.6 Implement version-one context preparation for supported Document IR blocks, make 3.5 pass, run format and Clippy, and commit this TDD pair on `main`.
-- [ ] 3.7 Add failing test `crates/knowledge/tests/context.rs::source_instructions_cannot_replace_fixed_policy`; include command-like source text and assert fixed policy, task, schema, and source remain distinct request fields. Run it and confirm no bounded request exists.
-- [ ] 3.8 Implement the versioned prompt request and untrusted-source boundary, make 3.7 pass, run format and Clippy, and commit this TDD pair on `main`.
+- [x] 3.7 Add failing test `crates/knowledge/tests/context.rs::source_instructions_cannot_replace_fixed_policy`; include command-like source text and assert fixed policy, task, schema, and source remain distinct request fields. Run it and confirm no bounded request exists.
+- [x] 3.8 Implement the versioned prompt request and untrusted-source boundary, make 3.7 pass, run format and Clippy, and commit this TDD pair on `main`.
 
 ## 4. Fake-provider pipeline
 

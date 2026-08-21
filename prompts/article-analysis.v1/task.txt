@@ -1,0 +1,1 @@
+Return one JSON article analysis that satisfies the supplied output schema. Ground every key point only in the supplied source content and cite only included source block indexes.
