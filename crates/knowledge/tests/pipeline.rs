@@ -299,6 +299,46 @@ async fn permanent_failures_end_without_an_extra_call() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[tokio::test]
+async fn completed_replay_returns_one_atomic_result_without_provider_call()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context) = run_and_context(&database).await?;
+    let provider = ScriptedProvider::new([Ok(valid_response("request-replay"))]);
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    let request = build_generation_request(&context)?;
+
+    let first = pipeline.execute(run_id, request.clone(), &context).await?;
+    sqlx::query("update knowledge.analysis_runs set state = 'persisted' where run_id = $1")
+        .bind(run_id)
+        .execute(database.database.pool())
+        .await?;
+    let replay = pipeline.execute(run_id, request, &context).await?;
+
+    assert_eq!(replay, first);
+    assert_eq!(provider.call_count()?, 1);
+    let (state, output_count): (String, i64) = sqlx::query_as(
+        "select state,
+                (select count(*) from knowledge.analysis_outputs where run_id = $1)
+         from knowledge.analysis_runs where run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(state, "completed");
+    assert_eq!(output_count, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn run_and_context(
     database: &TestDatabase,
 ) -> Result<(uuid::Uuid, ratatoskr_knowledge::PreparedContext), Box<dyn std::error::Error>> {

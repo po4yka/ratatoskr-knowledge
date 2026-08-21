@@ -70,6 +70,9 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         mut request: GenerationRequest,
         context: &PreparedContext,
     ) -> Result<ArticleAnalysis, PipelineError> {
+        if let Some(article) = self.resume_output(run_id).await? {
+            return Ok(article);
+        }
         self.database
             .transition_run(run_id, RunState::Queued, RunState::ContextPrepared)
             .await?;
@@ -159,6 +162,35 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             }
         }
         Err(PersistenceError::AttemptBudgetExhausted.into())
+    }
+
+    async fn resume_output(&self, run_id: Uuid) -> Result<Option<ArticleAnalysis>, PipelineError> {
+        let stored: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
+            "select runs.state, outputs.result
+             from knowledge.analysis_runs runs
+             left join knowledge.analysis_outputs outputs
+                on outputs.run_id = runs.run_id and outputs.accepted
+             where runs.run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        let Some((state, result)) = stored else {
+            return Ok(None);
+        };
+        if !matches!(state.as_str(), "persisted" | "completed") {
+            return Ok(None);
+        }
+        let article =
+            serde_json::from_value(result.ok_or(PersistenceError::InvalidAnalysisIdentity)?)
+                .map_err(PersistenceError::Encode)?;
+        if state == "persisted" {
+            self.database
+                .transition_run(run_id, RunState::Persisted, RunState::Completed)
+                .await?;
+        }
+        Ok(Some(article))
     }
 
     async fn process_or_fail(
