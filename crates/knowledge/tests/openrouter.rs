@@ -5,8 +5,8 @@ use std::time::Duration;
 use ratatoskr_knowledge::test_support::{FakeReply, FakeTransport};
 use ratatoskr_knowledge::{
     GenerationRequest, LlmProvider as _, OpenRouterProvider, OpenRouterSettings, ProviderError,
-    ProviderFailureClass, ProviderSecret, RetryPolicy, chat_completion_body, classify_error,
-    parse_success_envelope,
+    ProviderFailureClass, ProviderSecret, RateLimiter, RetryPolicy, chat_completion_body,
+    classify_error, parse_success_envelope,
 };
 use serde_json::json;
 
@@ -254,4 +254,94 @@ fn sample_request() -> GenerationRequest {
         output_schema: json!({"type": "object"}),
         source_content: "block 0 paragraph: \"Evidence.\"".to_owned(),
     }
+}
+
+#[tokio::test]
+async fn ordinary_logs_carry_no_credential_or_content() -> Result<(), Box<dyn std::error::Error>> {
+    static CAPTURE: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+    static INIT: std::sync::Once = std::sync::Once::new();
+    struct SharedWriter;
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for SharedWriter {
+        type Writer = SharedWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            SharedWriter
+        }
+    }
+
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> Result<usize, std::io::Error> {
+            let mut bytes = CAPTURE
+                .lock()
+                .map_err(|_| std::io::Error::other("log capture lock was poisoned"))?;
+            std::io::Write::write(bytes.by_ref(), buffer)
+        }
+
+        fn flush(&mut self) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+    }
+
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(SharedWriter)
+            .finish();
+        let _ignored = tracing::subscriber::set_global_default(subscriber);
+    });
+
+    let transport = FakeTransport::start(vec![FakeReply::bytes(
+        200,
+        SUCCESS_ENVELOPE.as_bytes().to_vec(),
+    )])
+    .await?;
+    let database = ratatoskr_knowledge::test_support::TestDatabase::create().await?;
+    let settings = OpenRouterSettings {
+        credential: ProviderSecret::new(CREDENTIAL.to_owned()),
+        ..adapter_settings(transport.local_addr(), 400)
+    };
+    let inner = OpenRouterProvider::new(settings)?;
+    let provider = ratatoskr_knowledge::ControlledProvider::new(
+        inner,
+        std::sync::Arc::new(RateLimiter::new(Duration::ZERO)),
+        ratatoskr_knowledge::BudgetLedger::new(database.database.pool().clone()),
+        ratatoskr_knowledge::SpendControls {
+            limits: ratatoskr_knowledge::BudgetLimits {
+                daily_tokens: u64::MAX - 1,
+                monthly_tokens: u64::MAX - 1,
+                daily_cost_micro_usd: u64::MAX - 1,
+                monthly_cost_micro_usd: u64::MAX - 1,
+            },
+            prices: ratatoskr_knowledge::TokenPrices {
+                input_micro_usd_per_mtoken: 0,
+                output_micro_usd_per_mtoken: 0,
+            },
+            max_output_tokens: 16,
+        },
+    );
+    let marked_request = GenerationRequest {
+        source_content: "block 0 paragraph: \"SOURCE-LEAKME\"".to_owned(),
+        ..sample_request()
+    };
+
+    let response = provider.generate_json(marked_request).await?;
+    assert_eq!(response.usage.input_tokens, 57);
+    let captured = String::from_utf8(
+        CAPTURE
+            .lock()
+            .map_err(|_| std::io::Error::other("log capture lock was poisoned"))?
+            .clone(),
+    )?;
+
+    assert!(!captured.contains("LEAKME"));
+    assert!(
+        !captured.contains("A grounded summary"),
+        "response text must stay out of ordinary logs"
+    );
+    assert!(
+        captured.contains("provider_call") && captured.contains("openrouter"),
+        "bounded facts must be present"
+    );
+    Ok(())
 }

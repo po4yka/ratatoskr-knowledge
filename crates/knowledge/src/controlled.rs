@@ -87,9 +87,38 @@ impl<P: LlmProvider> LlmProvider for ControlledProvider<P> {
             )
             .await
         {
+            tracing::info!(
+                operation = "provider_call",
+                provider = %identity.provider,
+                model = %identity.model,
+                outcome = "refused",
+                failure_class = ProviderFailureClass::BudgetExhausted.as_str()
+            );
             return Err(budget_failure(&error));
         }
+        let started = std::time::Instant::now();
         let outcome = self.inner.generate_json(request).await;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &outcome {
+            Ok(response) => tracing::info!(
+                operation = "provider_call",
+                provider = %identity.provider,
+                model = %identity.model,
+                outcome = "accepted",
+                input_tokens = response.usage.input_tokens,
+                output_tokens = response.usage.output_tokens,
+                duration_ms
+            ),
+            Err(failure) => tracing::info!(
+                operation = "provider_call",
+                provider = %identity.provider,
+                model = %identity.model,
+                outcome = "failed",
+                failure_class = failure.class.as_str(),
+                http_status = failure.http_status,
+                duration_ms
+            ),
+        }
         if let Ok(response) = &outcome
             && let Some(cost) = self
                 .controls

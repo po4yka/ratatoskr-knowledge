@@ -31,12 +31,12 @@
 
 ## 4. Pipeline integration
 
-- [ ] 4.1 Add failing test `crates/knowledge/tests/pipeline.rs::real_attempts_record_identity_latency_and_failure_class`; run the pipeline over the controlled provider against a 500-only fake transport and assert attempt rows carry adapter identity, model, positive latency, the server-error class, and status 500. Run it and confirm attempts still hold scripted placeholders only.
-- [ ] 4.2 Extend attempt persistence and the pipeline to use provider identity and structured failure facts, make 4.1 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 4.3 Add failing test `crates/knowledge/tests/pipeline.rs::cancelled_mid_request_keeps_durable_state_and_replays_once`; abort an in-flight run against a stalled transport, assert the run stays `model_requested` with the attempt open and no output, then replay against a healthy transport and assert exactly one accepted result. Run it and confirm the replay path mishandles the open attempt.
-- [ ] 4.4 Make replay idempotent for an open attempt after cancellation, make 4.3 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 4.5 Add failing test `crates/knowledge/tests/pipeline.rs::flaky_transport_keeps_retry_and_repair_bounded`; assert the always-500 transport ends the run after exactly two recorded attempts with a bounded transport-try count, and that an invalid-then-repair run with transient faults completes within the same bounds. Run it and confirm bounds are exceeded or unmeasured.
-- [ ] 4.6 Compose the controlled wrapper (limiter, budget, ledger) around the adapter as the real-provider constructor and enforce the bounds, make 4.5 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 4.1 Add failing test `crates/knowledge/tests/pipeline.rs::real_attempts_record_identity_latency_and_failure_class`; run the pipeline over the controlled provider against a 500-only fake transport and assert attempt rows carry adapter identity, model, positive latency, the server-error class, and status 500. Run it and confirm attempts still hold scripted placeholders only.
+- [x] 4.2 Extend attempt persistence and the pipeline to use provider identity and structured failure facts, make 4.1 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 4.3 Add failing test `crates/knowledge/tests/pipeline.rs::cancelled_mid_request_keeps_durable_state_and_replays_once`; abort an in-flight run against a stalled transport, assert the run stays `model_requested` with the attempt open and no output, then replay against a healthy transport and assert exactly one accepted result. Run it and confirm the replay path mishandles the open attempt.
+- [x] 4.4 Make replay idempotent for an open attempt after cancellation, make 4.3 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 4.5 Add failing test `crates/knowledge/tests/pipeline.rs::flaky_transport_keeps_retry_and_repair_bounded`; assert the always-500 transport ends the run after exactly two recorded attempts with a bounded transport-try count, and that an invalid-then-repair run with transient faults completes within the same bounds. Run it and confirm bounds are exceeded or unmeasured.
+- [x] 4.6 Compose the controlled wrapper (limiter, budget, ledger) around the adapter as the real-provider constructor and enforce the bounds, make 4.5 pass, run format and Clippy, and commit this pair on the task branch.
 
 ## 5. Configuration and privacy
 

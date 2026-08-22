@@ -48,6 +48,8 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
+    /// Real provider configuration; absent keeps the process offline.
+    pub provider: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +87,41 @@ pub struct Limits {
     pub shutdown_timeout_ms: u64,
     /// Maximum bytes accepted by the owned blob store.
     pub blob_bytes: u64,
+    /// Output token bound sent to the real provider.
+    pub provider_max_output_tokens: u32,
+    /// Minimum spacing between real provider requests, per minute.
+    pub provider_requests_per_minute: u32,
+    /// Daily input-plus-output token ceiling for real provider calls.
+    pub provider_daily_token_budget: u64,
+    /// Monthly input-plus-output token ceiling for real provider calls.
+    pub provider_monthly_token_budget: u64,
+    /// Daily estimated-cost ceiling in micro-US dollars.
+    pub provider_daily_cost_micro_usd: u64,
+    /// Monthly estimated-cost ceiling in micro-US dollars.
+    pub provider_monthly_cost_micro_usd: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// Real provider configuration; absent means the process stays offline.
+pub struct ProviderConfig {
+    /// `OpenRouter` chat-completions adapter settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openrouter: Option<OpenRouterProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+/// One `OpenRouter` adapter's environment-derived settings.
+pub struct OpenRouterProviderConfig {
+    /// Credential that redacts itself everywhere but the authorization header.
+    pub api_key: ProviderSecret,
+    /// Concrete upstream model id.
+    pub model: String,
+    /// Chat-completions root URL; HTTPS or loopback plain text only.
+    pub base_url: String,
+    /// Input-token price in micro-US dollars per million tokens.
+    pub input_micro_usd_per_mtoken: u64,
+    /// Output-token price in micro-US dollars per million tokens.
+    pub output_micro_usd_per_mtoken: u64,
 }
 
 /// Configuration loading failure that never includes a supplied value.
@@ -130,13 +167,15 @@ impl Config {
         V: AsRef<str>,
     {
         let mut config = Self::default();
+        let mut draft = ProviderDraft::default();
         for (key, value) in entries {
             let key = key.as_ref();
             if !key.starts_with(ENV_PREFIX) {
                 continue;
             }
-            apply_entry(&mut config, key, value.as_ref())?;
+            apply_entry(&mut config, &mut draft, key, value.as_ref())?;
         }
+        config.provider.openrouter = draft.finish()?;
 
         Ok(config)
     }
@@ -159,7 +198,12 @@ impl fmt::Display for ConfigError {
 
 impl error::Error for ConfigError {}
 
-fn apply_entry(config: &mut Config, key: &str, value: &str) -> Result<(), ConfigError> {
+fn apply_entry(
+    config: &mut Config,
+    draft: &mut ProviderDraft,
+    key: &str,
+    value: &str,
+) -> Result<(), ConfigError> {
     match key {
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
             let address = value
@@ -206,9 +250,111 @@ fn apply_entry(config: &mut Config, key: &str, value: &str) -> Result<(), Config
         "RATATOSKR__LIMITS__BLOB_BYTES" => {
             config.limits.blob_bytes = parse_positive(key, value)?;
         }
+        "RATATOSKR__LIMITS__PROVIDER_MAX_OUTPUT_TOKENS" => {
+            config.limits.provider_max_output_tokens = parse_positive(key, value)?;
+        }
+        "RATATOSKR__LIMITS__PROVIDER_REQUESTS_PER_MINUTE" => {
+            config.limits.provider_requests_per_minute = parse_positive(key, value)?;
+        }
+        "RATATOSKR__LIMITS__PROVIDER_DAILY_TOKEN_BUDGET" => {
+            config.limits.provider_daily_token_budget = parse_positive(key, value)?;
+        }
+        "RATATOSKR__LIMITS__PROVIDER_MONTHLY_TOKEN_BUDGET" => {
+            config.limits.provider_monthly_token_budget = parse_positive(key, value)?;
+        }
+        "RATATOSKR__LIMITS__PROVIDER_DAILY_COST_MICRO_USD" => {
+            config.limits.provider_daily_cost_micro_usd = parse_positive(key, value)?;
+        }
+        "RATATOSKR__LIMITS__PROVIDER_MONTHLY_COST_MICRO_USD" => {
+            config.limits.provider_monthly_cost_micro_usd = parse_positive(key, value)?;
+        }
+        "RATATOSKR__PROVIDER__OPENROUTER__API_KEY" => {
+            if value.is_empty() {
+                return Err(ConfigError::new(key, "must be a non-empty credential"));
+            }
+            draft.api_key = Some(value.to_owned());
+        }
+        "RATATOSKR__PROVIDER__OPENROUTER__MODEL" => {
+            validate_model_id(key, value)?;
+            draft.model = Some(value.to_owned());
+        }
+        "RATATOSKR__PROVIDER__OPENROUTER__BASE_URL" => {
+            draft.base_url = Some(value.to_owned());
+        }
+        "RATATOSKR__PROVIDER__OPENROUTER__INPUT_MICRO_USD_PER_MTOKEN" => {
+            draft.input_price = Some(parse_nonnegative(key, value)?);
+        }
+        "RATATOSKR__PROVIDER__OPENROUTER__OUTPUT_MICRO_USD_PER_MTOKEN" => {
+            draft.output_price = Some(parse_nonnegative(key, value)?);
+        }
         _ => return Err(ConfigError::new(key, "is not recognized")),
     }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ProviderDraft {
+    api_key: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    input_price: Option<u64>,
+    output_price: Option<u64>,
+}
+
+impl ProviderDraft {
+    fn finish(self) -> Result<Option<OpenRouterProviderConfig>, ConfigError> {
+        let Some(api_key) = self.api_key else {
+            return Ok(None);
+        };
+        let Some(model) = self.model else {
+            return Err(ConfigError::new(
+                "RATATOSKR__PROVIDER__OPENROUTER__MODEL",
+                "is required when an API key is configured",
+            ));
+        };
+        let base_url = self
+            .base_url
+            .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_owned());
+        validate_base_url(&base_url)?;
+        Ok(Some(OpenRouterProviderConfig {
+            api_key: ProviderSecret::new(api_key),
+            model,
+            base_url,
+            input_micro_usd_per_mtoken: self.input_price.unwrap_or_default(),
+            output_micro_usd_per_mtoken: self.output_price.unwrap_or_default(),
+        }))
+    }
+}
+
+fn validate_base_url(base_url: &str) -> Result<(), ConfigError> {
+    const KEY: &str = "RATATOSKR__PROVIDER__OPENROUTER__BASE_URL";
+    let parsed =
+        reqwest::Url::parse(base_url).map_err(|_| ConfigError::new(KEY, "must be a valid URL"))?;
+    let loopback_host = parsed
+        .host_str()
+        .is_some_and(|host| host == "localhost" || host == "127.0.0.1" || host == "[::1]");
+    if parsed.scheme() == "https" || (parsed.scheme() == "http" && loopback_host) {
+        Ok(())
+    } else {
+        Err(ConfigError::new(
+            KEY,
+            "must use HTTPS or a loopback plain-text address",
+        ))
+    }
+}
+
+fn validate_model_id(key: &str, value: &str) -> Result<(), ConfigError> {
+    let printable = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| (33..=126).contains(&byte));
+    if printable {
+        Ok(())
+    } else {
+        Err(ConfigError::new(
+            key,
+            "must be a bounded printable model id",
+        ))
+    }
 }
 
 fn parse_positive<T>(key: &str, value: &str) -> Result<T, ConfigError>
@@ -222,6 +368,12 @@ where
         return Err(ConfigError::new(key, "must be a positive integer"));
     }
     Ok(parsed)
+}
+
+fn parse_nonnegative(key: &str, value: &str) -> Result<u64, ConfigError> {
+    value
+        .parse::<u64>()
+        .map_err(|_| ConfigError::new(key, "must be a non-negative integer"))
 }
 
 impl Default for Config {
@@ -242,7 +394,14 @@ impl Default for Config {
                 raw_response_bytes: 1_048_576,
                 shutdown_timeout_ms: 10_000,
                 blob_bytes: 16_777_216,
+                provider_max_output_tokens: 2_048,
+                provider_requests_per_minute: 60,
+                provider_daily_token_budget: 2_000_000,
+                provider_monthly_token_budget: 20_000_000,
+                provider_daily_cost_micro_usd: 5_000_000,
+                provider_monthly_cost_micro_usd: 50_000_000,
             },
+            provider: ProviderConfig { openrouter: None },
         }
     }
 }
