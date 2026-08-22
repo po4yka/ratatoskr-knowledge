@@ -9,25 +9,25 @@
 
 ## 2. Bounded transport
 
-- [ ] 2.1 Add failing test `crates/knowledge/tests/openrouter.rs::oversized_body_fails_without_buffering_past_cap`; stream more bytes than the cap from the fake transport and assert a permanent size failure while the process never buffers beyond the cap. Run it and confirm no HTTP adapter exists.
-- [ ] 2.2 Add the pinned `reqwest` client, chunked capped body reads, per-call deadline, and loopback-only plain-text base URLs; make 2.1 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 2.3 Add failing test `crates/knowledge/tests/openrouter.rs::stalled_response_hits_deadline_as_transient_timeout`; hold the response open past the deadline and assert a transient timeout classification within the deadline. Run it and confirm the call hangs or misclassifies.
-- [ ] 2.4 Wire the deadline into every transport try and classify expiry as `timeout`, make 2.3 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 2.5 Add failing test `crates/knowledge/tests/openrouter.rs::transient_faults_retry_with_jitter_inside_bounds`; script one 500 then a success and assert exactly two transport tries with a nonnegative bounded delay, plus no second try after a 401. Run it and confirm no retry exists.
-- [ ] 2.6 Implement the bounded jittered retry policy for network, rate-limit, and server classes only, make 2.5 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 2.7 Add failing test `crates/knowledge/tests/rate_limit.rs::second_call_waits_at_least_one_spacing_interval`; acquire twice back to back under a 100 ms interval and assert the second admission waits. Run it and confirm no limiter exists.
-- [ ] 2.8 Implement the fixed-spacing limiter, make 2.7 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 2.1 Add failing test `crates/knowledge/tests/openrouter.rs::oversized_body_fails_without_buffering_past_cap`; stream more bytes than the cap from the fake transport and assert a permanent size failure while the process never buffers beyond the cap. Run it and confirm no HTTP adapter exists.
+- [x] 2.2 Add the pinned `reqwest` client, chunked capped body reads, per-call deadline, and loopback-only plain-text base URLs; make 2.1 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 2.3 Add failing test `crates/knowledge/tests/openrouter.rs::stalled_response_hits_deadline_as_transient_timeout`; hold the response open past the deadline and assert a transient timeout classification within the deadline. Run it and confirm the call hangs or misclassifies.
+- [x] 2.4 Wire the deadline into every transport try and classify expiry as `timeout`, make 2.3 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 2.5 Add failing test `crates/knowledge/tests/openrouter.rs::transient_faults_retry_with_jitter_inside_bounds`; script one 500 then a success and assert exactly two transport tries with a nonnegative bounded delay, plus no second try after a 401. Run it and confirm no retry exists.
+- [x] 2.6 Implement the bounded jittered retry policy for network, rate-limit, and server classes only, make 2.5 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 2.7 Add failing test `crates/knowledge/tests/rate_limit.rs::second_call_waits_at_least_one_spacing_interval`; acquire twice back to back under a 100 ms interval and assert the second admission waits. Run it and confirm no limiter exists.
+- [x] 2.8 Implement the fixed-spacing limiter, make 2.7 pass, run format and Clippy, and commit this pair on the task branch.
 
 ## 3. Durable budget ledger
 
-- [ ] 3.1 Add failing schema test `crates/knowledge/tests/schema.rs::provider_usage_records_window_totals`; insert two ledger rows across a day boundary and assert per-day and per-month token and cost totals through the ledger API. Run it and confirm the table is absent.
-- [ ] 3.2 Edit `schema.sql` in place with `knowledge.provider_usage` and its window index, implement ledger recording and window sums, make 3.1 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 3.3 Add failing test `crates/knowledge/tests/budget.rs::projected_daily_overrun_blocks_before_transport`; seed same-day usage past the ceiling, call the controlled provider against a counting fake transport, and assert budget exhaustion with zero transport requests. Run it and confirm no pre-call check exists.
-- [ ] 3.4 Implement the conservative characters/4 plus output-bound projection and pre-call enforcement, make 3.3 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 3.5 Add failing test `crates/knowledge/tests/budget.rs::monthly_ceiling_counts_earlier_days`; seed earlier-days usage below the daily but above the monthly ceiling and assert refusal. Run it and confirm only daily windows gate.
-- [ ] 3.6 Implement the UTC monthly window, make 3.5 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 3.7 Add failing test `crates/knowledge/tests/budget.rs::cost_ceiling_blocks_with_token_headroom`; configure nonzero prices so projected cost exceeds the cost ceiling while tokens remain, and assert refusal. Run it and confirm cost is not enforced.
-- [ ] 3.8 Implement micro-US-dollar cost projection and recording with u128 ceiling rounding, make 3.7 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 3.1 Add failing schema test `crates/knowledge/tests/schema.rs::provider_usage_records_window_totals`; insert two ledger rows across a day boundary and assert per-day and per-month token and cost totals through the ledger API. Run it and confirm the table is absent.
+- [x] 3.2 Edit `schema.sql` in place with `knowledge.provider_usage` and its window index, implement ledger recording and window sums, make 3.1 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 3.3 Add failing test `crates/knowledge/tests/budget.rs::projected_daily_overrun_blocks_before_transport`; seed same-day usage past the ceiling, call the controlled provider against a counting fake transport, and assert budget exhaustion with zero transport requests. Run it and confirm no pre-call check exists.
+- [x] 3.4 Implement the conservative characters/4 plus output-bound projection and pre-call enforcement, make 3.3 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 3.5 Add failing test `crates/knowledge/tests/budget.rs::monthly_ceiling_counts_earlier_days`; seed earlier-days usage below the daily but above the monthly ceiling and assert refusal. Run it and confirm only daily windows gate.
+- [x] 3.6 Implement the UTC monthly window, make 3.5 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 3.7 Add failing test `crates/knowledge/tests/budget.rs::cost_ceiling_blocks_with_token_headroom`; configure nonzero prices so projected cost exceeds the cost ceiling while tokens remain, and assert refusal. Run it and confirm cost is not enforced.
+- [x] 3.8 Implement micro-US-dollar cost projection and recording with u128 ceiling rounding, make 3.7 pass, run format and Clippy, and commit this pair on the task branch.
 
 ## 4. Pipeline integration
 

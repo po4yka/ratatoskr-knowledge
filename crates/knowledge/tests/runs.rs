@@ -210,6 +210,7 @@ fn attempt(reason: AttemptReason, request_id: &str) -> AttemptInput {
     AttemptInput {
         reason,
         provider: "fake".to_owned(),
+        model: "fake_default_v1".to_owned(),
         model_policy: "attempt_policy".to_owned(),
         provider_request_id: Some(request_id.to_owned()),
         outcome: AttemptOutcome::Requested,

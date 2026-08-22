@@ -60,12 +60,16 @@ create table if not exists knowledge.analysis_attempts (
     reason text not null,
     provider text not null,
     model_policy text not null,
+    model text,
     provider_request_id text,
     raw_response jsonb,
     input_tokens bigint,
     output_tokens bigint,
     outcome text not null,
     validation_code text,
+    duration_ms integer,
+    http_status smallint,
+    error_class text,
     created_at timestamptz not null default now(),
     primary key (run_id, ordinal),
     constraint analysis_attempts_ordinal_check check (ordinal between 1 and 2),
@@ -81,7 +85,24 @@ create table if not exists knowledge.analysis_attempts (
     constraint analysis_attempts_usage_check check (
         (input_tokens is null or input_tokens >= 0)
         and (output_tokens is null or output_tokens >= 0)
-    )
+    ),
+    constraint analysis_attempts_model_check
+        check (model is null or char_length(model) between 1 and 128),
+    constraint analysis_attempts_duration_check
+        check (duration_ms is null or duration_ms >= 0),
+    constraint analysis_attempts_status_check
+        check (http_status is null or http_status between 100 and 599),
+    constraint analysis_attempts_error_class_check check (error_class is null or error_class in (
+        'timeout',
+        'network',
+        'rate_limited',
+        'server_error',
+        'auth_error',
+        'request_invalid',
+        'size_limit',
+        'budget_exhausted',
+        'unclassified'
+    ))
 );
 
 create table if not exists knowledge.provider_usage (

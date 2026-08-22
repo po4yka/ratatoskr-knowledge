@@ -12,6 +12,7 @@ pub(crate) struct AttemptUpdate<'a> {
     pub output_tokens: u64,
     pub outcome: AttemptOutcome,
     pub validation_code: Option<&'a str>,
+    pub duration_ms: i32,
 }
 
 /// Immutable source evidence presented to Knowledge.
@@ -116,6 +117,8 @@ pub struct AttemptInput {
     pub reason: AttemptReason,
     /// Provider adapter identity.
     pub provider: String,
+    /// Concrete upstream model id.
+    pub model: String,
     /// Provider-neutral model policy identity.
     pub model_policy: String,
     /// Provider request identity when received.
@@ -178,6 +181,9 @@ impl Database {
         run_id: Uuid,
         ordinal: i16,
         outcome: AttemptOutcome,
+        error_class: Option<&'static str>,
+        http_status: Option<i16>,
+        duration_ms: i32,
     ) -> Result<(), PersistenceError> {
         if !matches!(
             outcome,
@@ -186,12 +192,16 @@ impl Database {
             return Err(PersistenceError::InvalidAnalysisIdentity);
         }
         let result = sqlx::query(
-            "update knowledge.analysis_attempts set outcome = $3
+            "update knowledge.analysis_attempts
+             set outcome = $3, error_class = $4, http_status = $5, duration_ms = $6
              where run_id = $1 and ordinal = $2",
         )
         .bind(run_id)
         .bind(ordinal)
         .bind(outcome.as_str())
+        .bind(error_class)
+        .bind(http_status)
+        .bind(duration_ms)
         .execute(self.pool())
         .await
         .map_err(PersistenceError::Query)?;
@@ -218,7 +228,7 @@ impl Database {
             "update knowledge.analysis_attempts
              set provider_request_id = $3, raw_response = $4,
                  input_tokens = $5, output_tokens = $6,
-                 outcome = $7, validation_code = $8
+                 outcome = $7, validation_code = $8, duration_ms = $9
              where run_id = $1 and ordinal = $2",
         )
         .bind(run_id)
@@ -229,6 +239,7 @@ impl Database {
         .bind(output_tokens)
         .bind(update.outcome.as_str())
         .bind(update.validation_code)
+        .bind(update.duration_ms)
         .execute(self.pool())
         .await
         .map_err(PersistenceError::Query)?;
@@ -250,6 +261,7 @@ impl Database {
         input: &AttemptInput,
     ) -> Result<Attempt, PersistenceError> {
         validate_version(&input.provider)?;
+        validate_model(&input.model)?;
         validate_version(&input.model_policy)?;
         if input
             .provider_request_id
@@ -286,15 +298,16 @@ impl Database {
         }
         sqlx::query(
             "insert into knowledge.analysis_attempts (
-                run_id, ordinal, reason, provider, model_policy,
+                run_id, ordinal, reason, provider, model_policy, model,
                 provider_request_id, outcome
-             ) values ($1, $2, $3, $4, $5, $6, $7)",
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(run_id)
         .bind(ordinal)
         .bind(input.reason.as_str())
         .bind(&input.provider)
         .bind(&input.model_policy)
+        .bind(&input.model)
         .bind(&input.provider_request_id)
         .bind(input.outcome.as_str())
         .execute(&mut *transaction)
@@ -432,6 +445,15 @@ fn validate_version(value: &str) -> Result<(), PersistenceError> {
             || matches!(character, '_' | '-')
     });
     if starts_correctly && rest_is_valid && value.len() <= 64 {
+        Ok(())
+    } else {
+        Err(PersistenceError::InvalidAnalysisIdentity)
+    }
+}
+
+fn validate_model(value: &str) -> Result<(), PersistenceError> {
+    let printable = value.len() <= 128 && value.bytes().all(|byte| (33..=126).contains(&byte));
+    if printable && !value.is_empty() {
         Ok(())
     } else {
         Err(PersistenceError::InvalidAnalysisIdentity)
