@@ -1,0 +1,9 @@
+{
+  "error": {
+    "message": "Provider returned an error",
+    "code": 502,
+    "metadata": {
+      "provider_name": "OpenAI"
+    }
+  }
+}

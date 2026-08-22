@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "Invalid credentials (HTTP 401)",
+    "code": 401
+  }
+}

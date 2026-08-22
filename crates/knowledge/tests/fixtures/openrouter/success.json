@@ -1,0 +1,23 @@
+{
+  "id": "gen-1755858000-recorded000000001",
+  "provider": "OpenAI",
+  "model": "openai/gpt-oss-20b",
+  "object": "chat.completion",
+  "created": 1755858000,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"summary\":\"A grounded summary.\",\"key_points\":[{\"text\":\"Evidence exists.\",\"source_block_indexes\":[0]}]}"
+      },
+      "finish_reason": "stop",
+      "native_finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 57,
+    "completion_tokens": 40,
+    "total_tokens": 97
+  }
+}

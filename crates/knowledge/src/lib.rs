@@ -8,6 +8,7 @@ mod blob_store;
 mod config;
 mod context;
 mod database;
+mod openrouter;
 mod pipeline;
 mod provider;
 mod runs;
@@ -26,6 +27,7 @@ pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
 pub use database::{Database, PersistenceError};
+pub use openrouter::{OpenRouterWireError, chat_completion_body};
 pub use pipeline::{ArticlePipeline, PipelineError};
 pub use provider::{LlmProvider, ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider};
 pub use runs::{

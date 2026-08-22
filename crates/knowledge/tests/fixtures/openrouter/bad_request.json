@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "model not found or not accessible",
+    "code": 400
+  }
+}
