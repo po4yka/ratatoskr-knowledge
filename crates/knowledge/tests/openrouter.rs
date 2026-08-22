@@ -1,9 +1,11 @@
 //! `OpenRouter` wire-format contract tests against recorded fixtures.
 
-use ratatoskr_knowledge::{GenerationRequest, chat_completion_body};
+use ratatoskr_knowledge::{GenerationRequest, chat_completion_body, parse_success_envelope};
 use serde_json::json;
 
 const CREDENTIAL: &str = "sk-or-v1-LEAKME";
+
+const SUCCESS_ENVELOPE: &str = include_str!("fixtures/openrouter/success.json");
 
 #[test]
 fn request_body_maps_separated_fields_and_carries_no_credential()
@@ -40,5 +42,23 @@ fn request_body_maps_separated_fields_and_carries_no_credential()
     let serialized = body.to_string();
     assert!(!serialized.contains(CREDENTIAL));
     assert_eq!(body, replay);
+    Ok(())
+}
+
+#[test]
+fn success_fixture_parses_content_usage_and_request_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response = parse_success_envelope(SUCCESS_ENVELOPE.as_bytes())?;
+
+    assert_eq!(
+        response.bytes,
+        br#"{"summary":"A grounded summary.","key_points":[{"text":"Evidence exists.","source_block_indexes":[0]}]}"#
+    );
+    assert_eq!(
+        response.request_id.as_deref(),
+        Some("gen-1755858000-recorded000000001")
+    );
+    assert_eq!(response.usage.input_tokens, 57);
+    assert_eq!(response.usage.output_tokens, 40);
     Ok(())
 }

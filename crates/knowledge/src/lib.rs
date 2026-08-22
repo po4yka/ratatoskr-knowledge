@@ -27,7 +27,7 @@ pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
 pub use database::{Database, PersistenceError};
-pub use openrouter::{OpenRouterWireError, chat_completion_body};
+pub use openrouter::{OpenRouterWireError, chat_completion_body, parse_success_envelope};
 pub use pipeline::{ArticlePipeline, PipelineError};
 pub use provider::{LlmProvider, ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider};
 pub use runs::{
