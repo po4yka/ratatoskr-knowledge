@@ -131,8 +131,20 @@ impl From<ProviderError> for ProviderFailure {
     }
 }
 
+/// Adapter and model identity declared by every provider implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderIdentity {
+    /// Bounded adapter name recorded on attempts.
+    pub provider: String,
+    /// Concrete upstream model id recorded on attempts.
+    pub model: String,
+}
+
 /// Narrow provider-neutral JSON generation boundary.
 pub trait LlmProvider: Send + Sync {
+    /// Returns the stable adapter and model identity for attempt records.
+    fn identity(&self) -> ProviderIdentity;
+
     /// Generates one raw JSON response.
     fn generate_json(
         &self,
@@ -179,6 +191,13 @@ impl ScriptedProvider {
 }
 
 impl LlmProvider for ScriptedProvider {
+    fn identity(&self) -> ProviderIdentity {
+        ProviderIdentity {
+            provider: "scripted_fake".to_owned(),
+            model: "fake_default_v1".to_owned(),
+        }
+    }
+
     fn generate_json(
         &self,
         request: GenerationRequest,

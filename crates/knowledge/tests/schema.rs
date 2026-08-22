@@ -25,6 +25,7 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "analysis_attempts",
             "analysis_outputs",
             "analysis_runs",
+            "provider_usage",
             "source_refs"
         ]
     );
@@ -63,6 +64,49 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
         accepted_index.as_deref(),
         Some("one_accepted_output_per_run")
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_usage_records_window_totals() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    sqlx::query(
+        "insert into knowledge.provider_usage (
+            usage_id, provider, model, input_tokens, output_tokens,
+            estimated_cost_micro_usd, recorded_at
+         ) values ($1, 'openrouter', 'openai/gpt-oss-20b', 100, 40, 9,
+                   now() - interval '1 day')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .execute(database.database.pool())
+    .await?;
+    let ledger = ratatoskr_knowledge::BudgetLedger::new(database.database.pool().clone());
+    ledger
+        .record_usage(
+            "openrouter",
+            "openai/gpt-oss-20b",
+            ratatoskr_knowledge::ProviderUsage {
+                input_tokens: 30,
+                output_tokens: 10,
+            },
+            5,
+        )
+        .await?;
+
+    let (day_tokens, day_cost) = ledger
+        .window_totals("openrouter", ratatoskr_knowledge::BudgetWindow::Daily)
+        .await?;
+    let (month_tokens, month_cost) = ledger
+        .window_totals("openrouter", ratatoskr_knowledge::BudgetWindow::Monthly)
+        .await?;
+    assert_eq!((day_tokens, day_cost), (40, 5));
+    assert_eq!((month_tokens, month_cost), (180, 14));
+    let other = ledger
+        .window_totals("other-provider", ratatoskr_knowledge::BudgetWindow::Monthly)
+        .await?;
+    assert_eq!(other, (0, 0));
 
     database.cleanup().await?;
     Ok(())

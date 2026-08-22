@@ -4,8 +4,8 @@
 - [x] 1.2 Add recorded OpenRouter fixtures (success, rate-limit, server-fault, auth, invalid-request) under `crates/knowledge/tests/fixtures/openrouter/` and implement request serialization in `crates/knowledge/src/openrouter.rs`; make 1.1 pass, run format and Clippy, and commit this pair on the task branch. Fixtures are recorded data: no test starts from them failing.
 - [x] 1.3 Add failing test `crates/knowledge/tests/openrouter.rs::success_envelope_parses_content_usage_and_request_identity`; assert the recorded success fixture parses to the exact assistant content bytes, prompt/completion token counts, and the envelope request id. Run it and confirm parsing is absent.
 - [x] 1.4 Implement success-envelope parsing into `ProviderResponse`, make 1.3 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 1.5 Add failing test `crates/knowledge/tests/openrouter.rs::error_envelopes_classify_transient_and_permanent`; assert the recorded 429 and 500 fixtures classify transient with preserved status while 401 and 400 classify permanent. Run it and confirm no classifier exists.
-- [ ] 1.6 Introduce `ProviderFailure` with the closed failure-class vocabulary and the status-preserving classifier, convert `ScriptedProvider` through `From`, make 1.5 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 1.5 Add failing test `crates/knowledge/tests/openrouter.rs::error_envelopes_classify_transient_and_permanent`; assert the recorded 429 and 500 fixtures classify transient with preserved status while 401 and 400 classify permanent. Run it and confirm no classifier exists.
+- [x] 1.6 Introduce `ProviderFailure` with the closed failure-class vocabulary and the status-preserving classifier, convert `ScriptedProvider` through `From`, make 1.5 pass, run format and Clippy, and commit this pair on the task branch.
 
 ## 2. Bounded transport
 

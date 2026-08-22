@@ -10,8 +10,8 @@ use ratatoskr_identifiers::{
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     AnalysisIdentity, ArticlePipeline, BlobStore, GenerationRequest, LlmProvider, PipelineError,
-    ProviderError, ProviderFailure, ProviderResponse, ProviderUsage, ScriptedProvider,
-    SourceReference, build_generation_request, prepare_context,
+    ProviderError, ProviderFailure, ProviderIdentity, ProviderResponse, ProviderUsage,
+    ScriptedProvider, SourceReference, build_generation_request, prepare_context,
 };
 
 static TELEMETRY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -437,6 +437,13 @@ fn lock_error<T>(_error: std::sync::PoisonError<T>) -> std::io::Error {
 struct SlowProvider;
 
 impl LlmProvider for SlowProvider {
+    fn identity(&self) -> ProviderIdentity {
+        ProviderIdentity {
+            provider: "scripted_slow".to_owned(),
+            model: "fake_default_v1".to_owned(),
+        }
+    }
+
     async fn generate_json(
         &self,
         _request: GenerationRequest,

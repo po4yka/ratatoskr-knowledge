@@ -84,6 +84,25 @@ create table if not exists knowledge.analysis_attempts (
     )
 );
 
+create table if not exists knowledge.provider_usage (
+    usage_id uuid primary key,
+    provider text not null,
+    model text not null,
+    input_tokens bigint not null,
+    output_tokens bigint not null,
+    estimated_cost_micro_usd bigint not null,
+    recorded_at timestamptz not null default now(),
+    constraint provider_usage_tokens_check check (
+        input_tokens >= 0 and output_tokens >= 0
+    ),
+    constraint provider_usage_cost_check check (estimated_cost_micro_usd >= 0),
+    constraint provider_usage_model_check check (char_length(model) between 1 and 128),
+    constraint provider_usage_provider_check check (provider ~ '^[a-z][a-z0-9_-]{0,63}$')
+);
+
+create index if not exists provider_usage_window_idx
+    on knowledge.provider_usage (provider, recorded_at);
+
 create table if not exists knowledge.analysis_outputs (
     output_id uuid primary key,
     run_id uuid not null references knowledge.analysis_runs(run_id),

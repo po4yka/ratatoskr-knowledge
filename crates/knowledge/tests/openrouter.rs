@@ -1,7 +1,11 @@
 //! `OpenRouter` wire-format contract tests against recorded fixtures.
 
+use std::time::Duration;
+
+use ratatoskr_knowledge::test_support::{FakeReply, FakeTransport};
 use ratatoskr_knowledge::{
-    GenerationRequest, ProviderError, ProviderFailureClass, chat_completion_body, classify_error,
+    GenerationRequest, LlmProvider as _, OpenRouterProvider, OpenRouterSettings, ProviderError,
+    ProviderFailureClass, ProviderSecret, RetryPolicy, chat_completion_body, classify_error,
     parse_success_envelope,
 };
 use serde_json::json;
@@ -113,4 +117,141 @@ fn recorded_error_envelopes_classify_transient_and_permanent()
         assert_eq!(failure.http_status, Some(expected_status));
     }
     Ok(())
+}
+
+#[test]
+fn adapter_identity_names_provider_and_model() -> Result<(), Box<dyn std::error::Error>> {
+    let transport_address = "127.0.0.1:1".parse()?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport_address, 400))?;
+
+    let identity = provider.identity();
+    assert_eq!(identity.provider, "openrouter");
+    assert_eq!(identity.model, "openai/gpt-oss-20b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn success_over_transport_returns_content_and_records_credential_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let transport = FakeTransport::start(vec![FakeReply::bytes(
+        200,
+        SUCCESS_ENVELOPE.as_bytes().to_vec(),
+    )])
+    .await?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 400))?;
+
+    let response = provider.generate_json(sample_request()).await?;
+
+    assert_eq!(
+        response.request_id.as_deref(),
+        Some("gen-1755858000-recorded000000001")
+    );
+    assert_eq!(transport.request_count()?, 1);
+    let recorded = transport.recorded()?;
+    assert_eq!(recorded[0].path, "/api/v1/chat/completions");
+    let expected_authorization = format!("Bearer {CREDENTIAL}");
+    assert_eq!(
+        recorded[0].authorization.as_deref(),
+        Some(expected_authorization.as_str())
+    );
+    assert!(recorded[0].body_bytes > 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_body_fails_without_buffering_past_cap() -> Result<(), Box<dyn std::error::Error>>
+{
+    let transport = FakeTransport::start(vec![FakeReply::oversized(8_192)]).await?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 400))?;
+
+    let failure = provider
+        .generate_json(sample_request())
+        .await
+        .err()
+        .ok_or("expected a size failure")?;
+
+    assert_eq!(failure.error, ProviderError::Permanent);
+    assert_eq!(failure.class, ProviderFailureClass::SizeLimit);
+    assert_eq!(transport.request_count()?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_response_hits_deadline_as_transient_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let transport = FakeTransport::start(vec![FakeReply::stall()]).await?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 200))?;
+
+    let failure = provider
+        .generate_json(sample_request())
+        .await
+        .err()
+        .ok_or("expected a timeout failure")?;
+
+    assert_eq!(failure.error, ProviderError::Transient);
+    assert_eq!(failure.class, ProviderFailureClass::Timeout);
+    assert_eq!(failure.http_status, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn transient_faults_retry_with_jitter_inside_bounds() -> Result<(), Box<dyn std::error::Error>>
+{
+    let transport = FakeTransport::start(vec![
+        FakeReply::bytes(502, SERVER_ERROR_ENVELOPE.as_bytes().to_vec()),
+        FakeReply::bytes(200, SUCCESS_ENVELOPE.as_bytes().to_vec()),
+    ])
+    .await?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 400))?;
+
+    let response = provider.generate_json(sample_request()).await?;
+
+    assert_eq!(response.usage.input_tokens, 57);
+    assert_eq!(transport.request_count()?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn authentication_failure_does_not_retry() -> Result<(), Box<dyn std::error::Error>> {
+    let transport = FakeTransport::start(vec![FakeReply::bytes(
+        401,
+        AUTH_ERROR_ENVELOPE.as_bytes().to_vec(),
+    )])
+    .await?;
+    let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 400))?;
+
+    let failure = provider
+        .generate_json(sample_request())
+        .await
+        .err()
+        .ok_or("expected an authentication failure")?;
+
+    assert_eq!(failure.error, ProviderError::Permanent);
+    assert_eq!(failure.class, ProviderFailureClass::AuthError);
+    assert_eq!(failure.http_status, Some(401));
+    assert_eq!(transport.request_count()?, 1);
+    Ok(())
+}
+
+fn adapter_settings(address: std::net::SocketAddr, deadline_millis: u64) -> OpenRouterSettings {
+    OpenRouterSettings {
+        base_url: format!("http://{address}/api/v1"),
+        model: "openai/gpt-oss-20b".to_owned(),
+        credential: ProviderSecret::new(CREDENTIAL.to_owned()),
+        max_output_tokens: 2_048,
+        response_byte_cap: 4_096,
+        call_deadline: Duration::from_millis(deadline_millis),
+        connect_timeout: Duration::from_millis(deadline_millis),
+        retry: RetryPolicy::new(3, 0, 0),
+    }
+}
+
+fn sample_request() -> GenerationRequest {
+    GenerationRequest {
+        prompt_version: "article_prompt_v1".to_owned(),
+        system_policy: "fixed policy".to_owned(),
+        task_instruction: "fixed task".to_owned(),
+        output_schema: json!({"type": "object"}),
+        source_content: "block 0 paragraph: \"Evidence.\"".to_owned(),
+    }
 }

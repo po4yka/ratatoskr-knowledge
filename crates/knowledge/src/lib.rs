@@ -5,12 +5,15 @@
 
 mod article;
 mod blob_store;
+mod budget;
 mod config;
 mod context;
+mod controlled;
 mod database;
 mod openrouter;
 mod pipeline;
 mod provider;
+mod rate_limit;
 mod runs;
 mod telemetry;
 
@@ -22,19 +25,23 @@ pub use article::{
     validate_article_citations, validate_article_json,
 };
 pub use blob_store::{BlobError, BlobStore};
-pub use config::{AdminConfig, Config, ConfigError, Limits, StorageConfig};
+pub use budget::{BudgetError, BudgetLedger, BudgetLimits, BudgetWindow, TokenPrices};
+pub use config::{AdminConfig, Config, ConfigError, Limits, ProviderSecret, StorageConfig};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
+pub use controlled::{ControlledProvider, SpendControls};
 pub use database::{Database, PersistenceError};
 pub use openrouter::{
-    OpenRouterWireError, chat_completion_body, classify_error, parse_success_envelope,
+    OpenRouterProvider, OpenRouterSettings, OpenRouterWireError, RetryPolicy, chat_completion_body,
+    classify_error, parse_success_envelope,
 };
 pub use pipeline::{ArticlePipeline, PipelineError};
 pub use provider::{
-    LlmProvider, ProviderError, ProviderFailure, ProviderFailureClass, ProviderResponse,
-    ProviderUsage, ScriptedProvider,
+    LlmProvider, ProviderError, ProviderFailure, ProviderFailureClass, ProviderIdentity,
+    ProviderResponse, ProviderUsage, ScriptedProvider,
 };
+pub use rate_limit::RateLimiter;
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,
