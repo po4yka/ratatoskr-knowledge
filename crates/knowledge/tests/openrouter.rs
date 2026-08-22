@@ -1,11 +1,18 @@
 //! `OpenRouter` wire-format contract tests against recorded fixtures.
 
-use ratatoskr_knowledge::{GenerationRequest, chat_completion_body, parse_success_envelope};
+use ratatoskr_knowledge::{
+    GenerationRequest, ProviderError, ProviderFailureClass, chat_completion_body, classify_error,
+    parse_success_envelope,
+};
 use serde_json::json;
 
 const CREDENTIAL: &str = "sk-or-v1-LEAKME";
 
 const SUCCESS_ENVELOPE: &str = include_str!("fixtures/openrouter/success.json");
+const RATE_LIMITED_ENVELOPE: &str = include_str!("fixtures/openrouter/rate_limited.json");
+const SERVER_ERROR_ENVELOPE: &str = include_str!("fixtures/openrouter/server_error.json");
+const AUTH_ERROR_ENVELOPE: &str = include_str!("fixtures/openrouter/auth_error.json");
+const BAD_REQUEST_ENVELOPE: &str = include_str!("fixtures/openrouter/bad_request.json");
 
 #[test]
 fn request_body_maps_separated_fields_and_carries_no_credential()
@@ -60,5 +67,50 @@ fn success_fixture_parses_content_usage_and_request_identity()
     );
     assert_eq!(response.usage.input_tokens, 57);
     assert_eq!(response.usage.output_tokens, 40);
+    Ok(())
+}
+
+#[test]
+fn recorded_error_envelopes_classify_transient_and_permanent()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (envelope, expected_status, expected_error, expected_class) in [
+        (
+            RATE_LIMITED_ENVELOPE,
+            429_u16,
+            ProviderError::Transient,
+            ProviderFailureClass::RateLimited,
+        ),
+        (
+            SERVER_ERROR_ENVELOPE,
+            502,
+            ProviderError::Transient,
+            ProviderFailureClass::ServerError,
+        ),
+        (
+            AUTH_ERROR_ENVELOPE,
+            401,
+            ProviderError::Permanent,
+            ProviderFailureClass::AuthError,
+        ),
+        (
+            BAD_REQUEST_ENVELOPE,
+            400,
+            ProviderError::Permanent,
+            ProviderFailureClass::RequestInvalid,
+        ),
+    ] {
+        let parsed: serde_json::Value = serde_json::from_str(envelope)?;
+        assert!(
+            parsed
+                .get("error")
+                .and_then(serde_json::Value::as_object)
+                .is_some(),
+            "recorded fixture must carry an error envelope object"
+        );
+        let failure = classify_error(expected_status);
+        assert_eq!(failure.error, expected_error);
+        assert_eq!(failure.class, expected_class);
+        assert_eq!(failure.http_status, Some(expected_status));
+    }
     Ok(())
 }

@@ -6,7 +6,10 @@
 //! credential ever enters a serialized body; authorization is a transport
 //! concern only.
 
-use crate::{GenerationRequest, ProviderResponse, ProviderUsage};
+use crate::{
+    GenerationRequest, ProviderError, ProviderFailure, ProviderFailureClass, ProviderResponse,
+    ProviderUsage,
+};
 
 /// Serializes one generation request into the `OpenRouter` chat-completions
 /// body.
@@ -100,4 +103,31 @@ pub fn parse_success_envelope(bytes: &[u8]) -> Result<ProviderResponse, OpenRout
             output_tokens,
         },
     })
+}
+
+/// Classifies one failed HTTP response status into bounded failure facts.
+///
+/// Rate-limit, server-fault, and deadline statuses are retryable inside the
+/// pipeline's shared call budget; authorization and invalid-request failures
+/// are permanent.
+#[must_use]
+pub const fn classify_error(status: u16) -> ProviderFailure {
+    let class = match status {
+        408 => ProviderFailureClass::Timeout,
+        429 => ProviderFailureClass::RateLimited,
+        500..=599 => ProviderFailureClass::ServerError,
+        401 | 403 => ProviderFailureClass::AuthError,
+        _ => ProviderFailureClass::RequestInvalid,
+    };
+    let error = match class {
+        ProviderFailureClass::Timeout
+        | ProviderFailureClass::RateLimited
+        | ProviderFailureClass::ServerError => ProviderError::Transient,
+        _ => ProviderError::Permanent,
+    };
+    ProviderFailure {
+        error,
+        class,
+        http_status: Some(status),
+    }
 }

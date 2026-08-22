@@ -10,8 +10,8 @@ use ratatoskr_identifiers::{
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     AnalysisIdentity, ArticlePipeline, BlobStore, GenerationRequest, LlmProvider, PipelineError,
-    ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider, SourceReference,
-    build_generation_request, prepare_context,
+    ProviderError, ProviderFailure, ProviderResponse, ProviderUsage, ScriptedProvider,
+    SourceReference, build_generation_request, prepare_context,
 };
 
 static TELEMETRY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -440,8 +440,8 @@ impl LlmProvider for SlowProvider {
     async fn generate_json(
         &self,
         _request: GenerationRequest,
-    ) -> Result<ProviderResponse, ProviderError> {
+    ) -> Result<ProviderResponse, ProviderFailure> {
         tokio::time::sleep(std::time::Duration::from_mins(1)).await;
-        Err(ProviderError::Permanent)
+        Err(ProviderError::Permanent.into())
     }
 }

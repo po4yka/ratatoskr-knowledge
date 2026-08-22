@@ -106,9 +106,8 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                         return Err(PipelineError::Timeout);
                     }
                 }
-                Ok(Err(error)) => {
-                    let transient = error == ProviderError::Transient;
-                    let outcome = if transient {
+                Ok(Err(failure)) => {
+                    let outcome = if failure.is_transient() {
                         AttemptOutcome::TransientFailure
                     } else {
                         AttemptOutcome::PermanentFailure
@@ -116,11 +115,11 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                     self.database
                         .update_attempt_failure(run_id, attempt.ordinal, outcome)
                         .await?;
-                    if transient && call == 0 {
+                    if failure.is_transient() && call == 0 {
                         reason = AttemptReason::Retry;
                     } else {
                         self.fail_requested_run(run_id).await?;
-                        return Err(PipelineError::Provider(error));
+                        return Err(PipelineError::Provider(failure.error));
                     }
                 }
                 Ok(Ok(response)) => {

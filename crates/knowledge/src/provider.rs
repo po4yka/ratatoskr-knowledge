@@ -34,6 +34,9 @@ pub enum ProviderError {
     /// The call must not be retried.
     #[error("the provider failed permanently")]
     Permanent,
+    /// The configured spend budget refuses further provider calls.
+    #[error("the provider spend budget is exhausted")]
+    BudgetExhausted,
     /// The deterministic script has no outcome left.
     #[error("the scripted provider is exhausted")]
     Exhausted,
@@ -42,13 +45,99 @@ pub enum ProviderError {
     Internal,
 }
 
+/// Closed transport-failure vocabulary safe for durable attempt records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProviderFailureClass {
+    /// The call deadline elapsed before a complete response.
+    Timeout,
+    /// Connection-level fault before an HTTP status existed.
+    Network,
+    /// The provider asked the caller to slow down.
+    RateLimited,
+    /// A server-side fault outside Knowledge's control.
+    ServerError,
+    /// Authorization to the provider failed.
+    AuthError,
+    /// Knowledge sent something the provider rejects permanently.
+    RequestInvalid,
+    /// The response exceeded the configured byte cap.
+    SizeLimit,
+    /// The durable spend ledger refused or ended this call.
+    BudgetExhausted,
+    /// No transport classification exists, as with scripted outcomes.
+    Unclassified,
+}
+
+impl ProviderFailureClass {
+    /// Returns the stable database spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Network => "network",
+            Self::RateLimited => "rate_limited",
+            Self::ServerError => "server_error",
+            Self::AuthError => "auth_error",
+            Self::RequestInvalid => "request_invalid",
+            Self::SizeLimit => "size_limit",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Unclassified => "unclassified",
+        }
+    }
+}
+
+/// One failed provider call with its bounded classification facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{error}")]
+pub struct ProviderFailure {
+    /// Retry classification used by the pipeline call budget.
+    pub error: ProviderError,
+    /// Closed vocabulary recorded on the attempt row.
+    pub class: ProviderFailureClass,
+    /// Observed HTTP status when one exists.
+    pub http_status: Option<u16>,
+}
+
+impl ProviderFailure {
+    /// Builds a failure without transport facts.
+    #[must_use]
+    pub const fn unclassified(error: ProviderError) -> Self {
+        Self {
+            error,
+            class: ProviderFailureClass::Unclassified,
+            http_status: None,
+        }
+    }
+
+    /// Reports whether the pipeline may retry within its shared call budget.
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        matches!(self.error, ProviderError::Transient)
+    }
+}
+
+impl From<ProviderError> for ProviderFailure {
+    fn from(error: ProviderError) -> Self {
+        if error == ProviderError::BudgetExhausted {
+            Self {
+                error,
+                class: ProviderFailureClass::BudgetExhausted,
+                http_status: None,
+            }
+        } else {
+            Self::unclassified(error)
+        }
+    }
+}
+
 /// Narrow provider-neutral JSON generation boundary.
 pub trait LlmProvider: Send + Sync {
     /// Generates one raw JSON response.
     fn generate_json(
         &self,
         request: GenerationRequest,
-    ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send;
+    ) -> impl Future<Output = Result<ProviderResponse, ProviderFailure>> + Send;
 }
 
 /// Ordered deterministic provider fake used by default tests.
@@ -93,13 +182,13 @@ impl LlmProvider for ScriptedProvider {
     fn generate_json(
         &self,
         request: GenerationRequest,
-    ) -> impl Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+    ) -> impl Future<Output = Result<ProviderResponse, ProviderFailure>> + Send {
         let recorded = self
             .requests
             .lock()
             .map(|mut requests| requests.push(request))
             .map_err(|_| ProviderError::Internal);
-        let outcome = match recorded {
+        let outcome: Result<ProviderResponse, ProviderFailure> = match recorded {
             Ok(()) => self
                 .scripts
                 .lock()
@@ -107,8 +196,9 @@ impl LlmProvider for ScriptedProvider {
                 .and_then(|mut scripts| match scripts.pop_front() {
                     Some(outcome) => outcome,
                     None => Err(ProviderError::Exhausted),
-                }),
-            Err(error) => Err(error),
+                })
+                .map_err(ProviderFailure::from),
+            Err(error) => Err(ProviderFailure::unclassified(error)),
         };
         ready(outcome)
     }
