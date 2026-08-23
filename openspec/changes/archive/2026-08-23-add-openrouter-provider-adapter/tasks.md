@@ -47,6 +47,6 @@
 
 ## 6. Process, docs, and gates
 
-- [ ] 6.1 Add `crates/knowledge/examples/live_openrouter_smoke.rs`, a manually-run live check that loads environment configuration, sends one tiny bounded request, and prints bounded facts only. No test: live network example excluded from the gate by design; verify it compiles under Clippy and never runs in CI.
-- [ ] 6.2 Update README, `docs/INTERFACES.md`, `docs/DATA_MODEL.md`, `docs/TESTING.md`, `DEVELOPMENT.md`, and tick implementation-plan item 5. No test: documentation; verify every statement against the built code and commit atomically on the task branch.
-- [ ] 6.3 Run the exact `DEVELOPMENT.md` gate order with real PostgreSQL tests, `openspec validate add-openrouter-provider-adapter --strict`, the source-length ratchet, and secret and cross-schema audits; then merge to `main` and push only after all checks pass.
+- [x] 6.1 Add `crates/knowledge/examples/live_openrouter_smoke.rs`, a manually-run live check that loads environment configuration, sends one tiny bounded request, and prints bounded facts only. No test: live network example excluded from the gate by design; verify it compiles under Clippy and never runs in CI.
+- [x] 6.2 Update README, `docs/INTERFACES.md`, `docs/DATA_MODEL.md`, `docs/TESTING.md`, `DEVELOPMENT.md`, and tick implementation-plan item 5. No test: documentation; verify every statement against the built code and commit atomically on the task branch.
+- [x] 6.3 Run the exact `DEVELOPMENT.md` gate order with real PostgreSQL tests, `openspec validate add-openrouter-provider-adapter --strict`, the source-length ratchet, and secret and cross-schema audits; then merge to `main` and push only after all checks pass.
