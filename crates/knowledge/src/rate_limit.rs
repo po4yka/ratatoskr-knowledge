@@ -25,26 +25,23 @@ impl RateLimiter {
 
     /// Waits until the caller's reserved slot begins.
     ///
-    /// Cancellation safe: dropping the future leaves the reservation consumed
-    /// and never blocks other callers.
+    /// Cancellation safe: dropping the future consumes the reservation and
+    /// never blocks other callers.
     pub async fn admit(&self) {
-        loop {
-            let wait = {
-                let mut next = match self.next_admission.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                let now = Instant::now();
-                let start = match *next {
-                    Some(reserved) => reserved.max(now),
-                    None => now,
-                };
-                *next = start.checked_add(self.interval).or(Some(start));
-                start.saturating_duration_since(now)
+        let wait = {
+            let mut next = match self.next_admission.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
             };
-            if wait.is_zero() {
-                return;
-            }
+            let now = Instant::now();
+            let start = match *next {
+                Some(reserved) => reserved.max(now),
+                None => now,
+            };
+            *next = start.checked_add(self.interval).or(Some(start));
+            start.saturating_duration_since(now)
+        };
+        if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
     }
