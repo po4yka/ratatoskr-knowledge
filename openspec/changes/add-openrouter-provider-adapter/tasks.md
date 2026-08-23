@@ -40,10 +40,10 @@
 
 ## 5. Configuration and privacy
 
-- [ ] 5.1 Add failing test `crates/knowledge/tests/config.rs::provider_keys_are_finite_strict_and_secret`; assert unknown provider keys fail naming only key and rule, the credential redacts itself in Debug and Serialize output, model is required with a credential present, plain-text non-loopback base URLs fail, and all new limits default finite and positive. Run it and confirm the keys are unrecognized.
-- [ ] 5.2 Implement the provider and limit configuration keys with the redacting secret type, make 5.1 pass, run format and Clippy, and commit this pair on the task branch.
-- [ ] 5.3 Add failing test `crates/knowledge/tests/openrouter.rs::ordinary_logs_carry_no_credential_or_content`; capture logs for a full fake-transport run seeded with `LEAKME` credential and source text and assert neither appears while bounded facts do. Run it and confirm content or the key leaks.
-- [ ] 5.4 Add bounded-fact logging and redaction across adapter and wrapper, make 5.3 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 5.1 Add failing test `crates/knowledge/tests/config.rs::provider_keys_are_finite_strict_and_secret`; assert unknown provider keys fail naming only key and rule, the credential redacts itself in Debug and Serialize output, model is required with a credential present, plain-text non-loopback base URLs fail, and all new limits default finite and positive. Run it and confirm the keys are unrecognized.
+- [x] 5.2 Implement the provider and limit configuration keys with the redacting secret type, make 5.1 pass, run format and Clippy, and commit this pair on the task branch.
+- [x] 5.3 Add failing test `crates/knowledge/tests/openrouter.rs::ordinary_logs_carry_no_credential_or_content`; capture logs for a full fake-transport run seeded with `LEAKME` credential and source text and assert neither appears while bounded facts do. Run it and confirm content or the key leaks.
+- [x] 5.4 Add bounded-fact logging and redaction across adapter and wrapper, make 5.3 pass, run format and Clippy, and commit this pair on the task branch.
 
 ## 6. Process, docs, and gates
 

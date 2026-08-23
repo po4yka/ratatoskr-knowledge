@@ -10,9 +10,12 @@ only `knowledge.*` objects:
 - `analysis_runs` stores the complete source, contract, prompt, context-builder, and model-policy
   identity plus its monotonic state;
 - `analysis_attempts` stores at most two ordered calls with a closed reason and outcome vocabulary,
-  safe request metadata, token counts, validation code, and a Knowledge-owned raw-response
-  `BlobRef`;
-- `analysis_outputs` stores the accepted typed JSON and its raw-response reference.
+  safe request metadata, token counts, validation code, adapter identity, concrete model, measured
+  latency, HTTP status, closed failure class, and a Knowledge-owned raw-response `BlobRef`;
+- `analysis_outputs` stores the accepted typed JSON and its raw-response reference;
+- `provider_usage` records one row per real provider response with provider, model, input and output
+  tokens, estimated cost in micro-US dollars, and recording time, indexed for UTC day and month
+  windows that back the pre-call spend ceilings.
 
 ## Constraints
 

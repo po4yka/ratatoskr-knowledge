@@ -3,8 +3,10 @@
 > Status: Active
 > Last reviewed: 2026-08-21
 
-The first article-analysis slice uses a scripted provider and a disposable `PostgreSQL` 17 database.
-Real providers, search indices, and external message handling are not implemented.
+The first article-analysis slice uses a scripted provider for offline gates, an `OpenRouter` adapter
+for real inference behind timeout, size-cap, rate, retry, cancellation, and budget controls, and a
+disposable `PostgreSQL` 17 database. Search indices and external message handling are not
+implemented.
 
 ## Toolchain and gate
 
@@ -44,8 +46,11 @@ source file above 850 lines.
 4. Add grounding/citation, injection, cost, latency, and authorization tests.
 5. Reindex or backfill through explicit versioned jobs, never hidden request-time mutation.
 
-Default tests use the scripted provider and need no inference credentials. Database tests create
-disposable databases from the current `schema.sql`; this development repository has no migrations.
+Default tests use the scripted provider, recorded fixtures, and a loopback fake transport; they need
+no inference credentials and never reach the live API. Database tests create disposable databases
+from the current `schema.sql`; this development repository has no migrations. The live `OpenRouter`
+smoke check (`cargo run --locked -p ratatoskr-knowledge --example live_openrouter_smoke`) spends
+real credit and is never part of the gate.
 
 ## What a clone needs before you plan a change
 

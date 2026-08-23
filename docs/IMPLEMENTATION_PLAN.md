@@ -8,7 +8,7 @@
   context builder.
 - [x] 4. Add the scripted provider, strict validation, durable attempts, bounded retry and repair,
   protected raw output, atomic persistence, and replay.
-- [ ] 5. Add one real provider adapter behind privacy, timeout, rate, cancellation, and budget
+- [x] 5. Add one real provider adapter behind privacy, timeout, rate, cancellation, and budget
   controls.
 - [ ] 6. Implement PostgreSQL FTS and authorization-aware search documents.
 - [ ] 7. Add pgvector embeddings, chunk and model versioning, and hybrid ranking.
@@ -16,5 +16,6 @@
 - [ ] 9. Add repository, social, and AI archive analysis families through separate changesets.
 - [ ] 10. Define legacy import only if real legacy data exists and has measured value.
 
-Items 1 through 4 are the implemented first article-analysis slice. Later items are not part of the
-current runtime.
+Items 1 through 5 are the implemented first article-analysis slice: the scripted provider proved the
+pipeline and the `OpenRouter` adapter now carries real inference behind the same seam. Later items
+are not part of the current runtime.
