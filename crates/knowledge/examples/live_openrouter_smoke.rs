@@ -14,6 +14,9 @@
 //! latency, and whether the returned bytes parsed as JSON. Prompts, source
 //! text, and response bodies never reach stdout.
 
+// Console output is this example's product; it never runs inside the service.
+#![allow(clippy::print_stdout)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
