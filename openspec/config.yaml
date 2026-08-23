@@ -8,7 +8,7 @@ context: |
 
   Stack: Rust/Tokio, SQLx/PostgreSQL, PostgreSQL FTS and pgvector, JSON Schema validation, versioned prompt resources, provider adapters, BlobStore, tracing/OpenTelemetry, deterministic fixtures, evaluation tooling.
 
-  This repository holds no code yet. Its documents describe intent; a change here plans behaviour, and the first code arrives with its own ci.yml, its lint configuration carrying the size limits, and its tests.
+  The first article-analysis slice is implemented: the Rust service foundation, immutable source and run state, versioned prompt and article contract, scripted provider pipeline, and one bounded OpenRouter adapter. Search, embeddings, event consumers, additional analysis families, and evaluation datasets remain planned.
 
   The gate command list is the fenced block in DEVELOPMENT.md. That list and .github/workflows/ci.yml are one list, and a step in ci.yml fails when they differ, so change both or neither.
 

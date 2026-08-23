@@ -22,7 +22,12 @@ Knowledge must remain reproducible, inspectable, and replaceable. It is not a ge
 
 ## Current phase
 
-The repository is in architecture bootstrap. Do not assume prompts, model adapters, migrations, evaluation datasets, search indices, or CI commands exist unless they are present in the checkout.
+The first article-analysis slice is implemented. It includes the Rust workspace and CI gate,
+`schema.sql`, immutable source and analysis-run persistence, a versioned article contract and
+prompt, a scripted provider, and an `OpenRouter` adapter with finite timeout, rate, cancellation,
+and budget controls. Search indices, embeddings, event consumers, additional analysis families, and
+evaluation datasets remain absent. Do not assume anything beyond the implemented slice exists unless
+it is present in the checkout.
 
 When creating initial implementation:
 
@@ -370,14 +375,15 @@ Record usage and estimated/actual cost without placing sensitive prompt bodies i
 
 A cheaper or faster model change still requires contract-validity and quality evaluation.
 
-## Persistence and migrations
+## Persistence and schema evolution
 
 Knowledge writes only its owned schema.
 
 - No cross-schema foreign keys or writes.
 - Store stable references to source objects rather than copying entire provider records without a projection rationale.
 - Preserve raw response blobs separately from validated projections.
-- Migrations must support rolling deployment and replay.
+- Database changes edit the one current schema definition in place while the development status
+  above holds. Index and embedding revisions use explicit backfill and replay.
 - Prompt/contract/model versions are immutable identifiers.
 - Destructive cleanup must not remove the only evidence required to reproduce an analysis.
 
@@ -484,5 +490,5 @@ A task is complete only when:
 - token, cost, timeout, retry, and cancellation budgets are enforced;
 - search authorization is equivalent across FTS/vector paths;
 - relevant evaluations and repository checks pass;
-- migrations/backfills and cross-repository rollout are documented;
+- schema changes, backfills, and cross-repository rollout are documented;
 - no source-provider or scraping responsibility leaked into this repository.

@@ -19,7 +19,9 @@ Scraping, provider-account synchronization, ownership of raw provider archives, 
 - Prompt/context/model changes create new run identities rather than overwrite history.
 - Citations resolve to immutable source/provenance locations.
 - Retrieval applies authorization before candidate disclosure.
-- Embedding/index migrations are versioned and reversible/forward-fixable.
+- Embedding and index revisions are versioned and support explicit backfill and forward repair.
 - Provider calls obey privacy and per-user/global budgets.
 
-First slice: extracted Document IR -> context -> fake/provider structured summary -> validation -> persisted analysis -> FTS/vector index -> authorized query.
+Implemented first slice: extracted Document IR -> deterministic context -> scripted or `OpenRouter`
+structured summary -> validation -> persisted analysis. FTS, vector indexing, and authorized search
+remain later plan items.

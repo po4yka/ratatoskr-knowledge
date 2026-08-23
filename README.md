@@ -31,7 +31,8 @@ analysis, and persists the evidence and result.
 - one transaction for an accepted result and the `persisted` transition;
 - an admin-only process with `/live`, `/ready`, `/metrics`, and `/version`.
 
-The process has no inference credential setting. Default tests and CI make no inference request.
+The process has an optional `OpenRouter` inference credential setting. Default tests and CI do not
+set it and make no live inference request.
 
 ## Data ownership
 
@@ -79,7 +80,8 @@ RATATOSKR__LIMITS__PROVIDER_MONTHLY_COST_MICRO_USD
 ```
 
 Unknown or invalid `RATATOSKR__` keys stop startup without printing their values. Without
-`RATATOSKR__PROVIDER__OPENROUTER__API_KEY` the process stays offline: no real inference path exists.
+`RATATOSKR__PROVIDER__OPENROUTER__API_KEY` the process stays offline and the real adapter cannot
+make a request.
 The credential redacts itself in diagnostics and serialization and is never persisted to the
 database; ordinary logs carry only bounded facts such as provider, model, outcome class, status,
 token counts, and latency. Validate
@@ -117,5 +119,12 @@ artifacts are under [`prompts/article-analysis.v1`](prompts/article-analysis.v1)
 ## Boundaries
 
 Knowledge does not fetch web pages, run Chromium, synchronize provider accounts, execute Git, own
-source records, expose search, or accept public analysis requests. Real inference, eventing, FTS,
+source records, expose search, or accept public analysis requests. Real `OpenRouter` inference is
+implemented through the library adapter and manual smoke example; wiring analysis to events, FTS,
 embeddings, more analysis families, and legacy import remain separate planned changes.
+
+## Workspace integration
+
+The planned `ratatoskr-workspace` topology will pin Knowledge with compatible source contracts and
+producers. No workspace repository pins or cross-service Knowledge integration profile exist yet;
+this repository remains independently buildable and testable.

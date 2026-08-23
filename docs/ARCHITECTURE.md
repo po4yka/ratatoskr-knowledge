@@ -1,7 +1,8 @@
 # Ratatoskr Knowledge Architecture
 
-> Status: target architecture. The first article-analysis slice is implemented; later analysis,
-> indexing, retrieval, and model-provider sections remain targets.
+> Status: target architecture. The first article-analysis slice and one bounded `OpenRouter`
+> adapter are implemented; later analysis families, indexing, retrieval, and additional provider
+> adapters remain targets.
 
 ## 1. Purpose
 
@@ -712,8 +713,10 @@ The admin listener is loopback-only. `check-config` validates strict environment
 binding. Readiness becomes successful after storage and the current schema are ready. `SIGINT` and
 `SIGTERM` start drain; the process joins server shutdown within its configured bound.
 
-Analysis consumers, model adapters, indexing workers, and public or internal search endpoints are
-future deployment changes. Split processes only after a measured scaling or security need exists.
+The `OpenRouter` adapter exists in the library and manual smoke example, but the admin-only service
+does not invoke it. Analysis consumers, service wiring for model execution, additional adapters,
+indexing workers, and public or internal search endpoints are future deployment changes. Split
+processes only after a measured scaling or security need exists.
 
 ## 25. Migration architecture
 
