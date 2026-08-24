@@ -9,11 +9,14 @@ repository.workspace = true
 [dependencies]
 axum.workspace = true
 ratatoskr-knowledge = { path = "../../crates/knowledge" }
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
 ratatoskr-knowledge = { path = "../../crates/knowledge", features = ["test-support"] }
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true

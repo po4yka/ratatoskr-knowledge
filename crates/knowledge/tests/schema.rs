@@ -26,6 +26,7 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "analysis_outputs",
             "analysis_runs",
             "provider_usage",
+            "search_documents",
             "source_refs"
         ]
     );
@@ -107,6 +108,64 @@ async fn provider_usage_records_window_totals() -> Result<(), Box<dyn std::error
         .window_totals("other-provider", ratatoskr_knowledge::BudgetWindow::Monthly)
         .await?;
     assert_eq!(other, (0, 0));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn search_documents_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+
+    let columns: Vec<String> = sqlx::query_scalar(
+        "select column_name from information_schema.columns
+         where table_schema = 'knowledge' and table_name = 'search_documents'
+         order by ordinal_position",
+    )
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(
+        columns,
+        [
+            "search_document_id",
+            "source_ref_id",
+            "latest_output_id",
+            "tenant_ref",
+            "owner_context",
+            "document_id",
+            "title",
+            "lead",
+            "body",
+            "search_vector",
+            "updated_at"
+        ]
+    );
+
+    let unique_definitions: Vec<String> = sqlx::query_scalar(
+        "select pg_get_constraintdef(oid) from pg_constraint
+         where conrelid = 'knowledge.search_documents'::regclass and contype = 'u'
+         order by conname",
+    )
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(unique_definitions.as_slice(), ["UNIQUE (source_ref_id)"]);
+
+    let vector_index: Option<String> = sqlx::query_scalar(
+        "select indexdef from pg_indexes
+         where schemaname = 'knowledge' and tablename = 'search_documents'
+           and indexname = 'search_documents_search_vector_idx'",
+    )
+    .fetch_optional(database.database.pool())
+    .await?;
+    let vector_index = vector_index.unwrap_or_default();
+    assert!(
+        vector_index.contains("USING gin"),
+        "indexdef was: {vector_index}"
+    );
+    assert!(
+        vector_index.contains("search_vector"),
+        "indexdef was: {vector_index}"
+    );
 
     database.cleanup().await?;
     Ok(())

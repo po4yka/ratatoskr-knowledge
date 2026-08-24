@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve_admin(
         listener,
         lifecycle,
+        database.clone(),
         Duration::from_millis(config.limits.shutdown_timeout_ms),
     )
     .await?;
@@ -48,10 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn serve_admin(
     listener: tokio::net::TcpListener,
     lifecycle: Lifecycle,
+    database: Database,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server = axum::serve(listener, admin_router(lifecycle.clone()))
+    let server = axum::serve(listener, admin_router(lifecycle.clone(), database))
         .with_graceful_shutdown(async move {
             let _ignored = shutdown_rx.await;
         })

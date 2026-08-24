@@ -137,3 +137,28 @@ create table if not exists knowledge.analysis_outputs (
 create unique index if not exists one_accepted_output_per_run
     on knowledge.analysis_outputs(run_id)
     where accepted;
+
+create table if not exists knowledge.search_documents (
+    search_document_id uuid primary key,
+    source_ref_id uuid not null references knowledge.source_refs(source_ref_id),
+    latest_output_id uuid not null,
+    tenant_ref text not null,
+    owner_context text not null,
+    document_id uuid not null,
+    title text not null,
+    lead text not null,
+    body text not null,
+    search_vector tsvector generated always as (
+        setweight(to_tsvector('english', title), 'A')
+        || setweight(to_tsvector('english', lead), 'B')
+        || setweight(to_tsvector('english', body), 'C')
+    ) stored,
+    updated_at timestamptz not null,
+    constraint search_documents_source_identity unique (source_ref_id)
+);
+
+create index if not exists search_documents_search_vector_idx
+    on knowledge.search_documents using gin (search_vector);
+
+create index if not exists search_documents_tenant_recency_idx
+    on knowledge.search_documents (tenant_ref, updated_at desc);

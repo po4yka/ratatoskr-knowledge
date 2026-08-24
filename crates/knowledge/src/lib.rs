@@ -15,6 +15,7 @@ mod pipeline;
 mod provider;
 mod rate_limit;
 mod runs;
+pub mod search;
 mod telemetry;
 
 #[cfg(feature = "test-support")]
@@ -45,5 +46,9 @@ pub use rate_limit::RateLimiter;
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,
+};
+pub use search::{
+    SearchDocumentProjection, SearchError, SearchPage, SearchQuery, SearchResult,
+    record_search_document, search_page,
 };
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};

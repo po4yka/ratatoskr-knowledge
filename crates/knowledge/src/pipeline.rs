@@ -1,6 +1,8 @@
+use ratatoskr_document_contracts::Document;
 use uuid::Uuid;
 
 use crate::runs::AttemptUpdate;
+use crate::search::{SearchDocumentProjection, extract_search_text, record_search_document};
 use crate::{
     ArticleAnalysis, ArticleValidationError, AttemptInput, AttemptOutcome, AttemptReason,
     BlobError, BlobStore, Database, GenerationRequest, LlmProvider, PersistenceError,
@@ -76,6 +78,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         run_id: Uuid,
         mut request: GenerationRequest,
         context: &PreparedContext,
+        document: &Document,
     ) -> Result<ArticleAnalysis, PipelineError> {
         if let Some(article) = self.resume_output(run_id).await? {
             return Ok(article);
@@ -89,7 +92,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         let mut reason = AttemptReason::Initial;
         for call in 0..2 {
             let flow = self
-                .execute_attempt(run_id, call, request.clone(), context, reason)
+                .execute_attempt(run_id, call, request.clone(), context, document, reason)
                 .await?;
             match flow {
                 AttemptFlow::Accepted(article) => return Ok(article),
@@ -117,6 +120,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         call: u8,
         request: GenerationRequest,
         context: &PreparedContext,
+        document: &Document,
         reason: AttemptReason,
     ) -> Result<AttemptFlow, PipelineError> {
         let identity = self.provider.identity();
@@ -181,7 +185,14 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             }
         };
         match self
-            .process_or_fail(run_id, attempt.ordinal, &response, context, duration_ms)
+            .process_or_fail(
+                run_id,
+                attempt.ordinal,
+                &response,
+                context,
+                document,
+                duration_ms,
+            )
             .await?
         {
             ResponseOutcome::Accepted(article) => Ok(AttemptFlow::Accepted(article)),
@@ -230,10 +241,11 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         ordinal: i16,
         response: &crate::ProviderResponse,
         context: &PreparedContext,
+        document: &Document,
         duration_ms: i32,
     ) -> Result<ResponseOutcome, PipelineError> {
         match self
-            .process_response(run_id, ordinal, response, context, duration_ms)
+            .process_response(run_id, ordinal, response, context, document, duration_ms)
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -261,6 +273,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         ordinal: i16,
         response: &crate::ProviderResponse,
         context: &PreparedContext,
+        document: &Document,
         duration_ms: i32,
     ) -> Result<ResponseOutcome, PipelineError> {
         let reference = self.blobs.store_raw(&response.bytes).await?;
@@ -331,7 +344,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                 RunState::SchemaValidated,
             )
             .await?;
-        self.persist(run_id, &article, &reference).await?;
+        self.persist(run_id, &article, &reference, document).await?;
         self.database
             .transition_run(run_id, RunState::Persisted, RunState::Completed)
             .await?;
@@ -370,6 +383,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         run_id: Uuid,
         article: &ArticleAnalysis,
         reference: &ratatoskr_identifiers::BlobRef,
+        document: &Document,
     ) -> Result<(), PipelineError> {
         let result = serde_json::to_value(article).map_err(PersistenceError::Encode)?;
         let raw_response = serde_json::to_value(reference).map_err(PersistenceError::Encode)?;
@@ -379,12 +393,13 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
+        let output_id = Uuid::now_v7();
         sqlx::query(
             "insert into knowledge.analysis_outputs (
                 output_id, run_id, result, raw_response
              ) values ($1, $2, $3, $4)",
         )
-        .bind(Uuid::now_v7())
+        .bind(output_id)
         .bind(run_id)
         .bind(result)
         .bind(raw_response)
@@ -402,6 +417,32 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         if changed.rows_affected() != 1 {
             return Err(PersistenceError::InvalidAnalysisIdentity.into());
         }
+        let (source_ref_id, tenant_ref, owner_context): (Uuid, String, String) = sqlx::query_as(
+            "select r.source_ref_id, s.tenant_ref, s.owner_context
+                 from knowledge.analysis_runs r
+                 join knowledge.source_refs s on s.source_ref_id = r.source_ref_id
+                 where r.run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        let extracted = extract_search_text(document);
+        record_search_document(
+            &mut *transaction,
+            &SearchDocumentProjection {
+                source_ref_id,
+                latest_output_id: output_id,
+                tenant_ref,
+                owner_context,
+                document_id: document.document_id.0,
+                title: extracted.title,
+                lead: extracted.lead,
+                body: extracted.body,
+            },
+        )
+        .await
+        .map_err(PersistenceError::Query)?;
         transaction
             .commit()
             .await

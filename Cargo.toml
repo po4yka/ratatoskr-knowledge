@@ -10,7 +10,7 @@ license = "BSD-3-Clause"
 repository = "https://github.com/po4yka/ratatoskr-knowledge"
 
 [workspace.dependencies]
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "query", "tokio"] }
 http-body-util = "=0.1.5"
 jsonschema = { version = "=0.50.0", default-features = false }
 ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "d56c6891ce9b4fca2c65d43205080d9a666ab5a0" }

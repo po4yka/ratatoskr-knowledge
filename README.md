@@ -6,8 +6,9 @@ analysis, and persists the evidence and result.
 
 > **Status:** the first article-analysis slice is implemented, first against a scripted provider and
 > now with a real `OpenRouter` adapter behind timeout, size-cap, rate, retry, cancellation, and
-> budget controls. There is no message-bus consumer, public analysis endpoint, search index, or
-> embedding pipeline.
+> budget controls, alongside a tenant-scoped full-text projection and operator-plane retrieval.
+> There is no message-bus consumer, public analysis endpoint, embedding pipeline, or hybrid
+> ranking.
 
 > [!IMPORTANT]
 > Ratatoskr is in development. The API, database, and contracts keep their first version. The
@@ -29,7 +30,11 @@ analysis, and persists the evidence and result.
 - content-addressed raw-response bytes owned by Knowledge;
 - structural, typed, citation, retry, repair, and replay checks;
 - one transaction for an accepted result and the `persisted` transition;
-- an admin-only process with `/live`, `/ready`, `/metrics`, and `/version`.
+- a tenant-scoped full-text projection (`knowledge.search_documents`) written inside that
+  transaction with a latest-wins output guard;
+- ranked retrieval over the projection with bounded snippets, deterministic ordering, and strict
+  page bounds validated before any database work;
+- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`.
 
 The process has an optional `OpenRouter` inference credential setting. Default tests and CI do not
 set it and make no live inference request.
@@ -44,6 +49,7 @@ analysis_runs
 analysis_attempts
 analysis_outputs
 provider_usage
+search_documents
 ```
 
 Source bytes stay with the source-owning service. Knowledge stores the immutable Document IR
@@ -119,9 +125,10 @@ artifacts are under [`prompts/article-analysis.v1`](prompts/article-analysis.v1)
 ## Boundaries
 
 Knowledge does not fetch web pages, run Chromium, synchronize provider accounts, execute Git, own
-source records, expose search, or accept public analysis requests. Real `OpenRouter` inference is
-implemented through the library adapter and manual smoke example; wiring analysis to events, FTS,
-embeddings, more analysis families, and legacy import remain separate planned changes.
+source records, accept public analysis requests, or expose retrieval anywhere but the operator
+plane's `/internal/search`. Real `OpenRouter` inference is implemented through the library adapter
+and manual smoke example; wiring analysis to events, embeddings, hybrid ranking, more analysis
+families, and legacy import remain separate planned changes.
 
 ## Workspace integration
 
