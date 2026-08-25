@@ -45,6 +45,8 @@ Writes happen in one transaction per source: upsert all chunk rows for the activ
 
 ### D5: Background indexing as a poll over durable state
 
+Today `ArticlePipeline` transitions an accepted run straight from `persisted` to `completed`; this change removes that jump so acceptance leaves the run resting at `persisted`, the indexer owns the single guarded `persisted -> indexed` transition, and `completed` stays a legal but unused state for future indexing stages. Existing pipeline test expectations are updated accordingly as part of the task pair.
+
 One worker task spawned beside the listener: select accepted-output runs in `persisted` ordered oldest-first up to `EMBEDDINGS_BATCH_SOURCES`, embed each as described, and repeat until quiet, then sleep `EMBEDDINGS_POLL_INTERVAL_MS` (immediate first pass at startup). Selection reads only durable state, so crashes and restarts converge with no queue infrastructure; this replaces the legacy synchronous fast-path deliberately — the legacy reconciler existed to repair drift between two stores, which one-store persistence eliminates, and the poll bounds worst-case indexing lag explicitly. Sources lacking a search projection are counted and skipped (they cannot be chunked under the policy). On drain, the worker finishes the current source or abandons it mid-call (the run simply stays `persisted` and is retried next boot) and exits within the existing shutdown bound; the provider call itself remains cancellation-safe through its deadline.
 
 ### D6: Hybrid ranking with documented fusion
