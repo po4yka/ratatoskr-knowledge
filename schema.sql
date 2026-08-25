@@ -44,6 +44,7 @@ create table if not exists knowledge.analysis_runs (
         'schema_validated',
         'repaired',
         'persisted',
+        'indexed',
         'completed',
         'failed'
     )),

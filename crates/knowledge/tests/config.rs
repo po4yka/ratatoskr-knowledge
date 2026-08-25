@@ -108,3 +108,166 @@ fn provider_keys_are_finite_strict_and_secret() -> Result<(), Box<dyn std::error
     assert!(!unknown_diagnostic.contains("LEAKME"));
     Ok(())
 }
+
+#[test]
+fn embeddings_configuration_parses_strictly() -> Result<(), Box<dyn std::error::Error>> {
+    let defaults = Config::default();
+    assert!(defaults.provider.embeddings.is_none());
+    assert_eq!(defaults.limits.embeddings_timeout_ms, 30_000);
+    assert_eq!(defaults.limits.embeddings_max_input_characters, 120_000);
+    assert_eq!(defaults.limits.embeddings_batch_sources, 8);
+    assert_eq!(defaults.limits.embeddings_poll_interval_ms, 5_000);
+    assert_eq!(defaults.limits.embeddings_requests_per_minute, 60);
+    assert_eq!(defaults.limits.embeddings_max_failure_attempts, 5);
+    assert_eq!(defaults.limits.embeddings_daily_token_budget, 2_000_000);
+    assert_eq!(defaults.limits.embeddings_monthly_token_budget, 20_000_000);
+    assert_eq!(defaults.limits.embeddings_daily_cost_micro_usd, 5_000_000);
+    assert_eq!(
+        defaults.limits.embeddings_monthly_cost_micro_usd,
+        50_000_000
+    );
+    assert_eq!(defaults.limits.chunk_target_characters, 1_600);
+    assert_eq!(defaults.limits.chunk_overlap_characters, 200);
+
+    let configured = Config::from_environment([
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY",
+            "sk-embed-LEAKME",
+        ),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__MODEL",
+            "text-embedding-3-small",
+        ),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL",
+            "http://127.0.0.1:8080/v1",
+        ),
+        ("RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS", "1536"),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__PROMPT_VERSION",
+            "prefix.v2",
+        ),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__INPUT_MICRO_USD_PER_MTOKEN",
+            "17",
+        ),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_TIMEOUT_MS", "45000"),
+        (
+            "RATATOSKR__LIMITS__EMBEDDINGS_MAX_INPUT_CHARACTERS",
+            "90000",
+        ),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_BATCH_SOURCES", "3"),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_POLL_INTERVAL_MS", "1500"),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_REQUESTS_PER_MINUTE", "30"),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_MAX_FAILURE_ATTEMPTS", "2"),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_DAILY_TOKEN_BUDGET", "111111"),
+        (
+            "RATATOSKR__LIMITS__EMBEDDINGS_MONTHLY_TOKEN_BUDGET",
+            "222222",
+        ),
+        (
+            "RATATOSKR__LIMITS__EMBEDDINGS_DAILY_COST_MICRO_USD",
+            "333333",
+        ),
+        (
+            "RATATOSKR__LIMITS__EMBEDDINGS_MONTHLY_COST_MICRO_USD",
+            "444444",
+        ),
+        ("RATATOSKR__LIMITS__CHUNK_TARGET_CHARACTERS", "2400"),
+        ("RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS", "300"),
+    ])?;
+    let embeddings = configured
+        .provider
+        .embeddings
+        .as_ref()
+        .ok_or("embeddings provider must be configured")?;
+    assert_eq!(embeddings.model, "text-embedding-3-small");
+    assert_eq!(embeddings.api_key.expose_secret(), "sk-embed-LEAKME");
+    assert_eq!(embeddings.base_url, "http://127.0.0.1:8080/v1");
+    assert_eq!(embeddings.dimensions, 1536);
+    assert_eq!(embeddings.prompt_version, "prefix.v2");
+    assert_eq!(embeddings.input_micro_usd_per_mtoken, 17);
+    assert_eq!(configured.limits.embeddings_timeout_ms, 45_000);
+    assert_eq!(configured.limits.embeddings_max_input_characters, 90_000);
+    assert_eq!(configured.limits.embeddings_batch_sources, 3);
+    assert_eq!(configured.limits.embeddings_poll_interval_ms, 1_500);
+    assert_eq!(configured.limits.embeddings_requests_per_minute, 30);
+    assert_eq!(configured.limits.embeddings_max_failure_attempts, 2);
+    assert_eq!(configured.limits.embeddings_daily_token_budget, 111_111);
+    assert_eq!(configured.limits.embeddings_monthly_token_budget, 222_222);
+    assert_eq!(configured.limits.embeddings_daily_cost_micro_usd, 333_333);
+    assert_eq!(configured.limits.embeddings_monthly_cost_micro_usd, 444_444);
+    assert_eq!(configured.limits.chunk_target_characters, 2_400);
+    assert_eq!(configured.limits.chunk_overlap_characters, 300);
+
+    let encoded = serde_json::to_string(&configured)?;
+    let diagnostic = format!("{configured:?}");
+    assert!(!encoded.contains("sk-embed-LEAKME"));
+    assert!(!diagnostic.contains("sk-embed-LEAKME"));
+
+    Ok(())
+}
+
+#[test]
+fn embeddings_configuration_rejects_invalid_settings() {
+    let encoded = serde_json::to_string(&Config::default()).unwrap();
+    assert!(!encoded.contains("sk-embed-LEAKME"));
+
+    let missing_model = Config::from_environment([(
+        "RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY",
+        "sk-embed-LEAKME",
+    )]);
+    let missing_diagnostic = missing_model
+        .expect_err("model must be required with a credential")
+        .to_string();
+    assert!(missing_diagnostic.contains("RATATOSKR__PROVIDER__EMBEDDINGS__MODEL"));
+    assert!(!missing_diagnostic.contains("sk-embed-LEAKME"));
+
+    for (key, value) in [
+        ("RATATOSKR__PROVIDER__EMBEDDINGS__MYSTERY", "LEAKME"),
+        ("RATATOSKR__LIMITS__EMBEDDINGS_MYSTERY", "LEAKME"),
+    ] {
+        let unknown = Config::from_environment([(key, value)]);
+        let unknown_diagnostic = unknown.expect_err("unknown key must fail").to_string();
+        assert!(unknown_diagnostic.contains(key));
+        assert!(!unknown_diagnostic.contains("LEAKME"));
+    }
+
+    let plain_text = Config::from_environment([
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY",
+            "sk-embed-LEAKME",
+        ),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__MODEL",
+            "text-embedding-3-small",
+        ),
+        (
+            "RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL",
+            "http://inference.example.internal/v1",
+        ),
+    ]);
+    let plain_diagnostic = plain_text
+        .expect_err("plain-text remote base URL must fail")
+        .to_string();
+    assert!(
+        plain_diagnostic.contains("RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL"),
+        "the failing key must be named"
+    );
+
+    let overlap_equal = Config::from_environment([
+        ("RATATOSKR__LIMITS__CHUNK_TARGET_CHARACTERS", "300"),
+        ("RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS", "300"),
+    ]);
+    let overlap_diagnostic = overlap_equal
+        .expect_err("overlap must stay below the chunk target")
+        .to_string();
+    assert!(overlap_diagnostic.contains("RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS"));
+
+    let wrong_dimensions =
+        Config::from_environment([("RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS", "768")]);
+    let dimensions_diagnostic = wrong_dimensions
+        .expect_err("dimensions must equal the storage dimensionality")
+        .to_string();
+    assert!(dimensions_diagnostic.contains("RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS"));
+}

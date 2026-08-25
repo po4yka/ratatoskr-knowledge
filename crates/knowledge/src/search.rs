@@ -246,6 +246,270 @@ where
     }
 }
 
+/// Fixed Reciprocal Rank Fusion constant: each contributing leg adds
+/// one over k plus rank, where k is [`RRF_K`], to a candidate's fused score.
+pub const RRF_K: i64 = 60;
+
+/// Slack added to the requested page when sizing each candidate leg.
+pub const CANDIDATE_DEPTH_SLACK: i64 = 25;
+
+/// Hard ceiling on how deep each candidate leg may reach.
+pub const MAX_CANDIDATE_DEPTH: i64 = 200;
+
+/// Computes the documented deterministic candidate depth for one page.
+///
+/// Both fusion legs consider the same depth, derived only from the
+/// requested pagination so repeated queries see identical candidates.
+#[must_use]
+pub fn candidate_depth(limit: i64, offset: i64) -> i64 {
+    (offset
+        .saturating_add(limit)
+        .saturating_add(CANDIDATE_DEPTH_SLACK))
+    .min(MAX_CANDIDATE_DEPTH)
+}
+
+/// One query-time binding of a semantic search leg.
+///
+/// Every field pins the embedding identity exactly as persisted, so
+/// vectors from any other model, prompt, or chunking version stay
+/// invisible to this query.
+#[derive(Debug, Clone)]
+pub struct SemanticLeg {
+    /// Query embedding; cosine distance orders the semantic leg.
+    pub vector: Vec<f32>,
+    /// Provider identifier bound to stored vectors.
+    pub provider: String,
+    /// Model identifier bound to stored vectors.
+    pub model: String,
+    /// Prompt-version label bound to stored vectors.
+    pub prompt_version: String,
+    /// Chunking-version label bound to stored vectors.
+    pub chunking_version: String,
+}
+
+/// Reads one hybrid-ranked page fusing lexical and semantic legs.
+///
+/// The lexical leg ranks by the same cover-density ordering as
+/// [`rank_matches`]; the semantic leg joins tenant-scoped projections
+/// with the best (smallest cosine distance) chunk per document under
+/// the leg's exact model identity. Each leg contributes candidates up
+/// to [`candidate_depth`] and every candidate accumulates one over
+/// [`RRF_K`] plus leg rank; ties break by descending recency then
+/// document identity, and pagination applies last.
+///
+/// # Errors
+///
+/// Returns [`SearchError`] when reading fails.
+pub async fn hybrid_search_page<'e, E>(
+    executor: E,
+    query: &SearchQuery,
+    leg: &SemanticLeg,
+) -> Result<SearchPage, SearchError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let depth = candidate_depth(query.limit(), query.offset());
+    let rows: Vec<(String, uuid::Uuid, String, String, f32)> = sqlx::query_as(
+        "with lex as (
+             select s.search_document_id,
+                    row_number() over (
+                        order by ts_rank_cd(s.search_vector, q.tsq) desc,
+                                 s.updated_at desc,
+                                 s.search_document_id desc
+                    ) as rnk
+             from knowledge.search_documents s,
+                  websearch_to_tsquery('english', $2) as q(tsq)
+             where s.tenant_ref = $1
+               and s.search_vector @@ q.tsq
+             limit $8
+         ),
+         sem as (
+             select d.search_document_id,
+                    row_number() over (
+                        order by best.dist asc,
+                                 d.updated_at desc,
+                                 d.search_document_id desc
+                    ) as rnk
+             from (
+                 select c.source_ref_id, min(c.embedding <=> $3) as dist
+                 from knowledge.embedding_chunks c
+                 where c.provider = $4
+                   and c.model = $5
+                   and c.prompt_version = $6
+                   and c.chunking_version = $7
+                 group by c.source_ref_id
+             ) best
+             join knowledge.search_documents d
+               on d.source_ref_id = best.source_ref_id
+             where d.tenant_ref = $1
+             limit $8
+         ),
+         fused as (
+             select search_document_id, 1.0::double precision / ($9 + rnk) as score
+             from lex
+             union all
+             select search_document_id, 1.0::double precision / ($9 + rnk) as score
+             from sem
+         )
+         select s.owner_context,
+                s.document_id,
+                s.title,
+                ts_headline(
+                    'english',
+                    s.lead || ' ' || s.body,
+                    websearch_to_tsquery('english', $2),
+                    'StartSel=<b>, StopSel=</b>, MaxWords=16, MinWords=6, MaxFragments=0'
+                ),
+                sum(f.score)::real
+         from fused f
+         join knowledge.search_documents s
+           on s.search_document_id = f.search_document_id
+         group by s.search_document_id,
+                  s.owner_context,
+                  s.document_id,
+                  s.title,
+                  s.lead,
+                  s.body,
+                  s.updated_at
+         order by sum(f.score) desc,
+                  s.updated_at desc,
+                  s.search_document_id desc
+         limit $10 offset $11",
+    )
+    .bind(query.tenant_ref())
+    .bind(query.raw_query())
+    .bind(pgvector::Vector::from(leg.vector.clone()))
+    .bind(&leg.provider)
+    .bind(&leg.model)
+    .bind(&leg.prompt_version)
+    .bind(&leg.chunking_version)
+    .bind(depth)
+    .bind(RRF_K)
+    .bind(query.limit())
+    .bind(query.offset())
+    .fetch_all(executor)
+    .await
+    .map_err(SearchError::Unavailable)?;
+    Ok(SearchPage {
+        results: rows
+            .into_iter()
+            .map(
+                |(owner_context, document_id, title, snippet, rank)| SearchResult {
+                    owner_context,
+                    document_id,
+                    title,
+                    snippet: Some(snippet),
+                    rank: Some(rank),
+                },
+            )
+            .collect(),
+    })
+}
+
+/// Which retrieval path served one page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RankingPath {
+    /// Blank query browsed by recency.
+    BrowseRecent,
+    /// Lexical-only ranking served the page.
+    LexicalOnly,
+    /// Fused lexical-plus-semantic ranking served the page.
+    Hybrid,
+}
+
+/// Retrieval selector fusing the embeddings seam with the ranked reader.
+///
+/// Non-blank queries embed through the controlled provider and serve a
+/// hybrid page; any embedding failure, including a dimension mismatch,
+/// degrades to plain lexical ranking instead of failing the request.
+#[derive(Debug)]
+pub struct HybridRetriever<P> {
+    provider: P,
+}
+
+impl<P: crate::EmbeddingProvider> HybridRetriever<P> {
+    /// Wraps one embeddings provider behind the retrieval selector.
+    #[must_use]
+    pub const fn new(provider: P) -> Self {
+        Self { provider }
+    }
+
+    /// Serves one page and reports which ranking path served it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError`] when parameters are invalid or the chosen
+    /// database read fails; an embedding failure never surfaces here.
+    pub async fn page<'e, E>(
+        &self,
+        executor: E,
+        query: &SearchQuery,
+    ) -> Result<(SearchPage, RankingPath), SearchError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if query.raw_query().trim().is_empty() {
+            return Ok((
+                search_page(executor, query).await?,
+                RankingPath::BrowseRecent,
+            ));
+        }
+        let identity = self.provider.identity();
+        let embedded = self
+            .provider
+            .embed(vec![query.raw_query().trim().to_owned()])
+            .await;
+        let vector = match embedded {
+            Ok(response)
+                if response.vectors.len() == 1
+                    && response
+                        .vectors
+                        .first()
+                        .is_some_and(|vector| vector.len() == usize::from(identity.dimensions)) =>
+            {
+                response.vectors.into_iter().next().unwrap_or_default()
+            }
+            Ok(response) => {
+                tracing::warn!(
+                    operation = "hybrid_retrieval",
+                    outcome = "dimension_mismatch",
+                    returned = response.vectors.len(),
+                    expected_dimensions = identity.dimensions,
+                    "query embedding shape mismatched; serving lexical results"
+                );
+                return Ok((
+                    search_page(executor, query).await?,
+                    RankingPath::LexicalOnly,
+                ));
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    operation = "hybrid_retrieval",
+                    outcome = "embed_failed",
+                    failure_class = failure.class.as_str(),
+                    http_status = failure.http_status,
+                    "query embedding failed; serving lexical results"
+                );
+                return Ok((
+                    search_page(executor, query).await?,
+                    RankingPath::LexicalOnly,
+                ));
+            }
+        };
+        let leg = SemanticLeg {
+            vector,
+            provider: identity.provider,
+            model: identity.model,
+            prompt_version: identity.prompt_version,
+            chunking_version: crate::CHUNKING_VERSION.to_owned(),
+        };
+        Ok((
+            hybrid_search_page(executor, query, &leg).await?,
+            RankingPath::Hybrid,
+        ))
+    }
+}
+
 /// Recency browse: newest first, no snippet, no score.
 async fn browse_recent<'e, E>(executor: E, query: &SearchQuery) -> Result<SearchPage, SearchError>
 where
