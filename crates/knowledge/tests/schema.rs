@@ -25,6 +25,8 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "analysis_attempts",
             "analysis_outputs",
             "analysis_runs",
+            "embedding_chunks",
+            "embedding_failures",
             "provider_usage",
             "search_documents",
             "source_refs"
@@ -166,6 +168,79 @@ async fn search_documents_projection() -> Result<(), Box<dyn std::error::Error>>
         vector_index.contains("search_vector"),
         "indexdef was: {vector_index}"
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pgvector_embedding_schema_objects() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    database.database.apply_schema().await?;
+
+    let extension: Option<String> =
+        sqlx::query_scalar("select extname from pg_extension where extname = 'vector'")
+            .fetch_optional(database.database.pool())
+            .await?;
+    assert_eq!(extension.as_deref(), Some("vector"));
+
+    for table in ["embedding_chunks", "embedding_failures"] {
+        let present: Option<String> =
+            sqlx::query_scalar("select to_regclass('knowledge.' || $1)::text")
+                .bind(table)
+                .fetch_one(database.database.pool())
+                .await?;
+        let expected = table;
+        assert_eq!(
+            present.as_deref(),
+            Some(expected),
+            "table {table} must exist"
+        );
+    }
+
+    let embedding_type: Option<String> = sqlx::query_scalar(
+        "select format_type(a.atttypid, a.atttypmod)
+         from pg_attribute a
+         where a.attrelid = 'knowledge.embedding_chunks'::regclass
+           and a.attname = 'embedding'
+           and not a.attisdropped",
+    )
+    .fetch_optional(database.database.pool())
+    .await?;
+    assert_eq!(embedding_type.as_deref(), Some("vector(1536)"));
+
+    let hnsw_index: Option<String> = sqlx::query_scalar(
+        "select indexdef from pg_indexes
+         where schemaname = 'knowledge' and tablename = 'embedding_chunks'
+           and indexname = 'embedding_chunks_embedding_hnsw_idx'",
+    )
+    .fetch_optional(database.database.pool())
+    .await?;
+    let hnsw_index = hnsw_index.unwrap_or_default();
+    assert!(
+        hnsw_index.contains("USING hnsw") && hnsw_index.contains("vector_cosine_ops"),
+        "indexdef was: {hnsw_index}"
+    );
+
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "select constraint_name from information_schema.table_constraints
+         where table_schema = 'knowledge' order by constraint_name",
+    )
+    .fetch_all(database.database.pool())
+    .await?;
+    for expected in [
+        "embedding_chunks_dimensions_check",
+        "embedding_chunks_digest_check",
+        "embedding_chunks_identity_key",
+        "embedding_failures_attempt_check",
+        "embedding_failures_class_check",
+        "embedding_failures_identity_key",
+    ] {
+        assert!(
+            constraints.iter().any(|name| name == expected),
+            "missing constraint {expected}"
+        );
+    }
 
     database.cleanup().await?;
     Ok(())

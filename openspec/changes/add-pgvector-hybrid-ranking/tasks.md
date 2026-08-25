@@ -3,8 +3,8 @@
 ## 1. Environment and schema foundation
 
 - [ ] 1.1 Switch the CI PostgreSQL service in `.github/workflows/ci.yml` to a digest-pinned pgvector-enabled PostgreSQL 17 image with unchanged credentials, ICU initdb arguments, ports, and health check. Cannot start from a failing test: infrastructure configuration only.
-- [ ] 1.2 Add a failing test `pgvector_embedding_schema_objects` to `crates/knowledge/tests/schema.rs` asserting that after `apply_schema` the vector extension, `knowledge.embedding_chunks`, `knowledge.embedding_failures`, and the cosine similarity index exist, and that applying the schema a second time succeeds unchanged; verify it fails with `cargo test -p ratatoskr-knowledge --test schema pgvector_embedding_schema_objects` because `schema.sql` defines none of them.
-- [ ] 1.3 Extend `schema.sql` in place with `create extension if not exists vector`, the two tables from design D4 including the identity unique key and column checks, and the HNSW cosine index; verify `pgvector_embedding_schema_objects` passes and `cargo test -p ratatoskr-knowledge --test schema` stays fully green.
+- [x] 1.2 Add a failing test `pgvector_embedding_schema_objects` to `crates/knowledge/tests/schema.rs` asserting that after `apply_schema` the vector extension, `knowledge.embedding_chunks`, `knowledge.embedding_failures`, and the cosine similarity index exist, and that applying the schema a second time succeeds unchanged; verify it fails with `cargo test -p ratatoskr-knowledge --test schema pgvector_embedding_schema_objects` because `schema.sql` defines none of them.
+- [x] 1.3 Extend `schema.sql` in place with `create extension if not exists vector`, the two tables from design D4 including the identity unique key and column checks, and the HNSW cosine index; verify `pgvector_embedding_schema_objects` passes and `cargo test -p ratatoskr-knowledge --test schema` stays fully green.
 
 ## 2. Versioned chunking policy
 

@@ -1,5 +1,7 @@
 create schema if not exists knowledge;
 
+create extension if not exists vector;
+
 create table if not exists knowledge.source_refs (
     source_ref_id uuid primary key,
     tenant_ref text not null,
@@ -162,3 +164,93 @@ create index if not exists search_documents_search_vector_idx
 
 create index if not exists search_documents_tenant_recency_idx
     on knowledge.search_documents (tenant_ref, updated_at desc);
+
+create table if not exists knowledge.embedding_chunks (
+    embedding_chunk_id uuid primary key,
+    source_ref_id uuid not null references knowledge.source_refs(source_ref_id),
+    output_id uuid not null references knowledge.analysis_outputs(output_id),
+    tenant_ref text not null,
+    owner_context text not null,
+    document_id uuid not null,
+    ordinal integer not null,
+    chunk_text text not null,
+    chunk_digest_hex text not null,
+    chunking_version text not null,
+    provider text not null,
+    model text not null,
+    dimensions integer not null,
+    prompt_version text not null,
+    embedding vector(1536) not null,
+    created_at timestamptz not null default now(),
+    constraint embedding_chunks_ordinal_check check (ordinal >= 0),
+    constraint embedding_chunks_digest_check
+        check (chunk_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint embedding_chunks_chunking_version_check
+        check (char_length(chunking_version) between 1 and 64),
+    constraint embedding_chunks_prompt_version_check
+        check (char_length(prompt_version) between 1 and 64),
+    constraint embedding_chunks_provider_check
+        check (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
+    constraint embedding_chunks_model_check
+        check (char_length(model) between 1 and 128),
+    constraint embedding_chunks_dimensions_check check (dimensions = 1536),
+    constraint embedding_chunks_identity_key unique (
+        source_ref_id,
+        chunking_version,
+        provider,
+        model,
+        prompt_version,
+        ordinal
+    )
+);
+
+create index if not exists embedding_chunks_embedding_hnsw_idx
+    on knowledge.embedding_chunks using hnsw (embedding vector_cosine_ops);
+
+create index if not exists embedding_chunks_identity_idx
+    on knowledge.embedding_chunks (provider, model, prompt_version, chunking_version);
+
+create table if not exists knowledge.embedding_failures (
+    failure_id uuid primary key,
+    source_ref_id uuid not null references knowledge.source_refs(source_ref_id),
+    output_id uuid not null,
+    tenant_ref text not null,
+    chunking_version text not null,
+    provider text not null,
+    model text not null,
+    prompt_version text not null,
+    error_class text not null,
+    attempt integer not null,
+    detail_code text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint embedding_failures_chunking_version_check
+        check (char_length(chunking_version) between 1 and 64),
+    constraint embedding_failures_prompt_version_check
+        check (char_length(prompt_version) between 1 and 64),
+    constraint embedding_failures_provider_check
+        check (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
+    constraint embedding_failures_model_check
+        check (char_length(model) between 1 and 128),
+    constraint embedding_failures_class_check check (error_class in (
+        'timeout',
+        'network',
+        'rate_limited',
+        'server_error',
+        'auth_error',
+        'request_invalid',
+        'size_limit',
+        'budget_exhausted',
+        'unclassified'
+    )),
+    constraint embedding_failures_attempt_check check (attempt >= 1),
+    constraint embedding_failures_detail_code_check
+        check (detail_code is null or char_length(detail_code) <= 128),
+    constraint embedding_failures_identity_key unique (
+        source_ref_id,
+        chunking_version,
+        provider,
+        model,
+        prompt_version
+    )
+);
