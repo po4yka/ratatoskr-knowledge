@@ -58,4 +58,4 @@
 
 - [x] 8.1 Update `README.md` status and settings table, `DEVELOPMENT.md` prerequisites with the pgvector-capable PostgreSQL 17 requirement and the local container recipe, and tick plan item 7 in `docs/IMPLEMENTATION_PLAN.md`. Cannot start from a failing test: documentation only.
 - [x] 8.2 Measure resource usage of the release build while indexing a representative local fixture set (resident memory peak and wall-clock per source) and record the numbers with their measurement command in the change summary, confirming they fit the deployment-target ceilings. Cannot start from a failing test: recorded measurement evidence, not an automatable assertion.
-- [ ] 8.3 Run the full gate exactly as listed in `DEVELOPMENT.md` including the file-size ratchet, plus `openspec validate --all --strict`; tick every task above only after its verification ran, and fix anything the gate rejects.
+- [x] 8.3 Run the full gate exactly as listed in `DEVELOPMENT.md` including the file-size ratchet, plus `openspec validate --all --strict`; tick every task above only after its verification ran, and fix anything the gate rejects.
