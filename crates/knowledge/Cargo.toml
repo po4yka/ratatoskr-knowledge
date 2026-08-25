@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 jsonschema.workspace = true
+pgvector.workspace = true
 ratatoskr-document-contracts.workspace = true
 ratatoskr-identifiers.workspace = true
 reqwest.workspace = true

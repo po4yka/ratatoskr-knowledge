@@ -20,7 +20,7 @@ jobs:
       KNOWLEDGE_TEST_DATABASE_URL: postgres://knowledge:knowledge@127.0.0.1:5432/knowledge
     services:
       postgres:
-        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
         env:
           POSTGRES_USER: knowledge
           POSTGRES_PASSWORD: knowledge
