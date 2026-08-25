@@ -17,6 +17,7 @@ mod openrouter;
 mod pipeline;
 mod provider;
 mod rate_limit;
+mod reindex;
 mod runs;
 pub mod search;
 mod telemetry;
@@ -57,6 +58,7 @@ pub use provider::{
     ProviderResponse, ProviderUsage, ScriptedProvider,
 };
 pub use rate_limit::RateLimiter;
+pub use reindex::{ReindexSummary, execute_reindex, plan_reindex};
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,

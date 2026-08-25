@@ -543,7 +543,7 @@ impl<P: EmbeddingProvider> Indexer<P> {
 
 /// Splits inputs into groups whose total character count stays within
 /// `max_characters`; single oversized inputs travel alone.
-fn input_groups(inputs: Vec<String>, max_characters: usize) -> Vec<Vec<String>> {
+pub(crate) fn input_groups(inputs: Vec<String>, max_characters: usize) -> Vec<Vec<String>> {
     let mut groups: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
     let mut current_chars = 0_usize;

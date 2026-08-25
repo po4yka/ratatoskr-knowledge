@@ -6,7 +6,9 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use ratatoskr_knowledge::{Database, SearchQuery, search_page};
+use ratatoskr_knowledge::{Database, RankingPath, SearchQuery, search_page};
+
+use crate::{HybridSearchRetriever, Metrics};
 
 const STARTING: u8 = 0;
 const READY: u8 = 1;
@@ -47,18 +49,30 @@ impl Lifecycle {
 struct AdminState {
     lifecycle: Lifecycle,
     database: Database,
+    metrics: Arc<Metrics>,
+    retriever: Option<Arc<HybridSearchRetriever>>,
 }
 
 /// Builds the loopback operator router over lifecycle and storage handles.
-pub fn admin_router(lifecycle: Lifecycle, database: Database) -> Router {
+///
+/// `retriever` is absent when no embeddings credential is configured; the
+/// search route then serves the plain lexical path byte-for-byte.
+pub fn admin_router(
+    lifecycle: Lifecycle,
+    database: Database,
+    metrics: Arc<Metrics>,
+    retriever: Option<Arc<HybridSearchRetriever>>,
+) -> Router {
     let state = AdminState {
         lifecycle,
         database,
+        metrics,
+        retriever,
     };
     Router::new()
         .route("/live", get(live))
         .route("/ready", get(ready))
-        .route("/metrics", get(metrics))
+        .route("/metrics", get(metrics_route))
         .route("/version", get(version))
         .route("/internal/search", get(search))
         .with_state(state)
@@ -77,8 +91,8 @@ async fn ready(axum::extract::State(state): axum::extract::State<AdminState>) ->
     }
 }
 
-async fn metrics() -> &'static str {
-    "# TYPE knowledge_process_info gauge\nknowledge_process_info 1\n"
+async fn metrics_route(axum::extract::State(state): axum::extract::State<AdminState>) -> String {
+    state.metrics.render()
 }
 
 async fn version() -> &'static str {
@@ -112,7 +126,24 @@ async fn search(
     ) else {
         return bad_request("invalid_parameters");
     };
-    match search_page(state.database.pool(), &query).await {
+    let blank = query.raw_query().trim().is_empty();
+    let served = if let (Some(retriever), false) = (&state.retriever, blank) {
+        retriever
+            .page(state.database.pool(), &query)
+            .await
+            .inspect(|(_, path)| state.metrics.record_ranking_path(*path))
+            .map(|(page, _)| page)
+    } else {
+        let path = if blank {
+            RankingPath::BrowseRecent
+        } else {
+            RankingPath::LexicalOnly
+        };
+        search_page(state.database.pool(), &query)
+            .await
+            .inspect(|_| state.metrics.record_ranking_path(path))
+    };
+    match served {
         Ok(page) => match serde_json::to_value(&page) {
             Ok(value) => json_response(StatusCode::OK, &value),
             Err(_) => search_failed(),

@@ -332,6 +332,206 @@ async fn indexing_pass_transitions_persisted_runs_once() -> Result<(), Box<dyn s
     Ok(())
 }
 
+const LEGACY_PROVIDER: &str = "legacy_embedder";
+const LEGACY_MODEL: &str = "legacy_model_v0";
+
+/// Inserts one embedding chunk for `seeded` under a superseded identity.
+async fn insert_legacy_chunk(
+    database: &TestDatabase,
+    seeded: &SeededSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let chunk_text = "Indexing fixture\n\nBody paragraph.".to_owned();
+    sqlx::query(
+        "insert into knowledge.embedding_chunks (
+             embedding_chunk_id, source_ref_id, output_id, tenant_ref,
+             owner_context, document_id, ordinal, chunk_text,
+             chunk_digest_hex, chunking_version, provider, model,
+             dimensions, prompt_version, embedding
+         )
+         values ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $10, $11, $12, $13, $14)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(seeded.source_ref_id)
+    .bind(seeded.output_id)
+    .bind(&seeded.tenant_ref)
+    .bind(&seeded.owner_context)
+    .bind(seeded.document_id)
+    .bind(&chunk_text)
+    .bind(digest_of(&chunk_text))
+    .bind(ratatoskr_knowledge::CHUNKING_VERSION)
+    .bind(LEGACY_PROVIDER)
+    .bind(LEGACY_MODEL)
+    .bind(DIMENSIONS)
+    .bind(IDENTITY_PROMPT_VERSION)
+    .bind(fixture_vector(&[(3, 1.0)]))
+    .execute(database.database.pool())
+    .await?;
+    Ok(())
+}
+
+/// Inserts one indexing-failure row for `seeded` under the legacy identity.
+async fn insert_legacy_failure(
+    database: &TestDatabase,
+    seeded: &SeededSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    sqlx::query(
+        "insert into knowledge.embedding_failures (
+             failure_id, source_ref_id, output_id, tenant_ref,
+             chunking_version, provider, model, prompt_version,
+             error_class, attempt
+         )
+         values ($1, $2, $3, $4, $5, $6, $7, $8, 'unclassified', 1)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(seeded.source_ref_id)
+    .bind(seeded.output_id)
+    .bind(&seeded.tenant_ref)
+    .bind(ratatoskr_knowledge::CHUNKING_VERSION)
+    .bind(LEGACY_PROVIDER)
+    .bind(LEGACY_MODEL)
+    .bind(IDENTITY_PROMPT_VERSION)
+    .execute(database.database.pool())
+    .await?;
+    Ok(())
+}
+
+/// Captures every accepted output's persisted bytes for history comparison.
+async fn output_bytes(
+    database: &TestDatabase,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_as(
+        "select result::text, raw_response::text
+         from knowledge.analysis_outputs order by output_id",
+    )
+    .fetch_all(database.database.pool())
+    .await?)
+}
+
+/// Captures every run's current state for history comparison.
+async fn run_states(database: &TestDatabase) -> Result<Vec<(String,)>, Box<dyn std::error::Error>> {
+    Ok(
+        sqlx::query_as("select state from knowledge.analysis_runs order by run_id")
+            .fetch_all(database.database.pool())
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn reindex_converges_idempotently_and_leaves_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let source_a = seed_source(&database, "completed", true).await?;
+    let source_b = seed_source(&database, "completed", true).await?;
+    insert_legacy_chunk(&database, &source_a).await?;
+    insert_legacy_failure(&database, &source_a).await?;
+
+    let outputs_before = output_bytes(&database).await?;
+    let states_before = run_states(&database).await?;
+
+    let provider = scripted_provider(vec![
+        Ok(ScriptedEmbeddingSuccess { input_tokens: 9 }),
+        Ok(ScriptedEmbeddingSuccess { input_tokens: 9 }),
+        Ok(ScriptedEmbeddingSuccess { input_tokens: 9 }),
+        Ok(ScriptedEmbeddingSuccess { input_tokens: 9 }),
+    ]);
+
+    let summary = ratatoskr_knowledge::execute_reindex(
+        &database.database,
+        &provider,
+        ChunkPolicy::new(1600, 200)?,
+        120_000,
+    )
+    .await?;
+    assert_eq!(summary.sources_processed, 2);
+    assert_eq!(summary.failures, 0);
+
+    for seeded in [&source_a, &source_b] {
+        let (active,): (i64,) = sqlx::query_as(
+            "select count(*) from knowledge.embedding_chunks
+             where source_ref_id = $1 and provider = $2 and model = $3
+               and prompt_version = $4",
+        )
+        .bind(seeded.source_ref_id)
+        .bind(IDENTITY_PROVIDER)
+        .bind(IDENTITY_MODEL)
+        .bind(IDENTITY_PROMPT_VERSION)
+        .fetch_one(database.database.pool())
+        .await?;
+        assert!(active >= 1, "every projected source must gain coverage");
+    }
+    let (superseded,): (i64,) = sqlx::query_as(
+        "select count(*) from knowledge.embedding_chunks
+         where not (provider = $1 and model = $2 and prompt_version = $3)",
+    )
+    .bind(IDENTITY_PROVIDER)
+    .bind(IDENTITY_MODEL)
+    .bind(IDENTITY_PROMPT_VERSION)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(superseded, 0, "superseded-identity rows must be pruned");
+    let (failures_left,): (i64,) =
+        sqlx::query_as("select count(*) from knowledge.embedding_failures")
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(failures_left, 0, "failure entries must be cleared");
+
+    assert_eq!(
+        output_bytes(&database).await?,
+        outputs_before,
+        "analysis_outputs bytes must stay untouched"
+    );
+    assert_eq!(
+        run_states(&database).await?,
+        states_before,
+        "run states must stay untouched"
+    );
+
+    let calls_after_first_pass = provider.call_count()?;
+    assert_eq!(calls_after_first_pass, 2);
+
+    let summary_again = ratatoskr_knowledge::execute_reindex(
+        &database.database,
+        &provider,
+        ChunkPolicy::new(1600, 200)?,
+        120_000,
+    )
+    .await?;
+    assert_eq!(summary_again.sources_processed, 0);
+    assert_eq!(summary_again.failures, 0);
+    assert_eq!(
+        provider.call_count()?,
+        calls_after_first_pass,
+        "a converged reindex must make zero provider calls"
+    );
+
+    // A worker-only startup with the same active identity mutates nothing:
+    // only runs resting at `persisted` are ever touched.
+    let worker = Indexer::new(
+        &database.database,
+        scripted_provider(Vec::new()),
+        ChunkPolicy::new(1600, 200)?,
+        indexer_limits(),
+    );
+    let outcome = worker.process_pending().await?;
+    assert_eq!(outcome, ratatoskr_knowledge::IndexingOutcome::default());
+    let (vectors_final, active_final): (i64, i64) = sqlx::query_as(
+        "select count(*),
+                count(*) filter (where provider = $1 and model = $2
+                                 and prompt_version = $3)
+         from knowledge.embedding_chunks",
+    )
+    .bind(IDENTITY_PROVIDER)
+    .bind(IDENTITY_MODEL)
+    .bind(IDENTITY_PROMPT_VERSION)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(vectors_final, active_final);
+    assert_eq!(vectors_final, 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn indexing_failure_is_explicit_and_bounded() -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
