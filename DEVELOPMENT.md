@@ -5,8 +5,8 @@
 
 The first article-analysis slice uses a scripted provider for offline gates, an `OpenRouter` adapter
 for real inference behind timeout, size-cap, rate, retry, cancellation, and budget controls, and a
-disposable `PostgreSQL` 17 database. Search indices and external message handling are not
-implemented.
+disposable `PostgreSQL` 17 database. PostgreSQL full-text search, pgvector embeddings with hybrid
+ranking, and explicit reindex jobs are implemented; external message handling is not.
 
 ## Toolchain and gate
 
@@ -70,6 +70,23 @@ openspec store register <path> --id ratatoskr-workspace
 ```
 
 `openspec doctor` reports whether both are in place.
+
+## Database prerequisite
+
+Database tests create disposable databases from `schema.sql`, which requires PostgreSQL 17 with the
+pgvector extension available (`create extension if not exists vector` runs as part of the schema).
+CI runs a digest-pinned `pgvector/pgvector:pg17` service container. For local runs, start the same
+kind of database and point the test URL at it:
+
+```bash
+docker run -d --name ratatoskr-knowledge-pgvector \
+  -e POSTGRES_USER=knowledge -e POSTGRES_PASSWORD=knowledge -e POSTGRES_DB=knowledge \
+  -p 127.0.0.1:15434:5432 pgvector/pgvector:pg17
+export KNOWLEDGE_TEST_DATABASE_URL=postgres://knowledge:knowledge@127.0.0.1:15434/knowledge
+```
+
+A stock `postgres:17` image fails schema application with "extension vector is not available"; that
+error means the image, not the code.
 
 ## The Rust skills in this repository
 

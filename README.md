@@ -7,8 +7,9 @@ analysis, and persists the evidence and result.
 > **Status:** the first article-analysis slice is implemented, first against a scripted provider and
 > now with a real `OpenRouter` adapter behind timeout, size-cap, rate, retry, cancellation, and
 > budget controls, alongside a tenant-scoped full-text projection and operator-plane retrieval.
-> There is no message-bus consumer, public analysis endpoint, embedding pipeline, or hybrid
-> ranking.
+> Versioned pgvector embeddings and hybrid ranking are implemented behind an optional embeddings
+> credential; lexical search remains the offline default. There is no message-bus consumer or
+> public analysis endpoint yet.
 
 > [!IMPORTANT]
 > Ratatoskr is in development. The API, database, and contracts keep their first version. The
@@ -34,6 +35,17 @@ analysis, and persists the evidence and result.
   transaction with a latest-wins output guard;
 - ranked retrieval over the projection with bounded snippets, deterministic ordering, and strict
   page bounds validated before any database work;
+- deterministic versioned chunking (`article-chunks.v1`) with configurable target size and overlap;
+- a scripted embeddings provider plus an `OpenAI`-compatible `/embeddings` adapter behind timeout,
+  byte-cap, rate, retry, cancellation, and budget controls mirroring the chat adapter;
+- pgvector storage of every vector with full model identity — provider, model, dimensions,
+  chunking version, prompt version — bound explicitly at query time so versions never mix;
+- a bounded background indexing step that embeds accepted analyses through the durable
+  `persisted -> indexed` run transition;
+- hybrid Reciprocal Rank Fusion (k=60) over equally tenant-scoped lexical and semantic legs, with
+  deterministic tiebreakers and graceful fallback to pure lexical ranking without a credential;
+- an idempotent `reindex-embeddings` subcommand for explicit regeneration after a model or
+  chunking-version change;
 - an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`.
 
 The process has an optional `OpenRouter` inference credential setting. Default tests and CI do not
@@ -50,6 +62,8 @@ analysis_attempts
 analysis_outputs
 provider_usage
 search_documents
+embedding_chunks
+embedding_failures
 ```
 
 Source bytes stay with the source-owning service. Knowledge stores the immutable Document IR
@@ -83,11 +97,30 @@ RATATOSKR__LIMITS__PROVIDER_DAILY_TOKEN_BUDGET
 RATATOSKR__LIMITS__PROVIDER_MONTHLY_TOKEN_BUDGET
 RATATOSKR__LIMITS__PROVIDER_DAILY_COST_MICRO_USD
 RATATOSKR__LIMITS__PROVIDER_MONTHLY_COST_MICRO_USD
+RATATOSKR__LIMITS__CHUNK_TARGET_CHARACTERS
+RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS
+RATATOSKR__LIMITS__EMBEDDINGS_TIMEOUT_MS
+RATATOSKR__LIMITS__EMBEDDINGS_MAX_INPUT_CHARACTERS
+RATATOSKR__LIMITS__EMBEDDINGS_BATCH_SOURCES
+RATATOSKR__LIMITS__EMBEDDINGS_POLL_INTERVAL_MS
+RATATOSKR__LIMITS__EMBEDDINGS_REQUESTS_PER_MINUTE
+RATATOSKR__LIMITS__EMBEDDINGS_MAX_FAILURE_ATTEMPTS
+RATATOSKR__LIMITS__EMBEDDINGS_DAILY_TOKEN_BUDGET
+RATATOSKR__LIMITS__EMBEDDINGS_MONTHLY_TOKEN_BUDGET
+RATATOSKR__LIMITS__EMBEDDINGS_DAILY_COST_MICRO_USD
+RATATOSKR__LIMITS__EMBEDDINGS_MONTHLY_COST_MICRO_USD
+RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY
+RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL
+RATATOSKR__PROVIDER__EMBEDDINGS__MODEL
+RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS
+RATATOSKR__PROVIDER__EMBEDDINGS__PROMPT_VERSION
+RATATOSKR__PROVIDER__EMBEDDINGS__INPUT_MICRO_USD_PER_MTOKEN
 ```
 
 Unknown or invalid `RATATOSKR__` keys stop startup without printing their values. Without
 `RATATOSKR__PROVIDER__OPENROUTER__API_KEY` the process stays offline and the real adapter cannot
-make a request.
+make a request; without `RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY` the process serves lexical
+search only and performs no embedding calls.
 The credential redacts itself in diagnostics and serialization and is never persisted to the
 database; ordinary logs carry only bounded facts such as provider, model, outcome class, status,
 token counts, and latency. Validate

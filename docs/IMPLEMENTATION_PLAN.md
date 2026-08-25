@@ -11,7 +11,7 @@
 - [x] 5. Add one real provider adapter behind privacy, timeout, rate, cancellation, and budget
   controls.
 - [ ] 6. Implement PostgreSQL FTS and authorization-aware search documents.
-- [ ] 7. Add pgvector embeddings, chunk and model versioning, and hybrid ranking.
+- [x] 7. Add pgvector embeddings, chunk and model versioning, and hybrid ranking.
 - [ ] 8. Add an evaluation harness, privacy deletion, and explicit reindex jobs.
 - [ ] 9. Add repository, social, and AI archive analysis families through separate changesets.
 - [ ] 10. Define legacy import only if real legacy data exists and has measured value.
