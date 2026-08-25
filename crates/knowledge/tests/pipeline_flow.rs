@@ -93,7 +93,7 @@ async fn cancelled_mid_request_keeps_durable_state_and_replays_once()
     .bind(run_id)
     .fetch_one(database.database.pool())
     .await?;
-    assert_eq!(state, "completed");
+    assert_eq!(state, "persisted");
     assert_eq!(attempts, 2);
     assert_eq!(outputs, 1);
 
@@ -260,7 +260,7 @@ async fn flaky_transport_keeps_retry_and_repair_bounded() -> Result<(), Box<dyn 
     .bind(repair_run_id)
     .fetch_one(database.database.pool())
     .await?;
-    assert_eq!(repair_state, "completed");
+    assert_eq!(repair_state, "persisted");
     assert_eq!(repair_attempts, 2);
     assert_eq!(repair_outputs, 1);
     assert_eq!(flaky.request_count()?, 4);

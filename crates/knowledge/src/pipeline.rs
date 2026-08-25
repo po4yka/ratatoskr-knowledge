@@ -227,11 +227,8 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         let article =
             serde_json::from_value(result.ok_or(PersistenceError::InvalidAnalysisIdentity)?)
                 .map_err(PersistenceError::Encode)?;
-        if state == "persisted" {
-            self.database
-                .transition_run(run_id, RunState::Persisted, RunState::Completed)
-                .await?;
-        }
+        // Both resting states resolve the same accepted output; neither
+        // replay mutates run state.
         Ok(Some(article))
     }
 
@@ -345,9 +342,8 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             )
             .await?;
         self.persist(run_id, &article, &reference, document).await?;
-        self.database
-            .transition_run(run_id, RunState::Persisted, RunState::Completed)
-            .await?;
+        // The run rests at `persisted`: the background indexer owns the
+        // only `persisted -> indexed` transition.
         Ok(ResponseOutcome::Accepted(article))
     }
 

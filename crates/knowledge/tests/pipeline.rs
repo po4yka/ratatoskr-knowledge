@@ -119,7 +119,7 @@ async fn one_transient_failure_retries_once() -> Result<(), Box<dyn std::error::
             .bind(run_id)
             .fetch_one(database.database.pool())
             .await?;
-    assert_eq!(state, "completed");
+    assert_eq!(state, "persisted");
 
     let (slow_run_id, slow_context, slow_document) = run_and_context(&database).await?;
     let slow = SlowProvider;
@@ -363,7 +363,7 @@ async fn completed_replay_returns_one_atomic_result_without_provider_call()
     .bind(run_id)
     .fetch_one(database.database.pool())
     .await?;
-    assert_eq!(state, "completed");
+    assert_eq!(state, "persisted");
     assert_eq!(output_count, 1);
 
     database.cleanup().await?;

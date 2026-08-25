@@ -76,6 +76,8 @@ pub enum RunState {
     Repaired,
     /// Accepted output was committed.
     Persisted,
+    /// Embeddings were persisted for the accepted output.
+    Indexed,
     /// The run reached successful terminal state.
     Completed,
     /// The run reached failed terminal state.
@@ -146,6 +148,7 @@ impl RunState {
             Self::SchemaValidated => "schema_validated",
             Self::Repaired => "repaired",
             Self::Persisted => "persisted",
+            Self::Indexed => "indexed",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }
@@ -478,6 +481,6 @@ const fn legal_transition(from: RunState, to: RunState) -> bool {
         ) | (
             RunState::SchemaValidated,
             RunState::Persisted | RunState::Failed
-        ) | (RunState::Persisted, RunState::Completed)
+        ) | (RunState::Persisted, RunState::Indexed | RunState::Completed)
     )
 }
