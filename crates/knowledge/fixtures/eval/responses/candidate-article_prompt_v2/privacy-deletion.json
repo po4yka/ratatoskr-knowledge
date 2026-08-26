@@ -1,0 +1,13 @@
+{
+  "summary": "Deletion removes tenant-owned artifacts while preserving unrelated tenants.",
+  "key_points": [
+    {
+      "text": "Owned artifacts are removed.",
+      "source_block_indexes": [0]
+    },
+    {
+      "text": "Receipts record the deletion.",
+      "source_block_indexes": [1]
+    }
+  ]
+}

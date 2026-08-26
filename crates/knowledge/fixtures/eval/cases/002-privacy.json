@@ -1,0 +1,17 @@
+{
+  "id": "privacy-deletion",
+  "source": {
+    "title": "Privacy deletion",
+    "blocks": [
+      "A tenant deletion removes every owned analysis artifact.",
+      "The deletion receipt records counts and removed blob digests.",
+      "Unrelated tenant rows remain untouched."
+    ]
+  },
+  "expectations": {
+    "summary_max_characters": 180,
+    "key_points_min": 2,
+    "key_points_max": 4,
+    "required_block_indexes": [0, 1]
+  }
+}

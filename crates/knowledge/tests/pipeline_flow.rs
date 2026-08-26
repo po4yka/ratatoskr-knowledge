@@ -421,6 +421,72 @@ async fn accepted_run_projects_exactly_one_search_document_row_with_derived_fiel
 }
 
 #[tokio::test]
+async fn persisted_search_projection_input_restores_the_projection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    let provider = ScriptedProvider::new([Ok(valid_response("projection-input"))]);
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+
+    let (source_ref_id, output_id, title, lead, body): (
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(
+        "select source_ref_id, latest_output_id, title, lead, body
+             from knowledge.search_projection_inputs",
+    )
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(title, "Pipeline");
+    assert_eq!(lead, "Evidence.");
+    assert!(body.is_empty());
+
+    sqlx::query("delete from knowledge.search_documents where source_ref_id = $1")
+        .bind(source_ref_id)
+        .execute(database.database.pool())
+        .await?;
+    let summary = ratatoskr_knowledge::rebuild_search_documents(
+        &database.database,
+        &ratatoskr_knowledge::ReindexScope::unrestricted(),
+        |_| {},
+    )
+    .await?;
+    assert_eq!(summary.sources_processed, 1);
+    let restored: (uuid::Uuid, String, String, String) = sqlx::query_as(
+        "select latest_output_id, title, lead, body from knowledge.search_documents
+         where source_ref_id = $1",
+    )
+    .bind(source_ref_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(restored.0, output_id);
+    assert_eq!(restored.1, title);
+    assert_eq!(restored.2, lead);
+    assert_eq!(restored.3, body);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_later_failed_run_leaves_the_projected_search_document_row_untouched()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;

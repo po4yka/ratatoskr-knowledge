@@ -1,0 +1,72 @@
+# Design
+
+## Context
+
+Items 5 through 7 delivered the real `OpenRouter` chat adapter, the tenant-scoped lexical projection (`knowledge.search_documents`, written transactionally at persist), and versioned pgvector embeddings with a bounded background indexer. Three gaps remain against the legacy monolith's purge-and-reconcile guarantees. First, nothing measures analysis quality: `docs/TESTING.md` explicitly defers evaluation sets. Second, no deletion path exists: every foreign key is `NO ACTION`, so derived rows can only be removed child-first by explicit code, and `BlobStore` (crates/knowledge/src/blob_store.rs) implements exactly two operations - store and read - with content-addressed SHA-256 paths and deduplication via `try_exists`; there is no way to remove a byte. Third, the item-7 change ticked task 7.2 claiming a `reindex-embeddings` subcommand beside `check-config`, but `services/knowledge/src/main.rs` inspects arguments only for `check-config`: `plan_reindex`/`execute_reindex` are library functions called solely from tests, and they accept no scope restriction. The service surface is deliberately dependency-free (manual `std::env::args().nth(1)` matching, strict `RATATOSKR__*` env config); admin routes trust loopback binding plus `Cache-Control: no-store`; metrics are label-free counters rendered by the long-running process only. Tests create disposable databases from `schema.sql` with no skip mechanism; CI runs the exact command list in `DEVELOPMENT.md`.
+
+## Goals / Non-Goals
+
+Goals: complete auditable erasure per tenant and per logical source covering all eight linked tables plus owned blob bytes; reference-safe blob garbage collection under deduplication; explicit idempotent resumable reindex jobs for both projection families with scoping, progress output, and honest exit codes; a committed fixture set with expected qualities and a deterministic offline scoring engine producing a byte-stable comparison report.
+
+Non-Goals: new analysis families or any client-facing HTTP API (deletion and reindex surfaces are operator subcommands; the message bus does not exist yet, so the workspace `operation-progress` event contract stays out of scope); prompt-template A/B infrastructure (the development status pins one prompt version - labels record which version produced a response set, but no second version exists to compare); metrics-endpoint counters for the jobs (they run as separate one-shot processes whose lifetimes the admin server does not own; their report is stdout and exit code); fixing the pre-existing duplicated counter rendering in services/knowledge/src/metrics.rs (reported separately, untouched here).
+
+## Decisions
+
+### D1: Deletion executes child-first in one transaction with its audit row, then collects blobs by reference
+
+New module `crates/knowledge/src/deletion.rs` exposes two entry points over `Database` + `BlobStore`: `delete_tenant(tenant_ref)` and `delete_source(tenant_ref, owner_context, source_document_id)`. Source scope means the logical document: every `source_refs` revision sharing `(tenant_ref, owner_context, source_document_id)` regardless of digest.
+
+Execution order inside one transaction: collect target `source_ref_id`s from `source_refs`; delete `embedding_failures` and `embedding_chunks` by those ids and by direct `tenant_ref`; delete `search_documents` likewise; delete `analysis_attempts` and `analysis_outputs` by runs of those sources; delete `analysis_runs`; delete `source_refs`. The transactional core is itself the published unit - `execute_deletion` runs inside a caller-supplied transaction, because a future event consumer must perform deletion within its own delivery transaction - and thin committing wrappers (`delete_tenant`, `delete_source`) own the surrounding transaction, the post-commit blob collection, and verification. Every count is captured with `rows_affected` as each statement runs. The `knowledge.deletion_records` audit row inserts in the same transaction: `deletion_id uuid pk`, `tenant_ref text not null`, `scope text not null check (scope in ('tenant','source'))`, nullable `owner_context`/`source_document_id`, one `integer not null` column per table's deleted count, `blob_digests_removed integer not null`, `completed_at timestamptz not null default now()`. Commit is the atomicity boundary - before it, concurrent readers see everything; after it, nothing of the scope survives and the audit exists. A receipt struct returns the same counts plus the removed digest list for callers that want machine-readable confirmation.
+
+Before collecting files, the function re-queries remaining references: `select raw_response->>'digest' ...` style extraction of the hex digests still present in `analysis_attempts.raw_response` and `analysis_outputs.raw_response` across the whole database. A collected digest is removed only when absent from that set. This makes deduplication safe: two sources that produced byte-identical responses share one file, and erasing one source cannot destroy the other's evidence. `BlobStore` gains `remove(digest_hex) -> Result<bool, BlobError>` (true when a file was deleted, false when already absent), kept narrow on purpose; path derivation reuses the existing layout `root/sha256/<xx>/<hex>`.
+
+Two boundaries are respected by construction. `provider_usage` has no tenant, source, or foreign-key linkage and feeds durable budget ceilings through `window_totals`, so deletion never touches it - spend evidence outlives content. `source_refs.source_blob` carries `BlobRef`s whose `owner_service` equals the source's `owner_context` (enforced at registration in runs.rs), pointing into other services' roots; the deletion code never derives file paths from them, and the receipt reports them as out of scope rather than silently ignoring them.
+
+### D2: The crash window between commit and collection self-heals on the next run
+
+A process stop after commit but before file removal leaves unreferenced orphan files. Rather than adding a second tool, every delete operation starts with a sweep phase: extract all referenced digests once, list `root/sha256/*/*`, and remove files whose digest is unreferenced, accounting them separately in the report from the operation's own scope removals. The sweep is idempotent, bounded by directory size, and turns the crash window into a self-healing delay instead of permanent leakage. Orphan files are dead weight - never evidence - because the rows referencing them are provably gone.
+
+### D3: Reindex jobs become real subcommands with scope flags and progress lines
+
+`main.rs` gains three dispatch arms beside `check-config`, parsed by hand in the existing style: `reindex-embeddings [--tenant <ref>] [--source-doc <owner_context>:<document_id>]`, `reindex-search-documents [same flags]`, and the deletion pair from D1. All load `Config::load()` strictly, connect, run, print, and exit: zero on full success, nonzero when any source failed, with completed work persisted (per-source commits make this structural). Progress is one stdout line per processed source (`source <id> chunks=<n>` / `rebuilt` / `deleted counts`) plus a final summary line with processed and failed totals - plain writes, no tracing-subscriber dependency for job output.
+
+Scope filtering lands in planning, not post-filtering: `plan_reindex` gains optional `tenant_ref` and `(owner_context, source_document_id)` predicates in its `where` clause so the plan itself is scoped, ordered by `source_ref_id asc` as today. Identity never comes from the command line - jobs bind provider/model/chunking/prompt identity exclusively from configuration, preserving the item-7 rule that startup and search never adopt identities silently and an operator cannot accidentally stamp vectors under an ad-hoc model label. Concurrency stays at one source in flight, sequential in ascending order: the deployment target is a single Raspberry Pi 5, embeddings calls are rate-limited per process anyway, and parallel writers would contend on the same identity-keyed upserts for zero throughput gain at this scale. "Safe concurrency limits" is satisfied by this explicit bound plus the existing batch/input-character limits inside each call.
+
+The embeddings job reuses `execute_reindex` unchanged in mechanics (chunk -> embed -> validate -> one transaction storing replacements then pruning superseded rows and failure entries). Resumability is inherited from per-source transactions plus deterministic ordering: interruption leaves converted sources converted, and the next run replans from durable state.
+
+### D4: Search-document rebuild derives from an immutable calculated-input snapshot
+
+`search_documents` cannot be regenerated from `analysis_outputs.result`: article results contain conclusions, not the source Document title and blocks that the persist path projects, and Knowledge cannot re-fetch an external source blob. The persist transaction therefore writes a Knowledge-owned `search_projection_inputs` snapshot beside `search_documents`: source revision, accepted output id, tenant, owner context, document id, and the exact extracted title, lead, and body. Both writes commit together. The rebuild job streams these snapshots in `source_ref_id` order and upserts through the same guarded statement shape the persist path uses (`on conflict (source_ref_id) do update ... where excluded.latest_output_id > existing`), so a converged row is a no-op by construction and a missing or corrupted projection is restored without source acquisition. The snapshot is derived data, not a second source authority; deletion removes it child-first and audit counts enumerate it. Sources with accepted outputs from before this development-only schema definition are skipped and counted because no reproducible projection input exists; no data preservation obligation exists while the binding development status holds. Per-source commit preserves resumability.
+
+### D5: Evaluation fixtures are committed case files; scoring is a pure engine
+
+Fixtures live at `crates/knowledge/fixtures/eval/cases/*.json`. Each case holds an id, a deliberately small non-sensitive title/block source projection, and expectations: summary character bound, key-point min/max, and required block indexes. serde with `deny_unknown_fields` makes a malformed case a hard error naming the violation, mirroring how the product treats contract drift. Recorded response JSON lives at `crates/knowledge/fixtures/eval/responses/<set_label>/<case_id>.json`; each directory name is the provider/prompt comparison label. The committed sets are synthetic safe fixtures, not a claim about a live provider.
+
+The scoring engine (`src/evaluation.rs`) is a pure module: `score_case(case, response_json) -> CaseScore`. It reuses the article schema validator then evaluates summary bound, key-point cardinality, grounding where each cited block index must exist in the source projection, and required block coverage. Checks return observed-versus-allowed values on failure. Nothing reads clocks, environment, or network; checks use a fixed order and labels/cases are sorted by id. Exact wording equality is neither implemented nor permitted - AGENTS.md forbids it as a quality assertion.
+
+### D6: The runner is an example binary writing a byte-deterministic report
+
+`crates/knowledge/examples/eval_harness.rs` loads the shipped cases and labeled response sets, scores everything, and writes the report to stdout. Determinism rules: labels sort lexicographically, cases iterate in sorted order, and the report contains no timestamps or host facts. Two runs over identical inputs produce identical bytes - asserted by a test that scores permuted input orders and compares the render. The path touches only fixture files; no credential check, DNS, transport, or socket exists. The example is compiled and linted by the existing `clippy --all-targets` and build steps and is not itself executed by the gate.
+
+Prompt-version comparison works through labeling only: each response set's label records the provider and prompt version it represents (e.g. `openrouter/gpt-oss-20b@article-analysis.v1`). The development status permits exactly one prompt version today, so the mechanism ships without a second version to compare - when a legitimate version bump happens, recording a new labeled set is enough.
+
+### D7: Documentation and plan state move together
+
+`README.md` gains the three job commands and the eval harness line; `DEVELOPMENT.md` documents running the harness and the deletion commands with their exit-code contract; `docs/TESTING.md`'s deferred-items paragraph drops evaluation sets and states the new coverage; `docs/IMPLEMENTATION_PLAN.md` ticks item 8. The gate command list does not change, so `.github/workflows/ci.yml` does not change either.
+
+## Risks / Trade-offs
+
+- [Digest extraction assumes BlobRef-shaped jsonb] -> both columns are written exclusively through `serde_json::to_value(BlobRef)` today, and the collector parses defensively, reporting an unparseable reference as a loud error rather than skipping it; if a future column stops holding BlobRefs, the test inventory fails visibly.
+- [Sweep lists the whole blob root each run] -> acceptable at single-host scale; the root holds one file per distinct response, growth is slow, and correctness beats incremental indexing until measurements say otherwise.
+- [Sequential jobs may take long on large scopes] -> progress lines exist precisely for this; parallelism remains a deliberate future change behind the same CLI contract.
+- [Rebuild shares extraction with persist] -> extraction is already pure and unit-tested; sharing one function removes drift risk instead of adding it.
+- [Eval fixtures encode today's contract] -> a contract change that breaks fixtures is a signal, not noise: cases update in the same change that moves the contract, keeping the set reviewable.
+- [Pre-existing flaky timing test] -> `pipeline_flow::exhausted_cancellation_replay_fails_explicitly` fails intermittently on unmodified `main` (stall/cancellation timing under load); unrelated to this change, rerun in isolation when the final gate trips on it.
+
+## Migration Plan
+
+None beyond editing `schema.sql` in place: `knowledge.deletion_records` appears in the one current definition, test databases are created fresh, and no environment holds data that must survive under the binding development status. Rollback is reverting the branch.
+
+## Open Questions
+
+None.

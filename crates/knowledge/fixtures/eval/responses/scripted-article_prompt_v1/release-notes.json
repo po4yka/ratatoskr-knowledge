@@ -1,0 +1,9 @@
+{
+  "summary": "The release adds deterministic offline evaluations.",
+  "key_points": [
+    {
+      "text": "Offline evaluations are part of the release.",
+      "source_block_indexes": [0]
+    }
+  ]
+}

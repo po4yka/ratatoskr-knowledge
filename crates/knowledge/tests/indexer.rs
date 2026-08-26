@@ -440,12 +440,59 @@ async fn reindex_converges_idempotently_and_leaves_history()
         &provider,
         ChunkPolicy::new(1600, 200)?,
         120_000,
+        &ratatoskr_knowledge::ReindexScope::unrestricted(),
+        |_, _| {},
     )
     .await?;
     assert_eq!(summary.sources_processed, 2);
     assert_eq!(summary.failures, 0);
 
-    for seeded in [&source_a, &source_b] {
+    assert_active_coverage(&database, &[&source_a, &source_b]).await?;
+
+    assert_eq!(
+        output_bytes(&database).await?,
+        outputs_before,
+        "analysis_outputs bytes must stay untouched"
+    );
+    assert_eq!(
+        run_states(&database).await?,
+        states_before,
+        "run states must stay untouched"
+    );
+
+    let calls_after_first_pass = provider.call_count()?;
+    assert_eq!(calls_after_first_pass, 2);
+
+    let summary_again = ratatoskr_knowledge::execute_reindex(
+        &database.database,
+        &provider,
+        ChunkPolicy::new(1600, 200)?,
+        120_000,
+        &ratatoskr_knowledge::ReindexScope::unrestricted(),
+        |_, _| {},
+    )
+    .await?;
+    assert_eq!(summary_again.sources_processed, 0);
+    assert_eq!(summary_again.failures, 0);
+    assert_eq!(
+        provider.call_count()?,
+        calls_after_first_pass,
+        "a converged reindex must make zero provider calls"
+    );
+
+    assert_worker_leaves_completed_reindex_untouched(&database).await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Verifies that every projected source has only the active identity after a
+/// successful reindex and that failure rows were cleared.
+async fn assert_active_coverage(
+    database: &TestDatabase,
+    sources: &[&SeededSource],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for seeded in sources {
         let (active,): (i64,) = sqlx::query_as(
             "select count(*) from knowledge.embedding_chunks
              where source_ref_id = $1 and provider = $2 and model = $3
@@ -474,36 +521,13 @@ async fn reindex_converges_idempotently_and_leaves_history()
             .fetch_one(database.database.pool())
             .await?;
     assert_eq!(failures_left, 0, "failure entries must be cleared");
+    Ok(())
+}
 
-    assert_eq!(
-        output_bytes(&database).await?,
-        outputs_before,
-        "analysis_outputs bytes must stay untouched"
-    );
-    assert_eq!(
-        run_states(&database).await?,
-        states_before,
-        "run states must stay untouched"
-    );
-
-    let calls_after_first_pass = provider.call_count()?;
-    assert_eq!(calls_after_first_pass, 2);
-
-    let summary_again = ratatoskr_knowledge::execute_reindex(
-        &database.database,
-        &provider,
-        ChunkPolicy::new(1600, 200)?,
-        120_000,
-    )
-    .await?;
-    assert_eq!(summary_again.sources_processed, 0);
-    assert_eq!(summary_again.failures, 0);
-    assert_eq!(
-        provider.call_count()?,
-        calls_after_first_pass,
-        "a converged reindex must make zero provider calls"
-    );
-
+/// Verifies that worker startup does not mutate runs completed by the job.
+async fn assert_worker_leaves_completed_reindex_untouched(
+    database: &TestDatabase,
+) -> Result<(), Box<dyn std::error::Error>> {
     // A worker-only startup with the same active identity mutates nothing:
     // only runs resting at `persisted` are ever touched.
     let worker = Indexer::new(
@@ -527,6 +551,199 @@ async fn reindex_converges_idempotently_and_leaves_history()
     .await?;
     assert_eq!(vectors_final, active_final);
     assert_eq!(vectors_final, 2);
+
+    Ok(())
+}
+
+/// Seeds one source revision under an explicit tenant with a completed
+/// run, an accepted output, and its projected search row;
+/// `with_active_chunk` adds complete coverage under the scripted identity
+/// so planning considers the source converged.
+async fn seed_tenant_source(
+    database: &TestDatabase,
+    tenant: TenantRef,
+    with_active_chunk: bool,
+) -> Result<SeededSource, Box<dyn std::error::Error>> {
+    let document = Document {
+        document_id: DocumentId::new_v7(),
+        source_address: DocumentAddress::parse("document:indexing")?,
+        content_digest: digest('c')?,
+        title: Some("Indexing fixture".to_owned()),
+        language: None,
+        blocks: vec![DocumentBlock::Paragraph {
+            text: "Lead sentence.".to_owned(),
+        }],
+        provenance: Vec::new(),
+    };
+    let source = database
+        .database
+        .register_source(&SourceReference {
+            tenant,
+            owner_context: "ratatoskr-extractor".to_owned(),
+            document_id: document.document_id,
+            content_digest: document.content_digest.clone(),
+            source_blob: BlobRef {
+                owner_service: BlobOwner::parse("ratatoskr-extractor")?,
+                digest: document.content_digest.clone(),
+                media_type: MediaType::parse("application/json")?,
+                length_bytes: 128,
+            },
+        })
+        .await?;
+    let (tenant_ref,): (String,) =
+        sqlx::query_as("select tenant_ref from knowledge.source_refs where source_ref_id = $1")
+            .bind(source.id)
+            .fetch_one(database.database.pool())
+            .await?;
+    let run_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "insert into knowledge.analysis_runs (
+             run_id, source_ref_id, contract_version, prompt_version,
+             context_builder_version, model_policy, state
+         )
+         values ($1, $2, 'article-analysis.v1', 'v1', 'v1', 'fake_default_v1', 'completed')",
+    )
+    .bind(run_id)
+    .bind(source.id)
+    .execute(database.database.pool())
+    .await?;
+    let output_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "insert into knowledge.analysis_outputs (output_id, run_id, result, raw_response)
+         values ($1, $2, '{}', '{}')",
+    )
+    .bind(output_id)
+    .bind(run_id)
+    .execute(database.database.pool())
+    .await?;
+    sqlx::query(
+        "insert into knowledge.search_documents (
+             search_document_id, source_ref_id, latest_output_id, tenant_ref,
+             owner_context, document_id, title, lead, body, updated_at
+         )
+         values ($1, $2, $3, $4, 'ratatoskr-extractor', $5, 'Indexing fixture',
+                 'Lead sentence.', 'Body paragraph.', now())",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(source.id)
+    .bind(output_id)
+    .bind(&tenant_ref)
+    .bind(document.document_id.0)
+    .execute(database.database.pool())
+    .await?;
+    if with_active_chunk {
+        insert_active_chunk(
+            database,
+            source.id,
+            output_id,
+            &tenant_ref,
+            document.document_id.0,
+        )
+        .await?;
+    }
+    Ok(SeededSource {
+        run_id,
+        source_ref_id: source.id,
+        output_id,
+        document_id: document.document_id.0,
+        owner_context: "ratatoskr-extractor".to_owned(),
+        tenant_ref,
+    })
+}
+
+/// Adds complete active-identity coverage to one fixture source.
+async fn insert_active_chunk(
+    database: &TestDatabase,
+    source_ref_id: uuid::Uuid,
+    output_id: uuid::Uuid,
+    tenant_ref: &str,
+    document_id: uuid::Uuid,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let chunk_text = "Indexing fixture\n\nLead sentence.".to_owned();
+    sqlx::query(
+        "insert into knowledge.embedding_chunks (
+             embedding_chunk_id, source_ref_id, output_id, tenant_ref,
+             owner_context, document_id, ordinal, chunk_text,
+             chunk_digest_hex, chunking_version, provider, model,
+             dimensions, prompt_version, embedding
+         )
+         values ($1, $2, $3, $4, 'ratatoskr-extractor', $5, 0, $6, $7,
+                 $8, $9, $10, $11, $12, $13)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(source_ref_id)
+    .bind(output_id)
+    .bind(tenant_ref)
+    .bind(document_id)
+    .bind(&chunk_text)
+    .bind(digest_of(&chunk_text))
+    .bind(ratatoskr_knowledge::CHUNKING_VERSION)
+    .bind(IDENTITY_PROVIDER)
+    .bind(IDENTITY_MODEL)
+    .bind(DIMENSIONS)
+    .bind(IDENTITY_PROMPT_VERSION)
+    .bind(fixture_vector(&[(0, 1.0)]))
+    .execute(database.database.pool())
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reindex_plan_honors_tenant_and_source_scopes() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let tenant_a = TenantRef::of_user(UserId::new_v7());
+    let tenant_b = TenantRef::of_user(UserId::new_v7());
+    // Creation order is ascending uuid v7, matching plan ordering.
+    let needing_a = seed_tenant_source(&database, tenant_a, false).await?;
+    let converged_a = seed_tenant_source(&database, tenant_a, true).await?;
+    let needing_b = seed_tenant_source(&database, tenant_b, false).await?;
+
+    let identity = ratatoskr_knowledge::IndexingIdentity {
+        provider: IDENTITY_PROVIDER.to_owned(),
+        model: IDENTITY_MODEL.to_owned(),
+        prompt_version: IDENTITY_PROMPT_VERSION.to_owned(),
+    };
+
+    let unrestricted = ratatoskr_knowledge::plan_reindex(
+        database.database.pool(),
+        &identity,
+        &ratatoskr_knowledge::ReindexScope::unrestricted(),
+    )
+    .await?;
+    assert_eq!(
+        unrestricted,
+        vec![needing_a.source_ref_id, needing_b.source_ref_id],
+        "converged sources never enter the plan"
+    );
+
+    let tenant_scoped = ratatoskr_knowledge::plan_reindex(
+        database.database.pool(),
+        &identity,
+        &ratatoskr_knowledge::ReindexScope::for_tenant(&needing_a.tenant_ref),
+    )
+    .await?;
+    assert_eq!(
+        tenant_scoped,
+        vec![needing_a.source_ref_id],
+        "another tenant's sources must stay outside a tenant-scoped plan"
+    );
+
+    let source_scoped = ratatoskr_knowledge::plan_reindex(
+        database.database.pool(),
+        &identity,
+        &ratatoskr_knowledge::ReindexScope::for_source(
+            &needing_a.tenant_ref,
+            &needing_a.owner_context,
+            needing_a.document_id.to_string(),
+        ),
+    )
+    .await?;
+    assert_eq!(
+        source_scoped,
+        vec![needing_a.source_ref_id],
+        "a source-scoped plan names exactly that source"
+    );
+    let _ = converged_a;
 
     database.cleanup().await?;
     Ok(())

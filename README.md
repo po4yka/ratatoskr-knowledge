@@ -44,8 +44,11 @@ analysis, and persists the evidence and result.
   `persisted -> indexed` run transition;
 - hybrid Reciprocal Rank Fusion (k=60) over equally tenant-scoped lexical and semantic legs, with
   deterministic tiebreakers and graceful fallback to pure lexical ranking without a credential;
-- an idempotent `reindex-embeddings` subcommand for explicit regeneration after a model or
-  chunking-version change;
+- committed offline evaluation fixtures and a deterministic labeled report runner;
+- atomic, audited `delete-source` and `delete-tenant` operator jobs that remove all owned derived
+  data and only reference-safe Knowledge blob bytes;
+- idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
+  regeneration after a model, chunking, or lexical-projection change;
 - an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`.
 
 The process has an optional `OpenRouter` inference credential setting. Default tests and CI do not
@@ -61,9 +64,11 @@ analysis_runs
 analysis_attempts
 analysis_outputs
 provider_usage
+search_projection_inputs
 search_documents
 embedding_chunks
 embedding_failures
+deletion_records
 ```
 
 Source bytes stay with the source-owning service. Knowledge stores the immutable Document IR
@@ -154,6 +159,36 @@ RATATOSKR__PROVIDER__OPENROUTER__API_KEY=... \
 The committed result schema is
 [`schemas/article-analysis.v1.schema.json`](schemas/article-analysis.v1.schema.json), and prompt
 artifacts are under [`prompts/article-analysis.v1`](prompts/article-analysis.v1).
+
+## Offline evaluation and operator jobs
+
+The default quality gate never calls a live provider. It scores the committed, non-sensitive source
+fixtures and recorded response sets, grouping results by provider/prompt label:
+
+```bash
+cargo run --locked -p ratatoskr-knowledge --example eval_harness
+```
+
+Operator jobs use the configured database and blob root. `delete-source` removes every revision of
+the logical source, and `delete-tenant` removes all owned source revisions. Both print a per-table
+receipt and create a deletion audit record in the same database transaction. Their owned raw-output
+blobs are removed only after reference checks; externally owned source blobs are never removed.
+
+```bash
+cargo run --locked -p ratatoskr-knowledge-service -- delete-source <tenant> <owner_context> <document_id>
+cargo run --locked -p ratatoskr-knowledge-service -- delete-tenant <tenant>
+```
+
+Reindex jobs accept no scope, `--tenant <tenant>`, or `--tenant <tenant> --source-doc
+<owner_context>:<document_id>`. They print committed source progress in source-id order followed by
+totals. A rerun converges without rewriting unchanged rows; an interrupted run resumes from durable
+per-source work. Embedding reindex requires a usable embeddings configuration and otherwise fails
+before opening the database.
+
+```bash
+cargo run --locked -p ratatoskr-knowledge-service -- reindex-search-documents [--tenant <tenant> [--source-doc <owner_context>:<document_id>]]
+cargo run --locked -p ratatoskr-knowledge-service -- reindex-embeddings [--tenant <tenant> [--source-doc <owner_context>:<document_id>]]
+```
 
 ## Boundaries
 

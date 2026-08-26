@@ -1,0 +1,13 @@
+{
+  "summary": "Privacy deletion removes every owned artifact and records a receipt.",
+  "key_points": [
+    {
+      "text": "Tenant deletion removes owned analysis artifacts.",
+      "source_block_indexes": [0]
+    },
+    {
+      "text": "The receipt records counts and removed blobs.",
+      "source_block_indexes": [1]
+    }
+  ]
+}

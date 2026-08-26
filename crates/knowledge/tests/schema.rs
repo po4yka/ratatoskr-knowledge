@@ -25,10 +25,12 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "analysis_attempts",
             "analysis_outputs",
             "analysis_runs",
+            "deletion_records",
             "embedding_chunks",
             "embedding_failures",
             "provider_usage",
             "search_documents",
+            "search_projection_inputs",
             "source_refs"
         ]
     );
@@ -66,6 +68,55 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
     assert_eq!(
         accepted_index.as_deref(),
         Some("one_accepted_output_per_run")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schema_creates_deletion_audit_table() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    database.database.apply_schema().await?;
+
+    let deletion_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "insert into knowledge.deletion_records (
+             deletion_id, tenant_ref, scope, source_refs_deleted,
+             analysis_runs_deleted, analysis_attempts_deleted,
+             analysis_outputs_deleted, search_projection_inputs_deleted,
+             search_documents_deleted,
+             embedding_chunks_deleted, embedding_failures_deleted,
+             blob_digests_removed
+         ) values ($1, 'user:seeded-tenant', 'tenant', 0, 0, 0, 0, 0, 0, 0, 0, 0)",
+    )
+    .bind(deletion_id)
+    .execute(database.database.pool())
+    .await?;
+    let (persisted_scope,): (String,) =
+        sqlx::query_as("select scope from knowledge.deletion_records where deletion_id = $1")
+            .bind(deletion_id)
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(persisted_scope, "tenant");
+
+    let rejected = sqlx::query(
+        "insert into knowledge.deletion_records (
+             deletion_id, tenant_ref, scope, source_refs_deleted,
+             analysis_runs_deleted, analysis_attempts_deleted,
+             analysis_outputs_deleted, search_projection_inputs_deleted,
+             search_documents_deleted,
+             embedding_chunks_deleted, embedding_failures_deleted,
+             blob_digests_removed
+         ) values ($1, 'user:seeded-tenant', 'bogus', 0, 0, 0, 0, 0, 0, 0, 0, 0)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .execute(database.database.pool())
+    .await;
+    let error = rejected.expect_err("scope 'bogus' must violate the check constraint");
+    assert!(
+        error.to_string().contains("deletion_records_scope_check"),
+        "unexpected error: {error}"
     );
 
     database.cleanup().await?;

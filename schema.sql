@@ -108,6 +108,28 @@ create table if not exists knowledge.analysis_attempts (
     ))
 );
 
+create table if not exists knowledge.deletion_records (
+    deletion_id uuid primary key,
+    tenant_ref text not null,
+    scope text not null,
+    owner_context text,
+    source_document_id text,
+    source_refs_deleted integer not null,
+    analysis_runs_deleted integer not null,
+    analysis_attempts_deleted integer not null,
+    analysis_outputs_deleted integer not null,
+    search_projection_inputs_deleted integer not null,
+    search_documents_deleted integer not null,
+    embedding_chunks_deleted integer not null,
+    embedding_failures_deleted integer not null,
+    blob_digests_removed integer not null,
+    completed_at timestamptz not null default now(),
+    constraint deletion_records_scope_check check (scope in ('tenant', 'source'))
+);
+
+create index if not exists deletion_records_tenant_idx
+    on knowledge.deletion_records (tenant_ref, completed_at desc);
+
 create table if not exists knowledge.provider_usage (
     usage_id uuid primary key,
     provider text not null,
@@ -140,6 +162,22 @@ create table if not exists knowledge.analysis_outputs (
 create unique index if not exists one_accepted_output_per_run
     on knowledge.analysis_outputs(run_id)
     where accepted;
+
+create table if not exists knowledge.search_projection_inputs (
+    source_ref_id uuid primary key references knowledge.source_refs(source_ref_id),
+    latest_output_id uuid not null references knowledge.analysis_outputs(output_id),
+    tenant_ref text not null,
+    owner_context text not null,
+    document_id uuid not null,
+    title text not null,
+    lead text not null,
+    body text not null,
+    updated_at timestamptz not null,
+    constraint search_projection_inputs_output_identity unique (latest_output_id)
+);
+
+create index if not exists search_projection_inputs_tenant_idx
+    on knowledge.search_projection_inputs (tenant_ref, source_ref_id);
 
 create table if not exists knowledge.search_documents (
     search_document_id uuid primary key,

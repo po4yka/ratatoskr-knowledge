@@ -2,7 +2,10 @@ use ratatoskr_document_contracts::Document;
 use uuid::Uuid;
 
 use crate::runs::AttemptUpdate;
-use crate::search::{SearchDocumentProjection, extract_search_text, record_search_document};
+use crate::search::{
+    SearchDocumentProjection, extract_search_text, record_search_document,
+    record_search_projection_input,
+};
 use crate::{
     ArticleAnalysis, ArticleValidationError, AttemptInput, AttemptOutcome, AttemptReason,
     BlobError, BlobStore, Database, GenerationRequest, LlmProvider, PersistenceError,
@@ -424,21 +427,22 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         .await
         .map_err(PersistenceError::Query)?;
         let extracted = extract_search_text(document);
-        record_search_document(
-            &mut *transaction,
-            &SearchDocumentProjection {
-                source_ref_id,
-                latest_output_id: output_id,
-                tenant_ref,
-                owner_context,
-                document_id: document.document_id.0,
-                title: extracted.title,
-                lead: extracted.lead,
-                body: extracted.body,
-            },
-        )
-        .await
-        .map_err(PersistenceError::Query)?;
+        let projection = SearchDocumentProjection {
+            source_ref_id,
+            latest_output_id: output_id,
+            tenant_ref,
+            owner_context,
+            document_id: document.document_id.0,
+            title: extracted.title,
+            lead: extracted.lead,
+            body: extracted.body,
+        };
+        record_search_projection_input(&mut *transaction, &projection)
+            .await
+            .map_err(PersistenceError::Query)?;
+        record_search_document(&mut *transaction, &projection)
+            .await
+            .map_err(PersistenceError::Query)?;
         transaction
             .commit()
             .await

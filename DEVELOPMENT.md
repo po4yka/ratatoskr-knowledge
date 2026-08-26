@@ -52,6 +52,33 @@ from the current `schema.sql`; this development repository has no migrations. Th
 smoke check (`cargo run --locked -p ratatoskr-knowledge --example live_openrouter_smoke`) spends
 real credit and is never part of the gate.
 
+## Offline evaluation and one-shot jobs
+
+Run the committed quality corpus without credentials, sockets, or live provider requests:
+
+```bash
+cargo run --locked -p ratatoskr-knowledge --example eval_harness
+```
+
+The output is a timestamp-free report ordered by response-set label and fixture id, so it can be
+compared byte-for-byte between prompt or model recordings. It reads only
+`crates/knowledge/fixtures/eval/`.
+
+The service also exposes non-listening one-shot jobs:
+
+```bash
+cargo run --locked -p ratatoskr-knowledge-service -- delete-source <tenant> <owner_context> <document_id>
+cargo run --locked -p ratatoskr-knowledge-service -- delete-tenant <tenant>
+cargo run --locked -p ratatoskr-knowledge-service -- reindex-search-documents [--tenant <tenant> [--source-doc <owner_context>:<document_id>]]
+cargo run --locked -p ratatoskr-knowledge-service -- reindex-embeddings [--tenant <tenant> [--source-doc <owner_context>:<document_id>]]
+```
+
+Successful jobs exit `0`; invalid invocation, missing required embeddings configuration, connection
+failure, or a job with failed sources exits nonzero. Deletion stdout is a machine-readable receipt
+with all deleted derived-row and blob counts. Reindex stdout prints one committed source result in
+ascending source id order and a final `processed`/`failed` total. These jobs do not start the admin
+listener; embeddings reindex refuses a missing credentials/configuration before database access.
+
 ## What a clone needs before you plan a change
 
 A change is planned with OpenSpec, which is a CLI a clone installs for itself. Use the version

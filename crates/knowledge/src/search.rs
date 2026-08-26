@@ -96,7 +96,7 @@ pub struct SearchDocumentProjection {
 pub async fn record_search_document<'e, E>(
     executor: E,
     projection: &SearchDocumentProjection,
-) -> Result<(), sqlx::Error>
+) -> Result<u64, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
@@ -115,7 +115,25 @@ where
              lead = excluded.lead,
              body = excluded.body,
              updated_at = now()
-         where excluded.latest_output_id > knowledge.search_documents.latest_output_id",
+         where excluded.latest_output_id > knowledge.search_documents.latest_output_id
+            or (
+                excluded.latest_output_id = knowledge.search_documents.latest_output_id
+                and (
+                    knowledge.search_documents.tenant_ref,
+                    knowledge.search_documents.owner_context,
+                    knowledge.search_documents.document_id,
+                    knowledge.search_documents.title,
+                    knowledge.search_documents.lead,
+                    knowledge.search_documents.body
+                ) is distinct from (
+                    excluded.tenant_ref,
+                    excluded.owner_context,
+                    excluded.document_id,
+                    excluded.title,
+                    excluded.lead,
+                    excluded.body
+                )
+            )",
     )
     .bind(uuid::Uuid::now_v7())
     .bind(projection.source_ref_id)
@@ -127,8 +145,53 @@ where
     .bind(&projection.lead)
     .bind(&projection.body)
     .execute(executor)
-    .await?;
-    Ok(())
+    .await
+    .map(|result| result.rows_affected())
+}
+
+/// Records the immutable calculated input required to rebuild one projection.
+///
+/// The input is derived locally while the source Document is still supplied to
+/// the persist path. It deliberately contains no source blob and therefore
+/// lets the rebuild remain inside Knowledge's bounded context.
+///
+/// # Errors
+///
+/// Returns the underlying [`sqlx::Error`] when the write fails.
+pub async fn record_search_projection_input<'e, E>(
+    executor: E,
+    projection: &SearchDocumentProjection,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(
+        "insert into knowledge.search_projection_inputs (
+             source_ref_id, latest_output_id, tenant_ref, owner_context,
+             document_id, title, lead, body, updated_at
+         ) values ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         on conflict (source_ref_id) do update set
+             latest_output_id = excluded.latest_output_id,
+             tenant_ref = excluded.tenant_ref,
+             owner_context = excluded.owner_context,
+             document_id = excluded.document_id,
+             title = excluded.title,
+             lead = excluded.lead,
+             body = excluded.body,
+             updated_at = now()
+         where excluded.latest_output_id > knowledge.search_projection_inputs.latest_output_id",
+    )
+    .bind(projection.source_ref_id)
+    .bind(projection.latest_output_id)
+    .bind(&projection.tenant_ref)
+    .bind(&projection.owner_context)
+    .bind(projection.document_id)
+    .bind(&projection.title)
+    .bind(&projection.lead)
+    .bind(&projection.body)
+    .execute(executor)
+    .await
+    .map(|result| result.rows_affected())
 }
 
 /// Reader-side failure modes for ranked retrieval.

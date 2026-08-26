@@ -20,6 +20,51 @@ use crate::indexer::{
     record_indexing_failure, store_embeddings,
 };
 use crate::provider::ProviderFailureClass;
+use crate::search::{SearchDocumentProjection, record_search_document};
+
+/// Optional planning restrictions shared by both reindex jobs.
+///
+/// A scope names the sources a job may touch: every revision of one
+/// tenant, or exactly one logical source document inside one tenant.
+/// Identity never travels through this type - jobs bind provider, model,
+/// and prompt versions exclusively from configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReindexScope {
+    tenant_ref: Option<String>,
+    owner_context: Option<String>,
+    source_document_id: Option<String>,
+}
+
+impl ReindexScope {
+    /// No restriction: every projected source is in scope.
+    #[must_use]
+    pub fn unrestricted() -> Self {
+        Self::default()
+    }
+
+    /// Restricts the job to one tenant's sources.
+    #[must_use]
+    pub fn for_tenant(tenant_ref: impl Into<String>) -> Self {
+        Self {
+            tenant_ref: Some(tenant_ref.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Restricts the job to one logical source document.
+    #[must_use]
+    pub fn for_source(
+        tenant_ref: impl Into<String>,
+        owner_context: impl Into<String>,
+        source_document_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_ref: Some(tenant_ref.into()),
+            owner_context: Some(owner_context.into()),
+            source_document_id: Some(source_document_id.into()),
+        }
+    }
+}
 
 /// Counts reported by one reindex execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,14 +74,138 @@ pub struct ReindexSummary {
     /// Sources skipped because their projection or provider call failed;
     /// each failure is recorded and nothing of the source was deleted.
     pub failures: usize,
+    /// Sources skipped because no reproducible calculated projection input
+    /// exists for the requested scope.
+    pub sources_skipped: usize,
+}
+
+/// Raw database shape for one persisted lexical projection input.
+type SearchProjectionInputRow = (Uuid, Uuid, String, String, Uuid, String, String, String);
+
+/// Rebuilds lexical search projections from their persisted calculated inputs.
+///
+/// The initial stub establishes the typed job boundary for the red test; the
+/// implementation below will only read Knowledge-owned projection inputs and
+/// never fetch a source blob.
+///
+/// # Errors
+///
+/// Returns [`PersistenceError`] when the rebuild cannot read or write its
+/// durable state.
+pub async fn rebuild_search_documents<F>(
+    database: &crate::Database,
+    scope: &ReindexScope,
+    mut progress: F,
+) -> Result<ReindexSummary, PersistenceError>
+where
+    F: FnMut(Uuid),
+{
+    let projections = planned_search_projections(database.pool(), scope).await?;
+    let mut summary = ReindexSummary {
+        sources_skipped: count_sources_without_projection_inputs(database.pool(), scope).await?,
+        ..ReindexSummary::default()
+    };
+    for projection in projections {
+        let mut transaction = database
+            .pool()
+            .begin()
+            .await
+            .map_err(PersistenceError::Query)?;
+        let changed = record_search_document(&mut *transaction, &projection)
+            .await
+            .map_err(PersistenceError::Query)?;
+        transaction
+            .commit()
+            .await
+            .map_err(PersistenceError::Query)?;
+        if changed > 0 {
+            summary.sources_processed += 1;
+            progress(projection.source_ref_id);
+        }
+    }
+    Ok(summary)
+}
+
+/// Counts in-scope source revisions that lack a local, reproducible input.
+async fn count_sources_without_projection_inputs(
+    pool: &sqlx::PgPool,
+    scope: &ReindexScope,
+) -> Result<usize, PersistenceError> {
+    let (count,): (i64,) = sqlx::query_as(
+        "select count(*) from knowledge.source_refs s
+         where ($1::text is null or s.tenant_ref = $1)
+           and ($2::text is null or s.owner_context = $2)
+           and ($3::text is null or s.source_document_id = $3)
+           and not exists (
+                select 1 from knowledge.search_projection_inputs i
+                where i.source_ref_id = s.source_ref_id
+           )",
+    )
+    .bind(scope.tenant_ref.as_deref())
+    .bind(scope.owner_context.as_deref())
+    .bind(scope.source_document_id.as_deref())
+    .fetch_one(pool)
+    .await
+    .map_err(PersistenceError::Query)?;
+    usize::try_from(count).map_err(|_| PersistenceError::InvalidAnalysisIdentity)
+}
+
+/// Loads all in-scope calculated projection inputs in stable source order.
+async fn planned_search_projections(
+    pool: &sqlx::PgPool,
+    scope: &ReindexScope,
+) -> Result<Vec<SearchDocumentProjection>, PersistenceError> {
+    let rows: Vec<SearchProjectionInputRow> = sqlx::query_as(
+        "select i.source_ref_id, i.latest_output_id, i.tenant_ref, i.owner_context,
+                i.document_id, i.title, i.lead, i.body
+         from knowledge.search_projection_inputs i
+         join knowledge.source_refs s on s.source_ref_id = i.source_ref_id
+         where ($1::text is null or i.tenant_ref = $1)
+           and ($2::text is null or s.owner_context = $2)
+           and ($3::text is null or s.source_document_id = $3)
+         order by i.source_ref_id asc",
+    )
+    .bind(scope.tenant_ref.as_deref())
+    .bind(scope.owner_context.as_deref())
+    .bind(scope.source_document_id.as_deref())
+    .fetch_all(pool)
+    .await
+    .map_err(PersistenceError::Query)?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                source_ref_id,
+                latest_output_id,
+                tenant_ref,
+                owner_context,
+                document_id,
+                title,
+                lead,
+                body,
+            )| {
+                SearchDocumentProjection {
+                    source_ref_id,
+                    latest_output_id,
+                    tenant_ref,
+                    owner_context,
+                    document_id,
+                    title,
+                    lead,
+                    body,
+                }
+            },
+        )
+        .collect())
 }
 
 /// Enumerates projected sources needing regeneration under `identity`.
 ///
 /// A source enters the plan when it lacks any chunk under the active
-/// identity tuple or carries at least one row under any other identity.
-/// The plan is one statement, ordered by source identity, so repeated
-/// planning over unchanged data is deterministic.
+/// identity tuple or carries at least one row under any other identity,
+/// and only when it lies inside `scope`. The plan is one statement,
+/// ordered by source identity, so repeated planning over unchanged data
+/// is deterministic.
 ///
 /// # Errors
 ///
@@ -44,6 +213,7 @@ pub struct ReindexSummary {
 pub async fn plan_reindex<'e, E>(
     executor: E,
     identity: &IndexingIdentity,
+    scope: &ReindexScope,
 ) -> Result<Vec<Uuid>, PersistenceError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -51,24 +221,33 @@ where
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         "select distinct s.source_ref_id
          from knowledge.search_documents s
-         where not exists (
-                   select 1 from knowledge.embedding_chunks c
-                   where c.source_ref_id = s.source_ref_id
-                     and c.chunking_version = $1 and c.provider = $2
-                     and c.model = $3 and c.prompt_version = $4
-               )
-            or exists (
-                   select 1 from knowledge.embedding_chunks f
-                   where f.source_ref_id = s.source_ref_id
-                     and not (f.chunking_version = $1 and f.provider = $2
-                              and f.model = $3 and f.prompt_version = $4)
-               )
+         join knowledge.source_refs sr on sr.source_ref_id = s.source_ref_id
+         where ($5::text is null or s.tenant_ref = $5)
+           and ($6::text is null or sr.owner_context = $6)
+           and ($7::text is null or sr.source_document_id = $7)
+           and (
+                not exists (
+                    select 1 from knowledge.embedding_chunks c
+                    where c.source_ref_id = s.source_ref_id
+                      and c.chunking_version = $1 and c.provider = $2
+                      and c.model = $3 and c.prompt_version = $4
+                )
+                or exists (
+                    select 1 from knowledge.embedding_chunks f
+                    where f.source_ref_id = s.source_ref_id
+                      and not (f.chunking_version = $1 and f.provider = $2
+                               and f.model = $3 and f.prompt_version = $4)
+                )
+            )
          order by s.source_ref_id asc",
     )
     .bind(CHUNKING_VERSION)
     .bind(&identity.provider)
     .bind(&identity.model)
     .bind(&identity.prompt_version)
+    .bind(scope.tenant_ref.as_deref())
+    .bind(scope.owner_context.as_deref())
+    .bind(scope.source_document_id.as_deref())
     .fetch_all(executor)
     .await
     .map_err(PersistenceError::Query)?;
@@ -136,36 +315,57 @@ where
     ))
 }
 
+/// One planned source's reindex result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexSourceOutcome {
+    /// Replacement vectors were stored under the active identity.
+    Rebuilt {
+        /// Number of stored chunks for the source.
+        chunks: usize,
+    },
+    /// A recorded failure; the source's existing vectors are untouched.
+    Failed,
+}
+
 /// Regenerates every planned source under the provider's active identity.
 ///
-/// Each source is embedded in bounded input groups and persisted inside one
-/// transaction that also prunes superseded-identity rows and clears the
-/// source's failure entries. A provider or validation failure records a
-/// bounded failure row and leaves the source's existing vectors untouched;
-/// completed work stays persisted. `analysis_outputs` and run states are
-/// never modified.
+/// Planning honors `scope`; sources are processed one at a time in
+/// ascending source order. Each source is embedded in bounded input groups
+/// and persisted inside one transaction that also prunes superseded-identity
+/// rows and clears the source's failure entries. A provider or validation
+/// failure records a bounded failure row and leaves the source's existing
+/// vectors untouched; completed work stays persisted. `analysis_outputs`
+/// and run states are never modified. `progress` observes each processed
+/// source as its per-source transaction commits.
 ///
 /// # Errors
 ///
 /// Returns [`PersistenceError`] when persistence itself fails; provider
 /// failures are captured as failure records instead.
-pub async fn execute_reindex<P: EmbeddingProvider>(
+pub async fn execute_reindex<P, F>(
     database: &crate::Database,
     provider: &P,
     policy: ChunkPolicy,
     max_input_characters: usize,
-) -> Result<ReindexSummary, PersistenceError> {
+    scope: &ReindexScope,
+    mut progress: F,
+) -> Result<ReindexSummary, PersistenceError>
+where
+    P: EmbeddingProvider,
+    F: FnMut(Uuid, ReindexSourceOutcome),
+{
     let provider_identity = provider.identity();
     let identity = IndexingIdentity {
         provider: provider_identity.provider.clone(),
         model: provider_identity.model.clone(),
         prompt_version: provider_identity.prompt_version.clone(),
     };
-    let planned = plan_reindex(database.pool(), &identity).await?;
+    let planned = plan_reindex(database.pool(), &identity, scope).await?;
     let mut summary = ReindexSummary::default();
     for source_ref_id in planned {
         let Some(source) = load_reindex_source(database.pool(), source_ref_id).await? else {
             summary.failures += 1;
+            progress(source_ref_id, ReindexSourceOutcome::Failed);
             continue;
         };
         let target = IndexingTarget {
@@ -176,7 +376,7 @@ pub async fn execute_reindex<P: EmbeddingProvider>(
             owner_context: source.owner_context.clone(),
             document_id: source.document_id,
         };
-        if regenerate_source(
+        let outcome = regenerate_source(
             database,
             provider,
             policy,
@@ -185,17 +385,19 @@ pub async fn execute_reindex<P: EmbeddingProvider>(
             &target,
             &source,
         )
-        .await?
-        {
-            summary.sources_processed += 1;
-        } else {
-            summary.failures += 1;
+        .await?;
+        match outcome {
+            ReindexSourceOutcome::Rebuilt { .. } => summary.sources_processed += 1,
+            ReindexSourceOutcome::Failed => summary.failures += 1,
         }
+        progress(source_ref_id, outcome);
     }
     Ok(summary)
 }
 
-/// Regenerates one source; `Ok(false)` means a recorded failure.
+/// Regenerates one source; [`ReindexSourceOutcome::Failed`] means a
+/// recorded failure.
+#[allow(clippy::too_many_lines)]
 async fn regenerate_source<P: EmbeddingProvider>(
     database: &crate::Database,
     provider: &P,
@@ -204,10 +406,10 @@ async fn regenerate_source<P: EmbeddingProvider>(
     identity: &IndexingIdentity,
     target: &IndexingTarget,
     source: &ReindexSource,
-) -> Result<bool, PersistenceError> {
+) -> Result<ReindexSourceOutcome, PersistenceError> {
     let chunks = chunk_article(&source.title, &source.lead, &source.body, policy);
     if chunks.is_empty() {
-        return Ok(false);
+        return Ok(ReindexSourceOutcome::Failed);
     }
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
     for group in input_groups(
@@ -226,7 +428,7 @@ async fn regenerate_source<P: EmbeddingProvider>(
                 );
                 return record_failure(database, identity, target, failure.class)
                     .await
-                    .map(|()| false);
+                    .map(|()| ReindexSourceOutcome::Failed);
             }
         };
         vectors.extend(response.vectors);
@@ -243,7 +445,7 @@ async fn regenerate_source<P: EmbeddingProvider>(
             ProviderFailureClass::RequestInvalid,
         )
         .await
-        .map(|()| false);
+        .map(|()| ReindexSourceOutcome::Failed);
     }
     let writes: Vec<EmbeddingWrite> = chunks
         .into_iter()
@@ -255,6 +457,7 @@ async fn regenerate_source<P: EmbeddingProvider>(
             vector: Vector::from(vector),
         })
         .collect();
+    let stored = writes.len();
     let mut transaction = database
         .pool()
         .begin()
@@ -284,7 +487,7 @@ async fn regenerate_source<P: EmbeddingProvider>(
         .commit()
         .await
         .map_err(PersistenceError::Query)?;
-    Ok(true)
+    Ok(ReindexSourceOutcome::Rebuilt { chunks: stored })
 }
 
 /// Records one bounded reindex failure without deleting anything.

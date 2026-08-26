@@ -11,7 +11,9 @@ mod config;
 mod context;
 mod controlled;
 mod database;
+mod deletion;
 mod embeddings;
+mod evaluation;
 mod indexer;
 mod openrouter;
 mod pipeline;
@@ -38,10 +40,19 @@ pub use context::{
 };
 pub use controlled::{ControlledProvider, SpendControls};
 pub use database::{Database, PersistenceError};
+pub use deletion::{
+    DeletionCounts, DeletionError, DeletionReceipt, DeletionScope, delete_source, delete_tenant,
+    execute_deletion,
+};
 pub use embeddings::{
     ControlledEmbeddings, EmbeddingIdentity, EmbeddingProvider, EmbeddingResponse,
     EmbeddingsSettings, EmbeddingsWireError, OpenAiCompatibleEmbeddings, ScriptedEmbeddingProvider,
     ScriptedEmbeddingSuccess, embeddings_request_body, parse_embeddings_envelope,
+};
+pub use evaluation::{
+    CaseScore, CheckOutcome, EvalCase, EvalExpectations, EvalSource, EvaluationError,
+    EvaluationReport, ResponseSet, SetScore, load_case_bytes, load_cases, render_report,
+    run_committed_evaluation, run_offline, score_case, score_response_sets,
 };
 pub use indexer::{
     EMBEDDING_STORAGE_DIMENSIONS, EmbeddingWrite, Indexer, IndexerLimits, IndexingIdentity,
@@ -58,13 +69,17 @@ pub use provider::{
     ProviderResponse, ProviderUsage, ScriptedProvider,
 };
 pub use rate_limit::RateLimiter;
-pub use reindex::{ReindexSummary, execute_reindex, plan_reindex};
+pub use reindex::{
+    ReindexScope, ReindexSourceOutcome, ReindexSummary, execute_reindex, plan_reindex,
+    rebuild_search_documents,
+};
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,
 };
 pub use search::{
     HybridRetriever, RankingPath, SearchDocumentProjection, SearchError, SearchPage, SearchQuery,
-    SearchResult, SemanticLeg, hybrid_search_page, record_search_document, search_page,
+    SearchResult, SemanticLeg, hybrid_search_page, record_search_document,
+    record_search_projection_input, search_page,
 };
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};

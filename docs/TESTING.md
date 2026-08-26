@@ -37,5 +37,14 @@ Each behavior task first adds and runs a failing test. The next task adds the sm
 that makes it pass, then runs formatting and Clippy. Configuration, documentation, and generated
 artifacts state why they do not start with a behavior test.
 
-Evaluation sets, real-provider quality reports, search relevance, cross-owner search isolation, and
-workspace end-to-end retrieval are deferred because the related runtime features do not exist.
+The committed evaluation harness loads strict non-sensitive fixtures and recorded response sets,
+then scores article structural validity, citation grounding, summary bound, key-point cardinality,
+and required evidence coverage. It renders byte-deterministic, side-by-side label reports without
+credentials, clocks, transports, or network access. Deletion tests enumerate source references,
+runs, attempts, outputs, projection-input snapshots, lexical rows, chunks, failure rows, and owned
+blob bytes; they also prove tenant isolation, reference-safe blob sweep, and one-transaction audit
+visibility. Process tests cover the operator deletion/reindex receipts, deterministic progress, and
+the missing-embeddings fail-fast path.
+
+Future real-provider recordings are deliberate manual artifacts, not gate inputs. Repository,
+social, AI-archive, and workspace end-to-end retrieval remain separate analysis-family work.

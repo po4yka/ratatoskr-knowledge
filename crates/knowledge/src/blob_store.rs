@@ -114,10 +114,44 @@ impl BlobStore {
         Ok(bytes)
     }
 
+    /// Removes owned bytes by digest address.
+    ///
+    /// Returns `true` when a file was deleted and `false` when it was
+    /// already absent, so repeated collection stays idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlobError`] for an invalid digest or filesystem failure.
+    pub async fn remove(&self, digest_hex: &str) -> Result<bool, BlobError> {
+        if !is_digest_hex(digest_hex) {
+            return Err(BlobError::InvalidReference);
+        }
+        let path = self.path(digest_hex)?;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(BlobError::Io(error)),
+        }
+    }
+
+    /// Returns the owned content-addressed root for bounded enumeration.
+    #[must_use]
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     fn path(&self, hex: &str) -> Result<PathBuf, BlobError> {
         let prefix = hex.get(..2).ok_or(BlobError::InvalidReference)?;
         Ok(self.root.join("sha256").join(prefix).join(hex))
     }
+}
+
+/// Returns whether `value` is a lowercase 64-character SHA-256 hex digest.
+pub(crate) fn is_digest_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn digest_hex(bytes: &[u8]) -> Result<String, BlobError> {

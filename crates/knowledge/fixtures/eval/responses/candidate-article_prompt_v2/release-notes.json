@@ -1,0 +1,9 @@
+{
+  "summary": "The release adds offline evaluations and privacy improvements.",
+  "key_points": [
+    {
+      "text": "Offline evaluation support is added.",
+      "source_block_indexes": [0]
+    }
+  ]
+}
