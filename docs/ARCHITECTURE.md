@@ -520,12 +520,16 @@ knowledge.search_projection.delete_requested.v1
 content.document.extracted.v1
 github.repository.observed.v1
 github.repository.analysis_requested.v1
-social.source.upserted.v1
+social.source.captured.v1
+social.source.updated.v1
+social.source.removed.v1
 chatgpt.conversation.upserted.v1
 chatgpt.project.upserted.v1
 claude.conversation.upserted.v1
 claude.project.upserted.v1
 ```
+
+The social-source facts follow the published `social-source-contracts` capability, and the producer/analyser boundary behaviour for them — fact-as-request semantics, `(social_source_id, content_digest)` result linkage, and removal propagation — is owned by the `ratatoskr-workspace` store spec `social-analysis-intake`, which is cited here rather than restated. The social analysis family itself lands through separate changesets (implementation plan item 9).
 
 ### 16.3. Events emitted
 
