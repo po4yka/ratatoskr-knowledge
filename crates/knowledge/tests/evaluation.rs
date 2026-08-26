@@ -40,7 +40,7 @@ fn eval_cases_load_and_reject_malformed_fixtures() -> Result<(), Box<dyn std::er
 fn labeled_response_sets_group_side_by_side() -> Result<(), Box<dyn std::error::Error>> {
     let report = run_committed_evaluation()?;
     assert_eq!(report.sets.len(), 2);
-    assert_eq!(report.sets[0].label, "candidate-article_prompt_v2");
+    assert_eq!(report.sets[0].label, "candidate-article_prompt_v1");
     assert_eq!(report.sets[1].label, "scripted-article_prompt_v1");
     for set in &report.sets {
         assert_eq!(set.cases.len(), 2);
