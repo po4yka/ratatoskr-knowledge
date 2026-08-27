@@ -1,0 +1,41 @@
+{
+  "import_provenance": {
+    "ai_archive_id": "018f0000-0000-7000-8000-000000000402",
+    "provider": "chatgpt",
+    "owner": "user:018f0000-0000-7000-8000-000000000005",
+    "source_export": {
+      "owner_service": "ratatoskr-chatgpt",
+      "digest": {
+        "algorithm": "sha256",
+        "hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "media_type": "application/zip",
+      "length_bytes": 2097152
+    },
+    "imported_at": "2026-08-18T11:30:00Z",
+    "parser_name": "chatgpt_export",
+    "parser_version": "2026.08.1"
+  },
+  "conversation": {
+    "ai_conversation_id": "018f0000-0000-7000-8000-000000000403",
+    "provider": "chatgpt",
+    "owner": "user:018f0000-0000-7000-8000-000000000005",
+    "project_ref": "ai_project:018f0000-0000-7000-8000-000000000402",
+    "messages": [
+      {
+        "external_message_id": "msg-0001",
+        "author_role": "user",
+        "parts": [{"part_kind": "text", "text": "Explain E0597 in one line."}],
+        "provider_created_at": "2026-08-02T10:00:00Z",
+        "parser_name": "chatgpt_export",
+        "parser_version": "2026.08.1"
+      }
+    ],
+    "content_digest": {
+      "algorithm": "sha256",
+      "hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "parser_name": "chatgpt_export",
+    "parser_version": "2026.08.1"
+  }
+}

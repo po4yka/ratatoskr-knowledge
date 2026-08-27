@@ -207,6 +207,7 @@ create table if not exists knowledge.source_analysis_inbox (
     subject text not null,
     family text not null,
     tenant_ref text not null,
+    archive_id text,
     source_id text not null,
     content_digest_hex text not null,
     observed_at timestamptz not null,
@@ -221,6 +222,51 @@ create table if not exists knowledge.source_analysis_inbox (
     constraint source_analysis_inbox_family_check check (family in ('social', 'ai_archive')),
     constraint source_analysis_inbox_digest_check check (content_digest_hex ~ '^[0-9a-f]{64}$'),
     constraint source_analysis_inbox_snapshot_object_check check (jsonb_typeof(snapshot) = 'object')
+);
+
+create index if not exists source_analysis_inbox_archive_idx
+    on knowledge.source_analysis_inbox (tenant_ref, archive_id, source_id)
+    where archive_id is not null;
+
+-- Authoritative archive deletion facts are retained after their derived source snapshots are
+-- removed so an old at-least-once conversation delivery cannot recreate a tombstoned projection.
+create table if not exists knowledge.ai_archive_tombstones (
+    event_id uuid primary key,
+    tenant_ref text not null,
+    archive_id text not null,
+    subject_kind text not null,
+    subject_id text,
+    observed_at timestamptz not null,
+    constraint ai_archive_tombstones_subject_kind_check
+        check (subject_kind in ('archive', 'conversation', 'project', 'artifact')),
+    constraint ai_archive_tombstones_subject_id_check
+        check ((subject_kind = 'archive' and subject_id is null)
+            or (subject_kind <> 'archive' and subject_id is not null))
+);
+
+create index if not exists ai_archive_tombstones_lookup_idx
+    on knowledge.ai_archive_tombstones (tenant_ref, subject_kind, subject_id, observed_at desc);
+
+-- Project and Artifact state is retained as a contract receipt. These objects do not enter the
+-- conversation analysis family until Knowledge owns an authorized byte resolver and a typed
+-- analysis contract for them.
+create table if not exists knowledge.ai_archive_object_inbox (
+    event_id uuid primary key,
+    subject text not null,
+    tenant_ref text not null,
+    archive_id text not null,
+    object_kind text not null,
+    object_id text not null,
+    observed_at timestamptz not null,
+    payload jsonb not null,
+    accepted_at timestamptz not null default now(),
+    constraint ai_archive_object_inbox_subject_check check (subject in (
+        'ai_archive.archive.imported.v1',
+        'ai_archive.project.added.v1', 'ai_archive.project.updated.v1',
+        'ai_archive.artifact.added.v1', 'ai_archive.artifact.updated.v1'
+    )),
+    constraint ai_archive_object_inbox_kind_check check (object_kind in ('archive', 'project', 'artifact')),
+    constraint ai_archive_object_inbox_payload_object_check check (jsonb_typeof(payload) = 'object')
 );
 
 create table if not exists knowledge.source_analysis_heads (

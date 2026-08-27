@@ -22,6 +22,8 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
     assert_eq!(
         tables,
         [
+            "ai_archive_object_inbox",
+            "ai_archive_tombstones",
             "analysis_attempts",
             "analysis_feedback",
             "analysis_outputs",

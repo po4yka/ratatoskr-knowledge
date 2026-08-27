@@ -1,0 +1,20 @@
+{
+  "ai_archive_id": "018f0000-0000-7000-8000-000000000402",
+  "provider": "chatgpt",
+  "owner": "user:018f0000-0000-7000-8000-000000000005",
+  "subject": {
+    "subject_kind": "conversation",
+    "ai_conversation_id": "018f0000-0000-7000-8000-000000000403"
+  },
+  "reason": "provider_deletion_event",
+  "evidence_ref": {
+    "owner_service": "ratatoskr-chatgpt",
+    "digest": {
+      "algorithm": "sha256",
+      "hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    "media_type": "application/json",
+    "length_bytes": 512
+  },
+  "observed_at": "2026-08-27T06:00:00Z"
+}
