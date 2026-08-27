@@ -14,6 +14,8 @@ mod database;
 mod deletion;
 mod embeddings;
 mod evaluation;
+mod family_analysis;
+mod family_pipeline;
 mod indexer;
 mod openrouter;
 mod pipeline;
@@ -23,6 +25,7 @@ mod reindex;
 mod repository_analysis;
 mod runs;
 pub mod search;
+mod source_inbox;
 mod telemetry;
 
 #[cfg(feature = "test-support")]
@@ -55,6 +58,18 @@ pub use evaluation::{
     EvaluationReport, ResponseSet, SetScore, load_case_bytes, load_cases, render_report,
     run_committed_evaluation, run_offline, score_case, score_response_sets,
 };
+pub use family_analysis::{
+    ArchiveAnalysis, ArchiveDecision, FamilyValidationError, RepositoryAnalysis,
+    RepositoryReadmeEvidence, SocialAnalysis, SocialConfidence, archive_analysis_schema,
+    archive_context, archive_generation_request, repository_analysis_schema, repository_context,
+    repository_generation_request, social_analysis_schema, social_context,
+    social_generation_request, validate_archive_analysis, validate_repository_analysis,
+    validate_social_analysis,
+};
+pub use family_pipeline::{
+    FamilyPipeline, FamilyPipelineError, RepositoryAnalysisExecution, RepositoryReadmeError,
+    RepositoryReadmeResolver,
+};
 pub use indexer::{
     EMBEDDING_STORAGE_DIMENSIONS, EmbeddingWrite, Indexer, IndexerLimits, IndexingIdentity,
     IndexingOutcome, IndexingTarget, PendingSource, failure_attempt_count, pending_indexing_batch,
@@ -86,4 +101,5 @@ pub use search::{
     SearchResult, SemanticLeg, hybrid_search_page, record_search_document,
     record_search_projection_input, search_page,
 };
+pub use source_inbox::{SourceInbox, SourceInboxAdmission, SourceInboxError};
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};

@@ -1,0 +1,1 @@
+Summarize the supplied conversation. Extract decisions only when grounded in a supplied message and cite that exact message id.

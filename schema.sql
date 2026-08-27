@@ -186,6 +186,39 @@ create table if not exists knowledge.repository_analysis_requests (
     )
 );
 
+-- At-least-once source deliveries are claimed before family-specific analysis starts. Snapshot
+-- payloads are state-carried contract values, never a producer-table dependency.
+create table if not exists knowledge.source_analysis_inbox (
+    event_id uuid primary key,
+    subject text not null,
+    family text not null,
+    tenant_ref text not null,
+    source_id text not null,
+    content_digest_hex text not null,
+    observed_at timestamptz not null,
+    snapshot jsonb not null,
+    accepted_at timestamptz not null default now(),
+    constraint source_analysis_inbox_subject_check check (subject in (
+        'social.source.captured.v1', 'social.source.updated.v1',
+        'ai_archive.conversation.added.v1', 'ai_archive.conversation.updated.v1'
+    )),
+    constraint source_analysis_inbox_family_check check (family in ('social', 'ai_archive')),
+    constraint source_analysis_inbox_digest_check check (content_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint source_analysis_inbox_snapshot_object_check check (jsonb_typeof(snapshot) = 'object')
+);
+
+create table if not exists knowledge.source_analysis_heads (
+    family text not null,
+    tenant_ref text not null,
+    source_id text not null,
+    content_digest_hex text not null,
+    observed_at timestamptz not null,
+    inbox_event_id uuid not null references knowledge.source_analysis_inbox (event_id),
+    primary key (family, tenant_ref, source_id),
+    constraint source_analysis_heads_family_check check (family in ('social', 'ai_archive')),
+    constraint source_analysis_heads_digest_check check (content_digest_hex ~ '^[0-9a-f]{64}$')
+);
+
 create index if not exists repository_analysis_pending_idx
     on knowledge.repository_analysis_requests (tenant_ref, created_at)
     where state = 'pending';
