@@ -310,21 +310,7 @@ impl<'a> SourceInbox<'a> {
                 .map_err(PersistenceError::Query)?;
             return Ok(SourceInboxAdmission::Duplicate);
         }
-        let (subject_kind, subject_id) = tombstone_subject_parts(&tombstone.subject);
-        sqlx::query(
-            "insert into knowledge.ai_archive_tombstones
-                 (event_id, tenant_ref, archive_id, subject_kind, subject_id, observed_at)
-             values ($1, $2, $3, $4, $5, $6::timestamptz)",
-        )
-        .bind(event_id)
-        .bind(tombstone.owner.to_string())
-        .bind(tombstone.ai_archive_id.to_string())
-        .bind(subject_kind)
-        .bind(subject_id)
-        .bind(tombstone.observed_at.to_string())
-        .execute(&mut *transaction)
-        .await
-        .map_err(PersistenceError::Query)?;
+        record_tombstone(&mut transaction, event_id, tombstone).await?;
         execute_deletion(&mut transaction, &deletion_scope).await?;
         transaction
             .commit()
@@ -587,6 +573,29 @@ fn tombstone_subject_parts(subject: &AiArchiveTombstoneSubject) -> (&'static str
             external_artifact_id,
         } => ("artifact", Some(external_artifact_id.to_string())),
     }
+}
+
+async fn record_tombstone(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event_id: uuid::Uuid,
+    tombstone: &AiArchiveTombstone,
+) -> Result<(), SourceInboxError> {
+    let (subject_kind, subject_id) = tombstone_subject_parts(&tombstone.subject);
+    sqlx::query(
+        "insert into knowledge.ai_archive_tombstones
+             (event_id, tenant_ref, archive_id, subject_kind, subject_id, observed_at)
+         values ($1, $2, $3, $4, $5, $6::timestamptz)",
+    )
+    .bind(event_id)
+    .bind(tombstone.owner.to_string())
+    .bind(tombstone.ai_archive_id.to_string())
+    .bind(subject_kind)
+    .bind(subject_id)
+    .bind(tombstone.observed_at.to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(PersistenceError::Query)?;
+    Ok(())
 }
 
 async fn insert_receipt(
