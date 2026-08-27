@@ -10,7 +10,6 @@ use ratatoskr_knowledge::{BlobStore, DeletionCounts, DeletionScope, SourceRefere
 use uuid::Uuid;
 
 const OWNER_CONTEXT: &str = "ratatoskr-extractor";
-
 #[tokio::test]
 async fn remove_deletes_owned_bytes_and_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     let root = TemporaryBlobRoot::create().await?;

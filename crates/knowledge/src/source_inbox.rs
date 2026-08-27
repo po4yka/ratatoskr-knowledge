@@ -222,6 +222,13 @@ impl<'a> SourceInbox<'a> {
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
+        if subject_belongs_only_to_another_tenant(&mut transaction, &deletion_scope).await? {
+            transaction
+                .rollback()
+                .await
+                .map_err(PersistenceError::Query)?;
+            return Err(SourceInboxError::InvalidArchiveFact);
+        }
         if !insert_receipt(&mut transaction, delivery).await? {
             transaction
                 .commit()
@@ -324,6 +331,50 @@ impl<'a> SourceInbox<'a> {
             SourceInboxAdmission::AcceptedHistorical
         })
     }
+}
+
+async fn subject_belongs_only_to_another_tenant(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &DeletionScope,
+) -> Result<bool, SourceInboxError> {
+    let (known, owned): (bool, bool) = match scope {
+        DeletionScope::Archive {
+            tenant_ref,
+            ai_archive_id,
+        } => {
+            sqlx::query_as(
+                "select
+                 exists(select 1 from knowledge.source_refs where ai_archive_id = $1),
+                 exists(select 1 from knowledge.source_refs
+                        where ai_archive_id = $1 and tenant_ref = $2)",
+            )
+            .bind(ai_archive_id)
+            .bind(tenant_ref)
+            .fetch_one(&mut **transaction)
+            .await
+        }
+        DeletionScope::Source {
+            tenant_ref,
+            owner_context,
+            source_document_id,
+        } => {
+            sqlx::query_as(
+                "select
+                 exists(select 1 from knowledge.source_refs
+                        where owner_context = $1 and source_document_id = $2),
+                 exists(select 1 from knowledge.source_refs
+                        where owner_context = $1 and source_document_id = $2 and tenant_ref = $3)",
+            )
+            .bind(owner_context)
+            .bind(source_document_id)
+            .bind(tenant_ref)
+            .fetch_one(&mut **transaction)
+            .await
+        }
+        DeletionScope::Tenant { .. } => return Ok(false),
+    }
+    .map_err(PersistenceError::Query)?;
+    Ok(known && !owned)
 }
 
 async fn insert_receipt(
