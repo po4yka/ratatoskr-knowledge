@@ -1,12 +1,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use axum::Json;
 use axum::Router;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use ratatoskr_knowledge::{Database, RankingPath, SearchQuery, search_page};
+use axum::routing::{get, post};
+use ratatoskr_knowledge::{
+    AnalysisState, CollectionTarget, Database, FeedbackCategory, HighlightAnchor, RankingPath,
+    SearchQuery, UserContentError, add_collection_item, create_collection, create_highlight,
+    create_tag, list_collection_items, merge_tags, move_collection_item, record_feedback,
+    search_page, set_analysis_state, tag_analysis, tag_name,
+};
 
 use crate::{HybridSearchRetriever, Metrics};
 
@@ -75,6 +82,8 @@ pub fn admin_router(
         .route("/metrics", get(metrics_route))
         .route("/version", get(version))
         .route("/internal/search", get(search))
+        .route("/internal/user-content/command", post(user_content_command))
+        .route("/internal/user-content/collection", get(collection_items))
         .with_state(state)
         .layer(middleware::from_fn(no_store))
 }
@@ -149,6 +158,200 @@ async fn search(
             Err(_) => search_failed(),
         },
         Err(_) => search_failed(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum UserContentCommand {
+    CreateTag {
+        tenant: String,
+        name: String,
+    },
+    MergeTags {
+        tenant: String,
+        source_tag_id: uuid::Uuid,
+        destination_tag_id: uuid::Uuid,
+    },
+    TagAnalysis {
+        tenant: String,
+        tag_id: uuid::Uuid,
+        output_id: uuid::Uuid,
+    },
+    CreateCollection {
+        tenant: String,
+        name: String,
+    },
+    AddCollectionItem {
+        tenant: String,
+        collection_id: uuid::Uuid,
+        target: CollectionTarget,
+        position: Option<u32>,
+    },
+    MoveCollectionItem {
+        tenant: String,
+        collection_id: uuid::Uuid,
+        target: CollectionTarget,
+        destination: u32,
+    },
+    SetAnalysisState {
+        tenant: String,
+        output_id: uuid::Uuid,
+        state: AnalysisState,
+    },
+    RecordFeedback {
+        tenant: String,
+        output_id: uuid::Uuid,
+        category: FeedbackCategory,
+        detail: Option<String>,
+    },
+    CreateHighlight {
+        tenant: String,
+        document: ratatoskr_document_contracts::Document,
+        anchor: HighlightAnchor,
+    },
+}
+
+async fn user_content_command(
+    axum::extract::State(state): axum::extract::State<AdminState>,
+    command: Result<Json<UserContentCommand>, JsonRejection>,
+) -> Response {
+    let Ok(Json(command)) = command else {
+        return bad_request("invalid_json");
+    };
+    let result = match command {
+        UserContentCommand::CreateTag { tenant, name } => match tag_name(&name) {
+            Ok(name) => create_tag(state.database.pool(), &tenant, name)
+                .await
+                .map(|id| serde_json::json!({"tag_id": id})),
+            Err(error) => Err(error),
+        },
+        UserContentCommand::MergeTags {
+            tenant,
+            source_tag_id,
+            destination_tag_id,
+        } => merge_tags(
+            state.database.pool(),
+            &tenant,
+            source_tag_id,
+            destination_tag_id,
+        )
+        .await
+        .map(|()| serde_json::json!({})),
+        UserContentCommand::TagAnalysis {
+            tenant,
+            tag_id,
+            output_id,
+        } => tag_analysis(state.database.pool(), &tenant, tag_id, output_id)
+            .await
+            .map(|()| serde_json::json!({})),
+        UserContentCommand::CreateCollection { tenant, name } => {
+            create_collection(state.database.pool(), &tenant, &name)
+                .await
+                .map(|id| serde_json::json!({"collection_id": id}))
+        }
+        UserContentCommand::AddCollectionItem {
+            tenant,
+            collection_id,
+            target,
+            position,
+        } => add_collection_item(
+            state.database.pool(),
+            &tenant,
+            collection_id,
+            target,
+            position,
+        )
+        .await
+        .map(|item| serde_json::json!({"item": item})),
+        UserContentCommand::MoveCollectionItem {
+            tenant,
+            collection_id,
+            target,
+            destination,
+        } => move_collection_item(
+            state.database.pool(),
+            &tenant,
+            collection_id,
+            target,
+            destination,
+        )
+        .await
+        .map(|()| serde_json::json!({})),
+        UserContentCommand::SetAnalysisState {
+            tenant,
+            output_id,
+            state: analysis_state,
+        } => set_analysis_state(state.database.pool(), &tenant, output_id, analysis_state)
+            .await
+            .map(|state| serde_json::json!({"state": state})),
+        UserContentCommand::RecordFeedback {
+            tenant,
+            output_id,
+            category,
+            detail,
+        } => record_feedback(
+            state.database.pool(),
+            &tenant,
+            output_id,
+            category,
+            detail.as_deref(),
+        )
+        .await
+        .map(|id| serde_json::json!({"feedback_id": id})),
+        UserContentCommand::CreateHighlight {
+            tenant,
+            document,
+            anchor,
+        } => create_highlight(state.database.pool(), &tenant, &document, anchor)
+            .await
+            .map(|id| serde_json::json!({"highlight_id": id})),
+    };
+    user_content_response(result)
+}
+
+fn user_content_response(result: Result<serde_json::Value, UserContentError>) -> Response {
+    match result {
+        Ok(value) => json_response(StatusCode::OK, &value),
+        Err(UserContentError::Invalid) => bad_request("invalid_user_content"),
+        Err(UserContentError::Conflict) => json_response(
+            StatusCode::CONFLICT,
+            &serde_json::json!({"error":"user_content_conflict"}),
+        ),
+        Err(UserContentError::NotFound) => json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error":"user_content_not_found"}),
+        ),
+        Err(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error":"user_content_unavailable"}),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CollectionParams {
+    tenant: Option<String>,
+    collection_id: Option<uuid::Uuid>,
+}
+
+async fn collection_items(
+    axum::extract::State(state): axum::extract::State<AdminState>,
+    axum::extract::Query(params): axum::extract::Query<CollectionParams>,
+) -> Response {
+    let (Some(tenant), Some(collection_id)) = (params.tenant, params.collection_id) else {
+        return bad_request("missing_tenant_or_collection");
+    };
+    match list_collection_items(state.database.pool(), &tenant, collection_id).await {
+        Ok(items) => json_response(StatusCode::OK, &serde_json::json!({"items":items})),
+        Err(UserContentError::NotFound) => json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error":"user_content_not_found"}),
+        ),
+        Err(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error":"user_content_unavailable"}),
+        ),
     }
 }
 

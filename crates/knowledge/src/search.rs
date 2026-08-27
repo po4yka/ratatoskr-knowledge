@@ -45,7 +45,7 @@ pub(crate) fn extract_search_text(document: &Document) -> SearchText {
                     }
                 }
             }
-            DocumentBlock::Paragraph { text } => {
+            DocumentBlock::Paragraph { text, .. } => {
                 if lead.is_none() {
                     lead = Some(text.clone());
                 } else {
@@ -655,7 +655,7 @@ where
 #[cfg(test)]
 mod tests {
     use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
-    use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, DigestHex, DocumentId};
+    use ratatoskr_identifiers::{BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId};
 
     use super::{SearchText, extract_search_text};
 
@@ -679,6 +679,7 @@ mod tests {
 
     fn heading(text: &str) -> DocumentBlock {
         DocumentBlock::Heading {
+            block_id: BlockId::new_v7(),
             level: 1,
             text: text.to_owned(),
         }
@@ -686,6 +687,7 @@ mod tests {
 
     fn paragraph(text: &str) -> DocumentBlock {
         DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: text.to_owned(),
         }
     }

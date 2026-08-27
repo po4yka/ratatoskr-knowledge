@@ -118,6 +118,54 @@ async fn search_endpoint_returns_ranked_results_and_requires_tenant()
 }
 
 #[tokio::test]
+async fn user_content_routes_require_tenant_scope_and_hide_foreign_targets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let app = admin_router(
+        Lifecycle::starting(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+    );
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/user-content/command")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"operation":"create_tag","tenant":"user:route-a","name":"Private"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(created.status(), StatusCode::OK);
+    assert_eq!(
+        created.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+
+    let missing_scope = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/user-content/command")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"operation":"create_tag","name":"Private"}"#))?,
+        )
+        .await?;
+    assert_eq!(missing_scope.status(), StatusCode::BAD_REQUEST);
+
+    let foreign = app
+        .oneshot(Request::builder().uri("/internal/user-content/collection?tenant=user:route-b&collection_id=00000000-0000-7000-8000-000000000001").body(Body::empty())?)
+        .await?;
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn metrics_counters_track_served_search_paths_without_embeddings()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;

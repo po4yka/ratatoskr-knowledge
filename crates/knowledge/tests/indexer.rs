@@ -3,7 +3,7 @@
 
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
 use ratatoskr_identifiers::{
-    BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
+    BlobOwner, BlobRef, BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
     TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
@@ -64,6 +64,7 @@ async fn seed_source(
         title: Some("Indexing fixture".to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Lead sentence.".to_owned(),
         }],
         provenance: Vec::new(),
@@ -571,6 +572,7 @@ async fn seed_tenant_source(
         title: Some("Indexing fixture".to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Lead sentence.".to_owned(),
         }],
         provenance: Vec::new(),

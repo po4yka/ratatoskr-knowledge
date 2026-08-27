@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
 use ratatoskr_identifiers::{
-    BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
+    BlobOwner, BlobRef, BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
     TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::{FakeTransport, TestDatabase};
@@ -25,6 +25,7 @@ pub(crate) async fn run_and_context(
         title: Some("Pipeline".to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Evidence.".to_owned(),
         }],
         provenance: Vec::new(),

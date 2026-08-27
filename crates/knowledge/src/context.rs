@@ -122,11 +122,11 @@ pub fn prepare_context(
 
 fn render_block(index: u32, block: &DocumentBlock) -> Result<Option<String>, ContextError> {
     let rendered = match block {
-        DocumentBlock::Heading { level, text } => {
+        DocumentBlock::Heading { level, text, .. } => {
             let text = serde_json::to_string(text).map_err(|_| ContextError::Encode)?;
             Some(format!("block {index} heading {level}: {text}\n"))
         }
-        DocumentBlock::Paragraph { text } => {
+        DocumentBlock::Paragraph { text, .. } => {
             let text = serde_json::to_string(text).map_err(|_| ContextError::Encode)?;
             Some(format!("block {index} paragraph: {text}\n"))
         }

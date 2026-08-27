@@ -49,7 +49,10 @@ analysis, and persists the evidence and result.
   data and only reference-safe Knowledge blob bytes;
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
   regeneration after a model, chunking, or lexical-projection change;
-- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`.
+- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`;
+- tenant-scoped user content over accepted analyses: normalized tags and transactional tag merge,
+  ordered collections of analysis outputs or immutable source revisions, read/favorite state,
+  typed feedback, and Document-IR block anchored highlights.
 
 The process has an optional `OpenRouter` inference credential setting. Default tests and CI do not
 set it and make no live inference request.
@@ -70,6 +73,13 @@ search_documents
 embedding_chunks
 embedding_failures
 deletion_records
+tags
+analysis_taggings
+collections
+collection_items
+analysis_user_states
+highlights
+analysis_feedback
 ```
 
 Source bytes stay with the source-owning service. Knowledge stores the immutable Document IR
@@ -144,6 +154,23 @@ cargo run --locked -p ratatoskr-knowledge-service
 
 Readiness becomes successful after the blob directory, database connection, and current schema are
 ready. `SIGINT` or `SIGTERM` starts drain and uses the configured shutdown bound.
+
+## Internal user-content surface
+
+`POST /internal/user-content/command` accepts a bounded JSON command with a required `tenant`.
+Supported operations are `create_tag`, `merge_tags`, `tag_analysis`, `create_collection`,
+`add_collection_item`, `move_collection_item`, `set_analysis_state`, `record_feedback`, and
+`create_highlight`. `GET /internal/user-content/collection?tenant=<tenant>&collection_id=<uuid>`
+lists collection items in durable order. All responses use `Cache-Control: no-store`; a foreign
+identifier is reported as the same scoped absence as a missing one.
+
+Highlights include only source revision identity, a stable Document IR block id, Unicode-scalar
+offsets, and style (`yellow`, `green`, `blue`, `pink`, `purple`, or `underline`). The command
+validates supplied Document IR against the accepted analysis source digest and does not persist
+the supplied block text. Source and tenant deletion receipts include dependent user-content rows.
+
+This first slice intentionally excludes multi-user collaboration and invites, public collection
+links, saved searches, goals or streaks, highlight rebasing, and import of legacy user content.
 
 ## Development
 

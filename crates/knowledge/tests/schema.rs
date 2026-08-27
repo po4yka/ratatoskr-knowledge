@@ -23,18 +23,25 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
         tables,
         [
             "analysis_attempts",
+            "analysis_feedback",
             "analysis_outputs",
             "analysis_runs",
+            "analysis_taggings",
+            "analysis_user_states",
+            "collection_items",
+            "collections",
             "deletion_records",
             "embedding_chunks",
             "embedding_failures",
+            "highlights",
             "provider_usage",
             "repository_analysis_requests",
             "search_documents",
             "search_projection_inputs",
             "source_analysis_heads",
             "source_analysis_inbox",
-            "source_refs"
+            "source_refs",
+            "tags"
         ]
     );
 

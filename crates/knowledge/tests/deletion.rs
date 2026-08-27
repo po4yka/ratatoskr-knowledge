@@ -1,5 +1,4 @@
 //! Privacy deletion behavior over disposable databases and blob roots.
-
 use std::path::{Path, PathBuf};
 
 use ratatoskr_identifiers::{
@@ -657,6 +656,7 @@ async fn row_deletion_is_atomic_with_its_audit_record() -> Result<(), Box<dyn st
             search_documents: 1,
             embedding_chunks: 2,
             embedding_failures: 1,
+            ..DeletionCounts::default()
         }
     );
 
@@ -767,6 +767,7 @@ async fn deleting_a_tenant_leaves_the_survivor_and_ledger_intact()
             search_documents: 1,
             embedding_chunks: 2,
             embedding_failures: 1,
+            ..DeletionCounts::default()
         }
     );
     let mut removed = receipt.blob_digests_removed.clone();
@@ -832,6 +833,7 @@ async fn deleting_a_source_removes_every_derived_row_and_owned_blob()
             search_documents: 1,
             embedding_chunks: 2,
             embedding_failures: 1,
+            ..DeletionCounts::default()
         }
     );
     let mut removed = receipt.blob_digests_removed.clone();

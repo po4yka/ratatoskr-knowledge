@@ -27,6 +27,7 @@ mod runs;
 pub mod search;
 mod source_inbox;
 mod telemetry;
+mod user_content;
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -103,3 +104,9 @@ pub use search::{
 };
 pub use source_inbox::{SourceInbox, SourceInboxAdmission, SourceInboxError};
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};
+pub use user_content::{
+    AnalysisState, CollectionItem, CollectionTarget, FeedbackCategory, HighlightAnchor,
+    HighlightStyle, ReadState, TagName, UserContentError, add_collection_item, create_collection,
+    create_highlight, create_tag, list_collection_items, merge_tags, move_collection_item,
+    record_feedback, set_analysis_state, tag_analysis, tag_name, validate_highlight_anchor,
+};

@@ -74,6 +74,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
  "sync_wrapper",
@@ -1518,7 +1519,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-ai-archive-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "ratatoskr-error-contracts",
  "ratatoskr-event-envelope",
@@ -1533,7 +1534,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-document-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "ratatoskr-identifiers",
  "regex",
@@ -1544,7 +1545,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-error-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -1559,7 +1560,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-event-envelope"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -1574,7 +1575,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-github-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "ratatoskr-event-envelope",
  "ratatoskr-identifiers",
@@ -1586,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-identifiers"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "jiff",
  "regex",
@@ -1628,18 +1629,20 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "http-body-util",
+ "ratatoskr-document-contracts",
  "ratatoskr-knowledge",
  "serde",
  "serde_json",
  "sqlx",
  "tokio",
  "tower",
+ "uuid",
 ]
 
 [[package]]
 name = "ratatoskr-social-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=4929b9659dfb80c768ae6340ef7fd981132dfaf3#4929b9659dfb80c768ae6340ef7fd981132dfaf3"
 dependencies = [
  "ratatoskr-error-contracts",
  "ratatoskr-event-envelope",

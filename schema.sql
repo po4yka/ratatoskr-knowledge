@@ -122,6 +122,13 @@ create table if not exists knowledge.deletion_records (
     search_documents_deleted integer not null,
     embedding_chunks_deleted integer not null,
     embedding_failures_deleted integer not null,
+    tags_deleted integer not null default 0,
+    taggings_deleted integer not null default 0,
+    collections_deleted integer not null default 0,
+    collection_items_deleted integer not null default 0,
+    analysis_user_states_deleted integer not null default 0,
+    highlights_deleted integer not null default 0,
+    analysis_feedback_deleted integer not null default 0,
     blob_digests_removed integer not null,
     completed_at timestamptz not null default now(),
     constraint deletion_records_scope_check check (scope in ('tenant', 'source'))
@@ -226,6 +233,103 @@ create index if not exists repository_analysis_pending_idx
 create unique index if not exists one_accepted_output_per_run
     on knowledge.analysis_outputs(run_id)
     where accepted;
+
+-- Knowledge-owned user content. All rows carry the tenant explicitly: callers must still prove
+-- that the referenced analysis/source belongs to it before inserting or reading the row.
+create table if not exists knowledge.tags (
+    tag_id uuid primary key,
+    tenant_ref text not null,
+    normalized_name text not null,
+    display_name text not null,
+    created_at timestamptz not null default now(),
+    constraint tags_normalized_name_check check (char_length(normalized_name) between 1 and 128),
+    constraint tags_display_name_check check (char_length(display_name) between 1 and 128),
+    constraint tags_tenant_normalized_name_key unique (tenant_ref, normalized_name)
+);
+
+create table if not exists knowledge.analysis_taggings (
+    tag_id uuid not null references knowledge.tags(tag_id) on delete cascade,
+    output_id uuid not null references knowledge.analysis_outputs(output_id) on delete cascade,
+    tenant_ref text not null,
+    created_at timestamptz not null default now(),
+    primary key (tag_id, output_id)
+);
+
+create index if not exists analysis_taggings_tenant_output_idx
+    on knowledge.analysis_taggings (tenant_ref, output_id);
+
+create table if not exists knowledge.collections (
+    collection_id uuid primary key,
+    tenant_ref text not null,
+    name text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint collections_name_check check (char_length(name) between 1 and 256)
+);
+
+create index if not exists collections_tenant_updated_idx
+    on knowledge.collections (tenant_ref, updated_at desc);
+
+create table if not exists knowledge.collection_items (
+    collection_id uuid not null references knowledge.collections(collection_id) on delete cascade,
+    position integer not null,
+    tenant_ref text not null,
+    output_id uuid references knowledge.analysis_outputs(output_id) on delete cascade,
+    source_ref_id uuid references knowledge.source_refs(source_ref_id) on delete cascade,
+    created_at timestamptz not null default now(),
+    constraint collection_items_collection_position_key unique (collection_id, position)
+        deferrable initially immediate,
+    constraint collection_items_position_check check (position >= 0),
+    constraint collection_items_exactly_one_target_check check (
+        (output_id is not null)::integer + (source_ref_id is not null)::integer = 1
+    ),
+    constraint collection_items_unique_output unique (collection_id, output_id),
+    constraint collection_items_unique_source unique (collection_id, source_ref_id)
+);
+
+create table if not exists knowledge.analysis_user_states (
+    tenant_ref text not null,
+    output_id uuid not null references knowledge.analysis_outputs(output_id) on delete cascade,
+    read_state text not null default 'unread',
+    favorite boolean not null default false,
+    updated_at timestamptz not null default now(),
+    primary key (tenant_ref, output_id),
+    constraint analysis_user_states_read_state_check check (read_state in ('unread', 'read'))
+);
+
+create table if not exists knowledge.highlights (
+    highlight_id uuid primary key,
+    tenant_ref text not null,
+    output_id uuid not null references knowledge.analysis_outputs(output_id) on delete cascade,
+    source_ref_id uuid not null references knowledge.source_refs(source_ref_id) on delete cascade,
+    block_id uuid not null,
+    start_offset integer not null,
+    end_offset integer not null,
+    style text not null,
+    created_at timestamptz not null default now(),
+    constraint highlights_offsets_check check (start_offset >= 0 and end_offset > start_offset),
+    constraint highlights_style_check check (style in ('yellow', 'green', 'blue', 'pink', 'purple', 'underline')),
+    constraint highlights_anchor_key unique (tenant_ref, output_id, block_id, start_offset, end_offset, style)
+);
+
+create index if not exists highlights_tenant_output_idx
+    on knowledge.highlights (tenant_ref, output_id, created_at);
+
+create table if not exists knowledge.analysis_feedback (
+    feedback_id uuid primary key,
+    tenant_ref text not null,
+    output_id uuid not null references knowledge.analysis_outputs(output_id) on delete cascade,
+    issue_category text not null,
+    detail text,
+    created_at timestamptz not null default now(),
+    constraint analysis_feedback_category_check check (issue_category in (
+        'incorrect', 'missing_context', 'unsupported_claim', 'poor_quality', 'other'
+    )),
+    constraint analysis_feedback_detail_check check (detail is null or char_length(detail) between 1 and 2_000)
+);
+
+create index if not exists analysis_feedback_tenant_output_idx
+    on knowledge.analysis_feedback (tenant_ref, output_id, created_at desc);
 
 create table if not exists knowledge.search_projection_inputs (
     source_ref_id uuid primary key references knowledge.source_refs(source_ref_id),

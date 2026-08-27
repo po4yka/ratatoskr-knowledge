@@ -18,6 +18,11 @@ source revision rather than overwrite prior evidence.
 - **WHEN** a stored source identifier is registered with a different content digest
 - **THEN** both revisions remain addressable and analysis uniqueness treats them as different inputs
 
+#### Scenario: user content targets one immutable revision
+
+- **WHEN** a tenant adds a collection item or highlight for an accepted analysis over one source revision
+- **THEN** the user-content record retains that analysis and source-revision identity after a later revision is registered
+
 ### Requirement: Run identity is deterministic and idempotent
 
 Run uniqueness SHALL include tenant, source revision, analysis contract, prompt, context builder, and

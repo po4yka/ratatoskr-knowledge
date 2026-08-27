@@ -2,7 +2,7 @@
 
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
 use ratatoskr_identifiers::{
-    BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
+    BlobOwner, BlobRef, BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
     TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
@@ -35,6 +35,7 @@ async fn project_row(
         title: Some(title.to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: lead.to_owned(),
         }],
         provenance: Vec::new(),
@@ -310,6 +311,7 @@ async fn project_embedded_row(
         title: Some(doc.title.to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: doc.lead.to_owned(),
         }],
         provenance: Vec::new(),

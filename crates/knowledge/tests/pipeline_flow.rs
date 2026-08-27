@@ -1,7 +1,9 @@
 //! Durable fake-provider pipeline flow tests.
 
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
-use ratatoskr_identifiers::{BlobOwner, BlobRef, DocumentId, MediaType, TenantRef, UserId};
+use ratatoskr_identifiers::{
+    BlobOwner, BlobRef, BlockId, DocumentId, MediaType, TenantRef, UserId,
+};
 use ratatoskr_knowledge::test_support::{
     FakeReply, FakeTransport, TemporaryBlobRoot, TestDatabase,
 };
@@ -497,6 +499,7 @@ async fn a_later_failed_run_leaves_the_projected_search_document_row_untouched()
         'b',
         Some("Pipeline".to_owned()),
         vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Evidence.".to_owned(),
         }],
     )
@@ -581,6 +584,7 @@ async fn a_newer_accepted_output_replaces_the_search_document()
         'c',
         Some("Pipeline".to_owned()),
         vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Evidence.".to_owned(),
         }],
     )
@@ -615,6 +619,7 @@ async fn a_newer_accepted_output_replaces_the_search_document()
     revised.blocks.insert(
         0,
         DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Revised evidence.".to_owned(),
         },
     );
@@ -659,6 +664,7 @@ async fn an_older_projection_delivery_cannot_regress_the_search_document()
         'd',
         Some("Pipeline".to_owned()),
         vec![DocumentBlock::Paragraph {
+            block_id: BlockId::new_v7(),
             text: "Evidence.".to_owned(),
         }],
     )
