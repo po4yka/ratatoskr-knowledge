@@ -1,0 +1,1 @@
+Summarize the supplied project. Extract topics only when grounded in the title, description, or instructions, and cite one exact supplied excerpt.

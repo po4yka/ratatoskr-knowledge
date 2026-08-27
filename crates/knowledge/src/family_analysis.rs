@@ -1,6 +1,6 @@
 //! Family-specific contracts and deterministic contexts for social and AI-archive analysis.
 
-use ratatoskr_ai_archive_contracts::{AiAuthorRole, AiContentPart, AiConversation};
+use ratatoskr_ai_archive_contracts::{AiAuthorRole, AiContentPart, AiConversation, AiProject};
 use ratatoskr_github_contracts::{RepositoryAnalysisAttributes, RepositoryAnalysisRequested};
 use ratatoskr_social_contracts::SocialSourceSnapshot;
 
@@ -10,6 +10,9 @@ const SOCIAL_SYSTEM: &str = include_str!("../../../prompts/social-analysis.v1/sy
 const SOCIAL_TASK: &str = include_str!("../../../prompts/social-analysis.v1/task.txt");
 const ARCHIVE_SYSTEM: &str = include_str!("../../../prompts/archive-analysis.v1/system.txt");
 const ARCHIVE_TASK: &str = include_str!("../../../prompts/archive-analysis.v1/task.txt");
+const PROJECT_SYSTEM: &str =
+    include_str!("../../../prompts/archive-project-analysis.v1/system.txt");
+const PROJECT_TASK: &str = include_str!("../../../prompts/archive-project-analysis.v1/task.txt");
 const REPOSITORY_SYSTEM: &str = include_str!("../../../prompts/repository-analysis.v1/system.txt");
 const REPOSITORY_TASK: &str = include_str!("../../../prompts/repository-analysis.v1/task.txt");
 
@@ -110,6 +113,24 @@ pub struct ArchiveDecision {
     pub message_id: String,
 }
 
+/// Strict structured analysis of one archived project revision.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct ArchiveProjectAnalysis {
+    /// Grounded project-level summary.
+    #[schemars(length(min = 1, max = 2_000))]
+    pub summary: String,
+    /// Bounded topics explicitly grounded in project metadata.
+    #[schemars(length(max = 12))]
+    pub topics: Vec<String>,
+    /// Exact bounded excerpt from title, description, or instructions.
+    #[schemars(length(min = 1, max = 500))]
+    pub evidence_excerpt: String,
+}
+
 /// Builds deterministic social evidence with a distinct prompt identity.
 #[must_use]
 pub fn social_context(snapshot: &SocialSourceSnapshot) -> String {
@@ -157,6 +178,24 @@ pub fn archive_context(conversation: &AiConversation) -> String {
         }
     }
     result
+}
+
+/// Builds deterministic project evidence from normalized provider-authored fields.
+#[must_use]
+pub fn archive_project_context(project: &AiProject) -> String {
+    format!(
+        "family: ai_archive_project\nproject_id: {}\ntitle: {}\ndescription: {}\ninstructions: {}\n",
+        project.ai_project_id,
+        project.title.as_str(),
+        project
+            .description
+            .as_ref()
+            .map_or("", |value| value.as_str()),
+        project
+            .instructions
+            .as_ref()
+            .map_or("", |value| value.as_str()),
+    )
 }
 
 /// Builds deterministic repository evidence from the requested metadata and acquired README.
@@ -324,6 +363,67 @@ pub fn archive_generation_request(
         output_schema: archive_analysis_schema()?,
         source_content: archive_context(conversation),
     })
+}
+
+/// Generates the strict JSON Schema for archived-project analysis.
+///
+/// # Errors
+///
+/// Returns a serialization error if the canonical schema cannot be encoded.
+pub fn archive_project_analysis_schema() -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(schemars::schema_for!(ArchiveProjectAnalysis))
+}
+
+/// Builds a versioned, provider-neutral archived-project analysis request.
+///
+/// # Errors
+///
+/// Returns a serialization error if the canonical output schema cannot be encoded.
+pub fn archive_project_generation_request(
+    project: &AiProject,
+) -> Result<GenerationRequest, serde_json::Error> {
+    Ok(GenerationRequest {
+        prompt_version: "archive_project_prompt_v1".to_owned(),
+        system_policy: PROJECT_SYSTEM.to_owned(),
+        task_instruction: PROJECT_TASK.to_owned(),
+        output_schema: archive_project_analysis_schema()?,
+        source_content: archive_project_context(project),
+    })
+}
+
+/// Validates and decodes an archived-project response against project metadata.
+///
+/// # Errors
+///
+/// Returns [`FamilyValidationError`] for structural, decoding, or grounding failure.
+pub fn validate_archive_project_analysis(
+    value: &serde_json::Value,
+    project: &AiProject,
+) -> Result<ArchiveProjectAnalysis, FamilyValidationError> {
+    validate_schema(
+        value,
+        &archive_project_analysis_schema().map_err(|_| FamilyValidationError::Schema)?,
+    )?;
+    let analysis: ArchiveProjectAnalysis =
+        serde_json::from_value(value.clone()).map_err(|_| FamilyValidationError::Decode)?;
+    let metadata = [
+        project.title.as_str(),
+        project
+            .description
+            .as_ref()
+            .map_or("", |value| value.as_str()),
+        project
+            .instructions
+            .as_ref()
+            .map_or("", |value| value.as_str()),
+    ];
+    if !metadata
+        .into_iter()
+        .any(|text| text.contains(&analysis.evidence_excerpt))
+    {
+        return Err(FamilyValidationError::Citation);
+    }
+    Ok(analysis)
 }
 
 /// Validates and decodes an archive response, including message-level grounding.

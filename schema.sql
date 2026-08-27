@@ -6,6 +6,7 @@ create table if not exists knowledge.source_refs (
     source_ref_id uuid primary key,
     tenant_ref text not null,
     owner_context text not null,
+    ai_archive_id text not null default '',
     source_document_id text not null,
     content_digest_algorithm text not null,
     content_digest_hex text not null,
@@ -20,11 +21,16 @@ create table if not exists knowledge.source_refs (
     constraint source_refs_identity_key unique (
         tenant_ref,
         owner_context,
+        ai_archive_id,
         source_document_id,
         content_digest_algorithm,
         content_digest_hex
     )
 );
+
+create index if not exists source_refs_ai_archive_idx
+    on knowledge.source_refs (tenant_ref, ai_archive_id)
+    where ai_archive_id <> '';
 
 create table if not exists knowledge.analysis_runs (
     run_id uuid primary key,
@@ -113,6 +119,7 @@ create table if not exists knowledge.deletion_records (
     tenant_ref text not null,
     scope text not null,
     owner_context text,
+    ai_archive_id text,
     source_document_id text,
     source_refs_deleted integer not null,
     analysis_runs_deleted integer not null,
@@ -131,7 +138,7 @@ create table if not exists knowledge.deletion_records (
     analysis_feedback_deleted integer not null default 0,
     blob_digests_removed integer not null,
     completed_at timestamptz not null default now(),
-    constraint deletion_records_scope_check check (scope in ('tenant', 'source'))
+    constraint deletion_records_scope_check check (scope in ('tenant', 'source', 'archive'))
 );
 
 create index if not exists deletion_records_tenant_idx
@@ -207,7 +214,9 @@ create table if not exists knowledge.source_analysis_inbox (
     accepted_at timestamptz not null default now(),
     constraint source_analysis_inbox_subject_check check (subject in (
         'social.source.captured.v1', 'social.source.updated.v1',
-        'ai_archive.conversation.added.v1', 'ai_archive.conversation.updated.v1'
+        'ai_archive.conversation.added.v1', 'ai_archive.conversation.updated.v1',
+        'ai_archive.project.added.v1', 'ai_archive.project.updated.v1',
+        'ai_archive.subject.tombstoned.v1'
     )),
     constraint source_analysis_inbox_family_check check (family in ('social', 'ai_archive')),
     constraint source_analysis_inbox_digest_check check (content_digest_hex ~ '^[0-9a-f]{64}$'),

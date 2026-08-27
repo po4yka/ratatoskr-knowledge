@@ -23,9 +23,9 @@ use crate::{
     FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError, ProviderError,
     ProviderFailureClass, ProviderIdentity, RepositoryAnalysis, RepositoryAnalysisAdmission,
     RepositoryAnalysisConsumer, RunState, SocialAnalysis, SourceInbox, SourceInboxError,
-    SourceReference, archive_generation_request, repository_generation_request,
-    social_generation_request, validate_archive_analysis, validate_repository_analysis,
-    validate_social_analysis,
+    SourceReference, archive_generation_request, archive_project_generation_request,
+    repository_generation_request, social_generation_request, validate_archive_analysis,
+    validate_archive_project_analysis, validate_repository_analysis, validate_social_analysis,
 };
 
 /// Authorized byte resolver for a GitHub-owned README reference.
@@ -150,6 +150,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                 &snapshot.social_source_id.to_string(),
                 snapshot.content_digest.clone(),
                 snapshot,
+                "",
             )
             .await?;
         let run = self
@@ -196,8 +197,12 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         inbox: &SourceInbox<'_>,
         event_id: Uuid,
     ) -> Result<crate::ArchiveAnalysis, FamilyPipelineError> {
-        let conversation = inbox.archive_conversation(event_id).await?;
-        self.execute_archive(&conversation).await
+        let source = inbox.archive_conversation(event_id).await?;
+        self.execute_archive_with_provenance(
+            &source.conversation,
+            &source.provenance.ai_archive_id.to_string(),
+        )
+        .await
     }
 
     /// Executes one conversation revision idempotently.
@@ -209,12 +214,21 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         &self,
         conversation: &AiConversation,
     ) -> Result<crate::ArchiveAnalysis, FamilyPipelineError> {
+        self.execute_archive_with_provenance(conversation, "").await
+    }
+
+    async fn execute_archive_with_provenance(
+        &self,
+        conversation: &AiConversation,
+        ai_archive_id: &str,
+    ) -> Result<crate::ArchiveAnalysis, FamilyPipelineError> {
         let source = self
             .snapshot_source(
                 conversation.owner,
                 &conversation.ai_conversation_id.to_string(),
                 conversation.content_digest.clone(),
                 conversation,
+                ai_archive_id,
             )
             .await?;
         let run = self
@@ -246,6 +260,55 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                     })
                 },
             )
+            .await?;
+        serde_json::from_value(value).map_err(FamilyPipelineError::Contract)
+    }
+
+    /// Executes one archive project delivery already claimed by the durable inbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FamilyPipelineError`] for absent inbox state, provider, validation, or persistence failure.
+    pub async fn execute_archive_project_event(
+        &self,
+        inbox: &SourceInbox<'_>,
+        event_id: Uuid,
+    ) -> Result<crate::ArchiveProjectAnalysis, FamilyPipelineError> {
+        let source = inbox.archive_project(event_id).await?;
+        let project = &source.project;
+        let source_ref = self
+            .snapshot_source(
+                source.provenance.owner,
+                &project.ai_project_id.to_string(),
+                source.content_digest,
+                project,
+                &source.provenance.ai_archive_id.to_string(),
+            )
+            .await?;
+        let run = self
+            .create_run(
+                source_ref,
+                "archive_project_analysis_v1",
+                "archive_project_prompt_v1",
+                "archive_project_context_v1",
+            )
+            .await?;
+        let request = archive_project_generation_request(project)?;
+        let title = project.title.as_str().to_owned();
+        let lead = project
+            .description
+            .as_ref()
+            .map_or_else(String::new, |value| value.as_str().to_owned());
+        let body = project
+            .instructions
+            .as_ref()
+            .map_or_else(|| lead.clone(), |value| value.as_str().to_owned());
+        let value = self
+            .execute_value(run, request, SearchFields { title, lead, body }, |value| {
+                validate_archive_project_analysis(value, project).and_then(|analysis| {
+                    serde_json::to_value(analysis).map_err(|_| FamilyValidationError::Decode)
+                })
+            })
             .await?;
         serde_json::from_value(value).map_err(FamilyPipelineError::Contract)
     }
@@ -290,6 +353,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                         &request.repository_id.to_string(),
                         repository_digest(request)?,
                         request,
+                        "",
                     )
                     .await?;
                 (None, source)
@@ -351,11 +415,19 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         source_id: &str,
         digest: ContentDigest,
         snapshot: &T,
+        ai_archive_id: &str,
     ) -> Result<Uuid, FamilyPipelineError> {
         let bytes = serde_json::to_vec(snapshot)?;
         let blob = self.blobs.store_raw(&bytes).await?;
-        self.register_source(tenant, source_id, digest, "ratatoskr-knowledge", blob)
-            .await
+        self.register_source(
+            tenant,
+            source_id,
+            digest,
+            "ratatoskr-knowledge",
+            ai_archive_id,
+            blob,
+        )
+        .await
     }
 
     async fn external_source(
@@ -366,7 +438,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         blob: BlobRef,
     ) -> Result<Uuid, FamilyPipelineError> {
         let owner_context = blob.owner_service.as_str().to_owned();
-        self.register_source(tenant, source_id, digest, &owner_context, blob)
+        self.register_source(tenant, source_id, digest, &owner_context, "", blob)
             .await
     }
 
@@ -376,6 +448,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         source_id: &str,
         digest: ContentDigest,
         owner_context: &str,
+        ai_archive_id: &str,
         blob: BlobRef,
     ) -> Result<Uuid, FamilyPipelineError> {
         let document_id = DocumentId::parse(source_id).map_err(|_| FamilyPipelineError::Source)?;
@@ -384,6 +457,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             .register_source(&SourceReference {
                 tenant,
                 owner_context: owner_context.to_owned(),
+                ai_archive_id: ai_archive_id.to_owned(),
                 document_id,
                 content_digest: digest,
                 source_blob: blob,

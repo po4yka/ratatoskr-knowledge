@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ratatoskr_ai_archive_contracts::AiArchiveProvenance;
 use ratatoskr_github_contracts::{
     ReadmeRevision, RepositoryAnalysisAttributes, RepositoryAnalysisContract,
     RepositoryAnalysisRequested, RepositoryAnalysisRevision, RepositoryFullName,
@@ -46,6 +47,20 @@ const ARCHIVE: &str = r#"{
     "parser_name":"chatgpt_export","parser_version":"2026.08.1"}],
   "content_digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
   "parser_name":"chatgpt_export","parser_version":"2026.08.1"
+}"#;
+
+const ARCHIVE_PROVENANCE: &str = r#"{
+  "ai_archive_id":"018f0000-0000-7000-8000-000000000402",
+  "provider":"chatgpt", "owner":"user:018f0000-0000-7000-8000-000000000005",
+  "source_export":{"owner_service":"ratatoskr-chatgpt","digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"media_type":"application/json","length_bytes":512},
+  "imported_at":"2026-08-17T10:00:00Z", "parser_name":"chatgpt_export", "parser_version":"2026.08.1"
+}"#;
+
+const ARCHIVE_PROJECT: &str = r#"{
+  "ai_project_id":"018f0000-0000-7000-8000-000000000404",
+  "provider":"chatgpt", "title":"Rust learning",
+  "description":"Notes about borrow checking.", "instructions":"Keep examples concise.",
+  "parser_name":"chatgpt_export", "parser_version":"2026.08.1"
 }"#;
 
 #[tokio::test]
@@ -95,13 +110,14 @@ async fn archive_event_produces_grounded_analysis_and_search_document()
     let database = TestDatabase::create().await?;
     let conversation: ratatoskr_ai_archive_contracts::AiConversation =
         serde_json::from_str(ARCHIVE)?;
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
     let inbox = SourceInbox::new(&database.database);
     let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000802")?;
     inbox
         .accept_ai_conversation(
             event_id,
             "ai_archive.conversation.added.v1",
-            "2026-08-17T10:00:00Z".parse()?,
+            &provenance,
             &conversation,
         )
         .await?;
@@ -123,6 +139,52 @@ async fn archive_event_produces_grounded_analysis_and_search_document()
             .decisions
             .len(),
         1
+    );
+    assert_eq!(search_document_count(&database).await?, 1);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_project_event_produces_grounded_analysis_and_search_document()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let project: ratatoskr_ai_archive_contracts::AiProject = serde_json::from_str(ARCHIVE_PROJECT)?;
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
+    let digest = ratatoskr_identifiers::ContentDigest {
+        algorithm: ratatoskr_identifiers::DigestAlgorithm::Sha256,
+        hex: ratatoskr_identifiers::DigestHex::parse(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )?,
+    };
+    let inbox = SourceInbox::new(&database.database);
+    let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000803")?;
+    inbox
+        .accept_ai_project(
+            event_id,
+            "ai_archive.project.added.v1",
+            &provenance,
+            &project,
+            &digest,
+        )
+        .await?;
+    let store = BlobStore::new(temp_root("archive-project"), 32_768);
+    let provider = ScriptedProvider::new([Ok(response(
+        r#"{"summary":"Rust learning notes.","topics":["rust"],"evidence_excerpt":"borrow checking"}"#,
+    ))]);
+    let pipeline = FamilyPipeline::new(
+        &database.database,
+        &provider,
+        &store,
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(
+        pipeline
+            .execute_archive_project_event(&inbox, event_id)
+            .await?
+            .summary,
+        "Rust learning notes."
     );
     assert_eq!(search_document_count(&database).await?, 1);
     database.cleanup().await?;

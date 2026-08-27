@@ -115,6 +115,7 @@ async fn register_fixture_source(
         .register_source(&SourceReference {
             tenant: TenantRef::of_user(UserId::new_v7()),
             owner_context: OWNER_CONTEXT.to_owned(),
+            ai_archive_id: String::new(),
             document_id,
             content_digest: content_digest(content_hex)?,
             source_blob: BlobRef {

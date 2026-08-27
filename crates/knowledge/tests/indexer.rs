@@ -75,6 +75,7 @@ async fn seed_source(
         .register_source(&SourceReference {
             tenant,
             owner_context: "ratatoskr-extractor".to_owned(),
+            ai_archive_id: String::new(),
             document_id: document.document_id,
             content_digest: document.content_digest.clone(),
             source_blob: BlobRef {
@@ -582,6 +583,7 @@ async fn seed_tenant_source(
         .register_source(&SourceReference {
             tenant,
             owner_context: "ratatoskr-extractor".to_owned(),
+            ai_archive_id: String::new(),
             document_id: document.document_id,
             content_digest: document.content_digest.clone(),
             source_blob: BlobRef {

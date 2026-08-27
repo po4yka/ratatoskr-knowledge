@@ -303,6 +303,7 @@ async fn projection_fixture(
         .register_source(&SourceReference {
             tenant: TenantRef::of_user(UserId::new_v7()),
             owner_context: "ratatoskr-extractor".to_owned(),
+            ai_archive_id: String::new(),
             document_id: document.document_id,
             content_digest: document.content_digest.clone(),
             source_blob: BlobRef {

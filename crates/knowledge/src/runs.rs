@@ -22,6 +22,8 @@ pub struct SourceReference {
     pub tenant: TenantRef,
     /// Bounded context that owns the source document.
     pub owner_context: String,
+    /// Archive snapshot identity when this source was derived from an AI archive event.
+    pub ai_archive_id: String,
     /// Stable normalized document identity.
     pub document_id: DocumentId,
     /// Digest of the exact Document IR revision.
@@ -414,9 +416,9 @@ impl Database {
         let id = Uuid::now_v7();
         let stored_id = sqlx::query_scalar(
             "insert into knowledge.source_refs (
-                source_ref_id, tenant_ref, owner_context, source_document_id,
+                source_ref_id, tenant_ref, owner_context, ai_archive_id, source_document_id,
                 content_digest_algorithm, content_digest_hex, source_blob
-             ) values ($1, $2, $3, $4, $5, $6, $7)
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8)
              on conflict (
                 tenant_ref, owner_context, source_document_id,
                 content_digest_algorithm, content_digest_hex
@@ -426,6 +428,7 @@ impl Database {
         .bind(id)
         .bind(source.tenant.to_string())
         .bind(owner.as_str())
+        .bind(&source.ai_archive_id)
         .bind(source.document_id.to_string())
         .bind(algorithm)
         .bind(source.content_digest.hex.as_str())

@@ -60,12 +60,13 @@ pub use evaluation::{
     run_committed_evaluation, run_offline, score_case, score_response_sets,
 };
 pub use family_analysis::{
-    ArchiveAnalysis, ArchiveDecision, FamilyValidationError, RepositoryAnalysis,
-    RepositoryReadmeEvidence, SocialAnalysis, SocialConfidence, archive_analysis_schema,
-    archive_context, archive_generation_request, repository_analysis_schema, repository_context,
-    repository_generation_request, social_analysis_schema, social_context,
-    social_generation_request, validate_archive_analysis, validate_repository_analysis,
-    validate_social_analysis,
+    ArchiveAnalysis, ArchiveDecision, ArchiveProjectAnalysis, FamilyValidationError,
+    RepositoryAnalysis, RepositoryReadmeEvidence, SocialAnalysis, SocialConfidence,
+    archive_analysis_schema, archive_context, archive_generation_request,
+    archive_project_analysis_schema, archive_project_context, archive_project_generation_request,
+    repository_analysis_schema, repository_context, repository_generation_request,
+    social_analysis_schema, social_context, social_generation_request, validate_archive_analysis,
+    validate_archive_project_analysis, validate_repository_analysis, validate_social_analysis,
 };
 pub use family_pipeline::{
     FamilyPipeline, FamilyPipelineError, RepositoryAnalysisExecution, RepositoryReadmeError,
@@ -102,7 +103,10 @@ pub use search::{
     SearchResult, SemanticLeg, hybrid_search_page, record_search_document,
     record_search_projection_input, search_page,
 };
-pub use source_inbox::{SourceInbox, SourceInboxAdmission, SourceInboxError};
+pub use source_inbox::{
+    ArchiveConversationSource, ArchiveProjectSource, SourceInbox, SourceInboxAdmission,
+    SourceInboxError,
+};
 pub use telemetry::{TelemetryError, ValidationClass, init_telemetry, record_validation_failure};
 pub use user_content::{
     AnalysisState, CollectionItem, CollectionTarget, FeedbackCategory, HighlightAnchor,

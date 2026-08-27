@@ -31,6 +31,13 @@ pub enum DeletionScope {
         /// Stable normalized document identity.
         source_document_id: String,
     },
+    /// Every derived revision tied to one immutable AI archive snapshot.
+    Archive {
+        /// Owning tenant reference.
+        tenant_ref: String,
+        /// Stable archive identity from the producer provenance.
+        ai_archive_id: String,
+    },
 }
 
 impl DeletionScope {
@@ -40,6 +47,7 @@ impl DeletionScope {
         match self {
             Self::Tenant { .. } => "tenant",
             Self::Source { .. } => "source",
+            Self::Archive { .. } => "archive",
         }
     }
 
@@ -47,7 +55,9 @@ impl DeletionScope {
     #[must_use]
     pub fn tenant_ref(&self) -> &str {
         match self {
-            Self::Tenant { tenant_ref } | Self::Source { tenant_ref, .. } => tenant_ref,
+            Self::Tenant { tenant_ref }
+            | Self::Source { tenant_ref, .. }
+            | Self::Archive { tenant_ref, .. } => tenant_ref,
         }
     }
 }
@@ -372,6 +382,16 @@ where
         .bind(owner_context)
         .bind(source_document_id)
         .fetch_all(executor),
+        DeletionScope::Archive {
+            tenant_ref,
+            ai_archive_id,
+        } => sqlx::query_as(
+            "select source_ref_id from knowledge.source_refs
+             where tenant_ref = $1 and ai_archive_id = $2",
+        )
+        .bind(tenant_ref)
+        .bind(ai_archive_id)
+        .fetch_all(executor),
     }
     .await
     .map_err(DeletionError::Query)?;
@@ -572,7 +592,7 @@ async fn delete_output_children(
                 .execute(&mut **transaction)
                 .await
         }
-        DeletionScope::Source { .. } => {
+        DeletionScope::Source { .. } | DeletionScope::Archive { .. } => {
             let sql = format!("delete from knowledge.{table} where output_id = any($1)");
             sqlx::query(&sql)
                 .bind(output_ids)
@@ -598,7 +618,7 @@ async fn delete_collection_items(
                 .execute(&mut **transaction)
                 .await
         }
-        DeletionScope::Source { .. } => {
+        DeletionScope::Source { .. } | DeletionScope::Archive { .. } => {
             sqlx::query(
                 "delete from knowledge.collection_items
              where source_ref_id = any($1) or output_id = any($2)",
@@ -649,7 +669,7 @@ async fn delete_by_scope(
                 .execute(&mut **transaction)
                 .await
         }
-        DeletionScope::Source { .. } => {
+        DeletionScope::Source { .. } | DeletionScope::Archive { .. } => {
             let sql = format!("delete from knowledge.{table} where source_ref_id = any($1)");
             sqlx::query(&sql)
                 .bind(source_ref_ids)
@@ -671,7 +691,7 @@ async fn insert_audit_row(
 ) -> Result<Uuid, DeletionError> {
     let deletion_id: (Uuid,) = sqlx::query_as(
         "insert into knowledge.deletion_records (
-             deletion_id, tenant_ref, scope, owner_context, source_document_id,
+             deletion_id, tenant_ref, scope, owner_context, ai_archive_id, source_document_id,
              source_refs_deleted, analysis_runs_deleted, analysis_attempts_deleted,
              analysis_outputs_deleted, search_projection_inputs_deleted,
              search_documents_deleted,
@@ -687,6 +707,7 @@ async fn insert_audit_row(
     .bind(scope.tenant_ref())
     .bind(scope.as_str())
     .bind(scope_owner_context(scope))
+    .bind(scope_ai_archive_id(scope))
     .bind(scope_source_document_id(scope))
     .bind(i32_count(counts.source_refs)?)
     .bind(i32_count(counts.analysis_runs)?)
@@ -711,14 +732,21 @@ async fn insert_audit_row(
 
 fn scope_owner_context(scope: &DeletionScope) -> Option<&str> {
     match scope {
-        DeletionScope::Tenant { .. } => None,
+        DeletionScope::Tenant { .. } | DeletionScope::Archive { .. } => None,
         DeletionScope::Source { owner_context, .. } => Some(owner_context),
+    }
+}
+
+fn scope_ai_archive_id(scope: &DeletionScope) -> Option<&str> {
+    match scope {
+        DeletionScope::Archive { ai_archive_id, .. } => Some(ai_archive_id),
+        DeletionScope::Tenant { .. } | DeletionScope::Source { .. } => None,
     }
 }
 
 fn scope_source_document_id(scope: &DeletionScope) -> Option<&str> {
     match scope {
-        DeletionScope::Tenant { .. } => None,
+        DeletionScope::Tenant { .. } | DeletionScope::Archive { .. } => None,
         DeletionScope::Source {
             source_document_id, ..
         } => Some(source_document_id),

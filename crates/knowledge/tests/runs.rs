@@ -185,6 +185,7 @@ fn source(
     Ok(SourceReference {
         tenant,
         owner_context: "ratatoskr-extractor".to_owned(),
+        ai_archive_id: String::new(),
         document_id,
         content_digest: digest.clone(),
         source_blob: BlobRef {
