@@ -1,0 +1,1 @@
+Summarize only the supplied post. List concise grounded topics. Set limited confidence when the post lacks enough text or the capture is incomplete.

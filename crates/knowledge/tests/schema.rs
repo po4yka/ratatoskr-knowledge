@@ -32,6 +32,8 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "repository_analysis_requests",
             "search_documents",
             "search_projection_inputs",
+            "source_analysis_heads",
+            "source_analysis_inbox",
             "source_refs"
         ]
     );

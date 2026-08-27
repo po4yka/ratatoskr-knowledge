@@ -1516,6 +1516,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatoskr-ai-archive-contracts"
+version = "0.1.0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+dependencies = [
+ "ratatoskr-error-contracts",
+ "ratatoskr-event-envelope",
+ "ratatoskr-identifiers",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ratatoskr-document-contracts"
 version = "0.1.0"
 source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
@@ -1524,6 +1539,21 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
+]
+
+[[package]]
+name = "ratatoskr-error-contracts"
+version = "0.1.0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+dependencies = [
+ "jiff",
+ "ratatoskr-identifiers",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -1573,10 +1603,12 @@ version = "0.1.0"
 dependencies = [
  "jsonschema",
  "pgvector",
+ "ratatoskr-ai-archive-contracts",
  "ratatoskr-document-contracts",
  "ratatoskr-github-contracts",
  "ratatoskr-identifiers",
  "ratatoskr-knowledge",
+ "ratatoskr-social-contracts",
  "reqwest",
  "schemars",
  "serde",
@@ -1602,6 +1634,21 @@ dependencies = [
  "sqlx",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "ratatoskr-social-contracts"
+version = "0.1.0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=b53fd76dce2a9e54de88d6a751bf22f3f4244fa3#b53fd76dce2a9e54de88d6a751bf22f3f4244fa3"
+dependencies = [
+ "ratatoskr-error-contracts",
+ "ratatoskr-event-envelope",
+ "ratatoskr-identifiers",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

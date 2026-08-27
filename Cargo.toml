@@ -17,6 +17,8 @@ pgvector = { version = "=0.4.1", features = ["sqlx"] }
 ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "b53fd76dce2a9e54de88d6a751bf22f3f4244fa3" }
 ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "b53fd76dce2a9e54de88d6a751bf22f3f4244fa3" }
 ratatoskr-github-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "b53fd76dce2a9e54de88d6a751bf22f3f4244fa3" }
+ratatoskr-social-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "b53fd76dce2a9e54de88d6a751bf22f3f4244fa3" }
+ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "b53fd76dce2a9e54de88d6a751bf22f3f4244fa3" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 schemars = "=1.2.2"
 serde = { version = "=1.0.229", features = ["derive"] }
