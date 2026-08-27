@@ -29,9 +29,14 @@ bind a socket.
 - `BudgetLedger` records one durable `knowledge.provider_usage` row per real response and refuses
   calls whose conservative projection would exceed the daily or monthly token or cost ceiling in UTC
   windows.
+- `RepositoryAnalysisConsumer` durably records
+  `knowledge.repository_analysis.requested.v1` deliveries, preserves one pending request per
+  immutable idempotency digest, and constructs a matching terminal completion or failure fact once.
+  It never calls a model: the future worker composes provider execution through the existing shared
+  rate and budget controls.
 - `ArticlePipeline` records attempts with adapter identity, model, latency, HTTP status, and failure
   class; stores raw bytes before parsing; validates the result; and persists one accepted output.
 - `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
 
-There are no commands, events, search queries, additional adapters, or public analysis routes in this
-slice. A second real adapter implements the same seam without further trait changes.
+There are no public analysis routes, event transport adapters, search queries, or additional analysis
+workers in this slice. A second real adapter implements the same seam without further trait changes.

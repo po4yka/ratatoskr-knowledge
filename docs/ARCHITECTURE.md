@@ -512,6 +512,7 @@ knowledge.analysis.requested.v1
 knowledge.reindex.requested.v1
 knowledge.reconcile.requested.v1
 knowledge.search_projection.delete_requested.v1
+knowledge.repository_analysis.requested.v1
 ```
 
 ### 16.2. Source events consumed
@@ -519,7 +520,6 @@ knowledge.search_projection.delete_requested.v1
 ```text
 content.document.extracted.v1
 github.repository.observed.v1
-github.repository.analysis_requested.v1
 social.source.captured.v1
 social.source.updated.v1
 social.source.removed.v1
@@ -539,6 +539,7 @@ knowledge.analysis.failed.v1
 knowledge.search_document.indexed.v1
 knowledge.search_document.removed.v1
 knowledge.repository_analysis.completed.v1
+knowledge.repository_analysis.failed.v1
 ```
 
 Events contain references and bounded results, not full private source content.
@@ -557,7 +558,7 @@ Transactions group:
 
 Remote model calls never occur inside database transactions.
 
-At-least-once delivery is handled with inbox deduplication and idempotent run identity. Replaying a source event does not create duplicate active analyses or embeddings.
+At-least-once delivery is handled with inbox deduplication and idempotent run identity. Repository-analysis request delivery uses the workspace `repository-analysis-intake` spec: its immutable digest is deduplicated in Knowledge-owned state, and a terminal result is linked only to the matching pending revision. Replaying a source event does not create duplicate active analyses or embeddings.
 
 ## 18. Privacy architecture
 

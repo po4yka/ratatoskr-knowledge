@@ -29,6 +29,7 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "embedding_chunks",
             "embedding_failures",
             "provider_usage",
+            "repository_analysis_requests",
             "search_documents",
             "search_projection_inputs",
             "source_refs"

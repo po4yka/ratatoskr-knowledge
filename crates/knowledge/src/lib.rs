@@ -20,6 +20,7 @@ mod pipeline;
 mod provider;
 mod rate_limit;
 mod reindex;
+mod repository_analysis;
 mod runs;
 pub mod search;
 mod telemetry;
@@ -72,6 +73,9 @@ pub use rate_limit::RateLimiter;
 pub use reindex::{
     ReindexScope, ReindexSourceOutcome, ReindexSummary, execute_reindex, plan_reindex,
     rebuild_search_documents,
+};
+pub use repository_analysis::{
+    RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RepositoryAnalysisError,
 };
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,

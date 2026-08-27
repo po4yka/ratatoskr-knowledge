@@ -64,6 +64,7 @@ analysis_runs
 analysis_attempts
 analysis_outputs
 provider_usage
+repository_analysis_requests
 search_projection_inputs
 search_documents
 embedding_chunks
@@ -194,9 +195,11 @@ cargo run --locked -p ratatoskr-knowledge-service -- reindex-embeddings [--tenan
 
 Knowledge does not fetch web pages, run Chromium, synchronize provider accounts, execute Git, own
 source records, accept public analysis requests, or expose retrieval anywhere but the operator
-plane's `/internal/search`. Real `OpenRouter` inference is implemented through the library adapter
-and manual smoke example; wiring analysis to events, embeddings, hybrid ranking, more analysis
-families, and legacy import remain separate planned changes.
+plane's `/internal/search`. It does accept the internal, contract-bound repository-analysis request
+and keeps its pending/result linkage in PostgreSQL; the separate worker that performs that family is
+still planned. Real `OpenRouter` inference is implemented through the library adapter and manual
+smoke example; wiring embeddings, hybrid ranking, more analysis families, and legacy import remain
+separate planned changes.
 
 ## Workspace integration
 

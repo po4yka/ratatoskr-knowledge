@@ -159,6 +159,37 @@ create table if not exists knowledge.analysis_outputs (
     constraint analysis_outputs_result_object_check check (jsonb_typeof(result) = 'object')
 );
 
+create table if not exists knowledge.repository_analysis_requests (
+    request_id uuid primary key,
+    tenant_ref text not null,
+    repository_id uuid not null,
+    github_repository_numeric_id bigint not null,
+    source_revision jsonb not null,
+    repository_attributes jsonb not null,
+    requested_contract text not null,
+    idempotency_digest_hex text not null unique,
+    state text not null default 'pending',
+    analysis_result_ref text,
+    failure_code text,
+    retryable boolean,
+    terminal_at timestamptz,
+    created_at timestamptz not null default now(),
+    constraint repository_analysis_numeric_id_check check (github_repository_numeric_id > 0),
+    constraint repository_analysis_idempotency_digest_check
+        check (idempotency_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint repository_analysis_state_check
+        check (state in ('pending', 'completed', 'failed')),
+    constraint repository_analysis_terminal_check check (
+        (state = 'pending' and analysis_result_ref is null and failure_code is null and retryable is null and terminal_at is null)
+        or (state = 'completed' and analysis_result_ref is not null and failure_code is null and retryable is null and terminal_at is not null)
+        or (state = 'failed' and analysis_result_ref is null and failure_code is not null and retryable is not null and terminal_at is not null)
+    )
+);
+
+create index if not exists repository_analysis_pending_idx
+    on knowledge.repository_analysis_requests (tenant_ref, created_at)
+    where state = 'pending';
+
 create unique index if not exists one_accepted_output_per_run
     on knowledge.analysis_outputs(run_id)
     where accepted;

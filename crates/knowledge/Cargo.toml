@@ -11,6 +11,7 @@ jsonschema.workspace = true
 pgvector.workspace = true
 ratatoskr-document-contracts.workspace = true
 ratatoskr-identifiers.workspace = true
+ratatoskr-github-contracts.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
