@@ -350,7 +350,7 @@ async fn insert_receipt(
     Ok(inserted.is_some())
 }
 
-impl<'a> SourceInbox<'a> {
+impl SourceInbox<'_> {
     async fn snapshot<T: serde::de::DeserializeOwned>(
         &self,
         event_id: uuid::Uuid,
