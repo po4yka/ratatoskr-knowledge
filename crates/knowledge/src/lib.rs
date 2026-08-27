@@ -3,6 +3,7 @@
 
 //! Durable first-slice article analysis for Ratatoskr Knowledge.
 
+mod archive_events;
 mod article;
 mod blob_store;
 mod budget;
@@ -32,6 +33,7 @@ mod user_content;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+pub use archive_events::{ArchiveEventAdmission, ArchiveEventConsumer, ArchiveEventError};
 pub use article::{
     ArticleAnalysis, ArticleValidationError, KeyPoint, article_analysis_schema,
     validate_article_citations, validate_article_json,
@@ -69,8 +71,8 @@ pub use family_analysis::{
     validate_archive_project_analysis, validate_repository_analysis, validate_social_analysis,
 };
 pub use family_pipeline::{
-    FamilyPipeline, FamilyPipelineError, RepositoryAnalysisExecution, RepositoryReadmeError,
-    RepositoryReadmeResolver,
+    ArchiveAnalysisExecution, FamilyPipeline, FamilyPipelineError, RepositoryAnalysisExecution,
+    RepositoryReadmeError, RepositoryReadmeResolver,
 };
 pub use indexer::{
     EMBEDDING_STORAGE_DIMENSIONS, EmbeddingWrite, Indexer, IndexerLimits, IndexingIdentity,

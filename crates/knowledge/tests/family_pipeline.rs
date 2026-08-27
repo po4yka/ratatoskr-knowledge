@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatoskr_ai_archive_contracts::AiArchiveProvenance;
+use ratatoskr_ai_archive_contracts::{AiArchiveProvenance, AiArchiveSubject};
 use ratatoskr_github_contracts::{
     ReadmeRevision, RepositoryAnalysisAttributes, RepositoryAnalysisContract,
     RepositoryAnalysisRequested, RepositoryAnalysisRevision, RepositoryFullName,
@@ -132,14 +132,19 @@ async fn archive_event_produces_grounded_analysis_and_search_document()
         Duration::from_secs(1),
     );
 
+    let execution = pipeline.execute_archive_event(&inbox, event_id).await?;
+    assert_eq!(execution.analysis.decisions.len(), 1);
     assert_eq!(
-        pipeline
-            .execute_archive_event(&inbox, event_id)
-            .await?
-            .decisions
-            .len(),
-        1
+        execution.completion.subject,
+        AiArchiveSubject::Conversation {
+            ai_conversation_id: conversation.ai_conversation_id
+        }
     );
+    assert_eq!(
+        execution.completion.content_digest,
+        conversation.content_digest
+    );
+    assert_eq!(execution.completion.ai_archive_id, provenance.ai_archive_id);
     assert_eq!(search_document_count(&database).await?, 1);
     database.cleanup().await?;
     Ok(())

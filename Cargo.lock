@@ -1606,6 +1606,7 @@ dependencies = [
  "pgvector",
  "ratatoskr-ai-archive-contracts",
  "ratatoskr-document-contracts",
+ "ratatoskr-event-envelope",
  "ratatoskr-github-contracts",
  "ratatoskr-identifiers",
  "ratatoskr-knowledge",

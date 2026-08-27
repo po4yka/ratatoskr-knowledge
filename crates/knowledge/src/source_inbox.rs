@@ -1,8 +1,10 @@
 //! Durable inbox intake for state-carried social and AI-archive source facts.
 
 use ratatoskr_ai_archive_contracts::{
-    AiArchiveProvenance, AiArchiveTombstone, AiArchiveTombstoneSubject, AiConversation, AiProject,
+    AiArchiveProvenance, AiArchiveTombstone, AiArchiveTombstoneSubject, AiConversation,
+    AiConversationAdded, AiConversationUpdated, AiProject,
 };
+use ratatoskr_event_envelope::{EnvelopeError, EventEnvelope, EventPayload};
 use ratatoskr_identifiers::{ContentDigest, WireTimestamp};
 use ratatoskr_social_contracts::SocialSourceSnapshot;
 
@@ -37,6 +39,8 @@ pub enum SourceInboxAdmission {
     AcceptedHistorical,
     /// The exact delivery was already claimed.
     Duplicate,
+    /// An authoritative tombstone is newer than this archive revision.
+    Tombstoned,
 }
 
 /// Safe source-inbox failure.
@@ -55,6 +59,9 @@ pub enum SourceInboxError {
     /// The durable deletion of derived state failed.
     #[error(transparent)]
     Deletion(#[from] DeletionError),
+    /// The envelope is not a supported AI-archive conversation lifecycle fact.
+    #[error("the archive event could not be decoded")]
+    Envelope(#[from] EnvelopeError),
 }
 
 /// Consumer that claims social and AI-archive source facts before analysis scheduling.
@@ -86,6 +93,7 @@ impl<'a> SourceInbox<'a> {
             subject,
             family: "social",
             tenant_ref: snapshot.owner.to_string(),
+            archive_id: None,
             source_id: snapshot.social_source_id.to_string(),
             content_digest_hex: snapshot.content_digest.hex.to_string(),
             observed_at: snapshot.captured_at,
@@ -118,12 +126,60 @@ impl<'a> SourceInbox<'a> {
             subject,
             family: "ai_archive",
             tenant_ref: provenance.owner.to_string(),
+            archive_id: Some(provenance.ai_archive_id.to_string()),
             source_id: conversation.ai_conversation_id.to_string(),
             content_digest_hex: conversation.content_digest.hex.to_string(),
             observed_at: provenance.imported_at,
             snapshot: serde_json::to_value(source).map_err(SourceInboxError::Encode)?,
         })
         .await
+    }
+
+    /// Claims one published AI-archive conversation envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceInboxError`] when the event is not a supported conversation lifecycle
+    /// fact, provenance disagrees with its subject, or durable admission fails.
+    pub async fn accept_ai_envelope(
+        &self,
+        envelope: &EventEnvelope,
+    ) -> Result<SourceInboxAdmission, SourceInboxError> {
+        let event_id = envelope.event_id.0;
+        let subject = envelope.event_type.to_wire();
+        match subject.as_str() {
+            AiConversationAdded::EVENT_TYPE => {
+                let payload = envelope.payload_as::<AiConversationAdded>()?;
+                payload
+                    .validate()
+                    .map_err(|_| SourceInboxError::InvalidArchiveFact)?;
+                self.accept_ai_conversation(
+                    event_id,
+                    &subject,
+                    &payload.import_provenance,
+                    &payload.conversation,
+                )
+                .await
+            }
+            AiConversationUpdated::EVENT_TYPE => {
+                let payload = envelope.payload_as::<AiConversationUpdated>()?;
+                payload
+                    .validate()
+                    .map_err(|_| SourceInboxError::InvalidArchiveFact)?;
+                self.accept_ai_conversation(
+                    event_id,
+                    &subject,
+                    &payload.import_provenance,
+                    &payload.conversation,
+                )
+                .await
+            }
+            _ => Err(EnvelopeError::PayloadType {
+                expected: AiConversationAdded::EVENT_TYPE,
+                found: subject,
+            }
+            .into()),
+        }
     }
 
     /// Claims an AI project added or updated source fact.
@@ -147,6 +203,7 @@ impl<'a> SourceInbox<'a> {
             subject,
             family: "ai_archive",
             tenant_ref: provenance.owner.to_string(),
+            archive_id: Some(provenance.ai_archive_id.to_string()),
             source_id: project.ai_project_id.to_string(),
             content_digest_hex: content_digest.hex.to_string(),
             observed_at: provenance.imported_at,
@@ -211,6 +268,7 @@ impl<'a> SourceInbox<'a> {
             subject,
             family: "ai_archive",
             tenant_ref: tombstone.owner.to_string(),
+            archive_id: Some(tombstone.ai_archive_id.to_string()),
             source_id,
             content_digest_hex: tombstone.evidence_ref.digest.hex.to_string(),
             observed_at: tombstone.observed_at,
@@ -229,19 +287,135 @@ impl<'a> SourceInbox<'a> {
                 .map_err(PersistenceError::Query)?;
             return Err(SourceInboxError::InvalidArchiveFact);
         }
-        if !insert_receipt(&mut transaction, delivery).await? {
+        let duplicate: bool = sqlx::query_scalar(
+            "select exists (select 1 from knowledge.source_analysis_inbox where event_id = $1)",
+        )
+        .bind(event_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        if duplicate {
             transaction
                 .commit()
                 .await
                 .map_err(PersistenceError::Query)?;
             return Ok(SourceInboxAdmission::Duplicate);
         }
+        self.remove_tombstoned_inbox_sources(&mut transaction, tombstone)
+            .await?;
+        if !insert_receipt(&mut transaction, &delivery).await? {
+            transaction
+                .commit()
+                .await
+                .map_err(PersistenceError::Query)?;
+            return Ok(SourceInboxAdmission::Duplicate);
+        }
+        let (subject_kind, subject_id) = tombstone_subject_parts(&tombstone.subject);
+        sqlx::query(
+            "insert into knowledge.ai_archive_tombstones
+                 (event_id, tenant_ref, archive_id, subject_kind, subject_id, observed_at)
+             values ($1, $2, $3, $4, $5, $6::timestamptz)",
+        )
+        .bind(event_id)
+        .bind(tombstone.owner.to_string())
+        .bind(tombstone.ai_archive_id.to_string())
+        .bind(subject_kind)
+        .bind(subject_id)
+        .bind(tombstone.observed_at.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
         execute_deletion(&mut transaction, &deletion_scope).await?;
         transaction
             .commit()
             .await
             .map_err(PersistenceError::Query)?;
         Ok(SourceInboxAdmission::AcceptedCurrent)
+    }
+
+    async fn remove_tombstoned_inbox_sources(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tombstone: &AiArchiveTombstone,
+    ) -> Result<(), SourceInboxError> {
+        let tenant_ref = tombstone.owner.to_string();
+        match &tombstone.subject {
+            AiArchiveTombstoneSubject::Archive => {
+                let archive_id = tombstone.ai_archive_id.to_string();
+                sqlx::query(
+                    "delete from knowledge.source_analysis_heads
+                     where family = 'ai_archive' and tenant_ref = $1 and exists (
+                         select 1 from knowledge.source_analysis_inbox inbox
+                         where inbox.event_id = knowledge.source_analysis_heads.inbox_event_id
+                           and inbox.archive_id = $2
+                     )",
+                )
+                .bind(&tenant_ref)
+                .bind(&archive_id)
+                .execute(&mut **transaction)
+                .await
+                .map_err(PersistenceError::Query)?;
+                sqlx::query(
+                    "delete from knowledge.source_analysis_inbox
+                     where family = 'ai_archive' and tenant_ref = $1 and archive_id = $2",
+                )
+                .bind(&tenant_ref)
+                .bind(archive_id)
+                .execute(&mut **transaction)
+                .await
+                .map_err(PersistenceError::Query)?;
+            }
+            AiArchiveTombstoneSubject::Conversation { ai_conversation_id } => {
+                self.remove_tombstoned_source(
+                    transaction,
+                    &tenant_ref,
+                    &ai_conversation_id.to_string(),
+                )
+                .await?;
+            }
+            AiArchiveTombstoneSubject::Project { ai_project_id } => {
+                self.remove_tombstoned_source(transaction, &tenant_ref, &ai_project_id.to_string())
+                    .await?;
+            }
+            AiArchiveTombstoneSubject::Artifact {
+                external_artifact_id,
+            } => {
+                self.remove_tombstoned_source(
+                    transaction,
+                    &tenant_ref,
+                    &external_artifact_id.to_string(),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn remove_tombstoned_source(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant_ref: &str,
+        source_id: &str,
+    ) -> Result<(), SourceInboxError> {
+        sqlx::query(
+            "delete from knowledge.source_analysis_heads
+             where family = 'ai_archive' and tenant_ref = $1 and source_id = $2",
+        )
+        .bind(tenant_ref)
+        .bind(source_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        sqlx::query(
+            "delete from knowledge.source_analysis_inbox
+             where family = 'ai_archive' and tenant_ref = $1 and source_id = $2",
+        )
+        .bind(tenant_ref)
+        .bind(source_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(())
     }
 
     /// Loads one social snapshot after durable inbox admission.
@@ -293,21 +467,21 @@ impl<'a> SourceInbox<'a> {
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
-        let inserted = sqlx::query_scalar::<_, uuid::Uuid>(
-            "insert into knowledge.source_analysis_inbox
-                 (event_id, subject, family, tenant_ref, source_id, content_digest_hex, observed_at, snapshot)
-             values ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8)
-             on conflict (event_id) do nothing returning event_id",
-        )
-        .bind(delivery.event_id).bind(delivery.subject).bind(delivery.family).bind(&delivery.tenant_ref).bind(&delivery.source_id)
-        .bind(&delivery.content_digest_hex).bind(delivery.observed_at.to_string()).bind(delivery.snapshot)
-        .fetch_optional(&mut *transaction).await.map_err(PersistenceError::Query)?;
-        if inserted.is_none() {
+        let blocked = delivery.family == "ai_archive"
+            && tombstone_blocks(&mut transaction, &delivery).await?;
+        if !insert_receipt(&mut transaction, &delivery).await? {
             transaction
                 .commit()
                 .await
                 .map_err(PersistenceError::Query)?;
             return Ok(SourceInboxAdmission::Duplicate);
+        }
+        if blocked {
+            transaction
+                .commit()
+                .await
+                .map_err(PersistenceError::Query)?;
+            return Ok(SourceInboxAdmission::Tombstoned);
         }
         let updated = sqlx::query(
             "insert into knowledge.source_analysis_heads
@@ -377,24 +551,63 @@ async fn subject_belongs_only_to_another_tenant(
     Ok(known && !owned)
 }
 
+async fn tombstone_blocks(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    delivery: &Delivery<'_>,
+) -> Result<bool, SourceInboxError> {
+    let blocked: bool = sqlx::query_scalar(
+        "select exists (
+                 select 1 from knowledge.ai_archive_tombstones
+                 where tenant_ref = $1 and (
+                       (subject_kind = 'archive' and archive_id = $2)
+                    or (subject_kind in ('conversation', 'project', 'artifact') and subject_id = $3)
+                 ) and observed_at >= $4::timestamptz
+             )",
+    )
+    .bind(&delivery.tenant_ref)
+    .bind(delivery.archive_id.as_deref().unwrap_or_default())
+    .bind(&delivery.source_id)
+    .bind(delivery.observed_at.to_string())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(PersistenceError::Query)?;
+    Ok(blocked)
+}
+
+fn tombstone_subject_parts(subject: &AiArchiveTombstoneSubject) -> (&'static str, Option<String>) {
+    match subject {
+        AiArchiveTombstoneSubject::Archive => ("archive", None),
+        AiArchiveTombstoneSubject::Conversation { ai_conversation_id } => {
+            ("conversation", Some(ai_conversation_id.to_string()))
+        }
+        AiArchiveTombstoneSubject::Project { ai_project_id } => {
+            ("project", Some(ai_project_id.to_string()))
+        }
+        AiArchiveTombstoneSubject::Artifact {
+            external_artifact_id,
+        } => ("artifact", Some(external_artifact_id.to_string())),
+    }
+}
+
 async fn insert_receipt(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    delivery: Delivery<'_>,
+    delivery: &Delivery<'_>,
 ) -> Result<bool, SourceInboxError> {
     let inserted = sqlx::query_scalar::<_, uuid::Uuid>(
             "insert into knowledge.source_analysis_inbox
-                 (event_id, subject, family, tenant_ref, source_id, content_digest_hex, observed_at, snapshot)
-             values ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8)
+                 (event_id, subject, family, tenant_ref, archive_id, source_id, content_digest_hex, observed_at, snapshot)
+             values ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9)
              on conflict (event_id) do nothing returning event_id",
         )
         .bind(delivery.event_id)
         .bind(delivery.subject)
         .bind(delivery.family)
         .bind(&delivery.tenant_ref)
+        .bind(&delivery.archive_id)
         .bind(&delivery.source_id)
         .bind(&delivery.content_digest_hex)
         .bind(delivery.observed_at.to_string())
-        .bind(delivery.snapshot)
+        .bind(&delivery.snapshot)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(PersistenceError::Query)?;
@@ -426,6 +639,7 @@ struct Delivery<'a> {
     subject: &'a str,
     family: &'a str,
     tenant_ref: String,
+    archive_id: Option<String>,
     source_id: String,
     content_digest_hex: String,
     observed_at: WireTimestamp,

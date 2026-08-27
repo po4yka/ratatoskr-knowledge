@@ -3,12 +3,15 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use ratatoskr_ai_archive_contracts::AiConversation;
+use ratatoskr_ai_archive_contracts::{
+    AiArchiveAnalysisCompleted, AiArchiveSubject, AiConversation,
+};
 use ratatoskr_github_contracts::{
     ReadmeRevision, RepositoryAnalysisCompleted, RepositoryAnalysisRequested,
 };
 use ratatoskr_identifiers::{
-    BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, EntityRef, TenantRef,
+    BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, EntityRef, Extensions,
+    TenantRef, WireTimestamp,
 };
 use ratatoskr_social_contracts::SocialSourceSnapshot;
 use sha2::{Digest as _, Sha256};
@@ -92,6 +95,16 @@ pub struct RepositoryAnalysisExecution {
     pub analysis: RepositoryAnalysis,
     /// Completion fact to publish through the transactional outbox, if this call linked it.
     pub completion: Option<RepositoryAnalysisCompleted>,
+}
+
+/// Result of executing one published archive conversation, including its producer-linkable
+/// completion fact.
+#[derive(Debug, Clone)]
+pub struct ArchiveAnalysisExecution {
+    /// Grounded analysis persisted for this immutable conversation revision.
+    pub analysis: crate::ArchiveAnalysis,
+    /// Completion naming precisely the archive subject revision that was analysed.
+    pub completion: AiArchiveAnalysisCompleted,
 }
 
 /// Durable, idempotent family-analysis worker.
@@ -196,13 +209,27 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         &self,
         inbox: &SourceInbox<'_>,
         event_id: Uuid,
-    ) -> Result<crate::ArchiveAnalysis, FamilyPipelineError> {
+    ) -> Result<ArchiveAnalysisExecution, FamilyPipelineError> {
         let source = inbox.archive_conversation(event_id).await?;
-        self.execute_archive_with_provenance(
-            &source.conversation,
-            &source.provenance.ai_archive_id.to_string(),
-        )
-        .await
+        let analysis = self
+            .execute_archive_with_provenance(
+                &source.conversation,
+                &source.provenance.ai_archive_id.to_string(),
+            )
+            .await?;
+        Ok(ArchiveAnalysisExecution {
+            analysis,
+            completion: AiArchiveAnalysisCompleted {
+                ai_archive_id: source.provenance.ai_archive_id,
+                owner: source.conversation.owner,
+                subject: AiArchiveSubject::Conversation {
+                    ai_conversation_id: source.conversation.ai_conversation_id,
+                },
+                content_digest: source.conversation.content_digest,
+                completed_at: WireTimestamp::now(),
+                extensions: Extensions::new(),
+            },
+        })
     }
 
     /// Executes one conversation revision idempotently.

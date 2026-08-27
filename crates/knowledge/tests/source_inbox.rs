@@ -3,14 +3,20 @@
 #![allow(clippy::expect_used, clippy::panic, reason = "fixture assertions")]
 
 use ratatoskr_ai_archive_contracts::{AiArchiveProvenance, AiArchiveTombstone};
+use ratatoskr_event_envelope::EventEnvelope;
 use ratatoskr_identifiers::{
     BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType, TenantRef,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
 use ratatoskr_knowledge::{
-    FamilyValidationError, SourceInbox, SourceInboxAdmission, SourceInboxError, SourceReference,
-    validate_archive_analysis,
+    ArchiveEventAdmission, ArchiveEventConsumer, FamilyValidationError, SourceInbox,
+    SourceInboxAdmission, SourceInboxError, SourceReference, validate_archive_analysis,
 };
+
+const CONTRACT_CONVERSATION: &str =
+    include_str!("fixtures/ai_archive.conversation.added.v1/claude-added.json");
+const CONTRACT_TOMBSTONE: &str =
+    include_str!("fixtures/ai_archive.subject.tombstoned.v1/conversation-tombstoned.json");
 
 const SOCIAL: &str = r#"{
   "social_source_id":"018f0000-0000-7000-8000-000000000201",
@@ -232,6 +238,82 @@ async fn archive_conversation_redelivery_creates_one_receipt()
     );
     database.cleanup().await?;
     Ok(())
+}
+
+/// Contract fixtures must survive an event-envelope round trip, and an authoritative tombstone
+/// must suppress a later out-of-order conversation revision.
+#[tokio::test]
+async fn archive_contract_events_are_admitted_and_tombstones_suppress_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let consumer = ArchiveEventConsumer::new(&database.database);
+    let conversation = envelope(
+        "ai_archive.conversation.added.v1",
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000811")?,
+        &serde_json::from_str(CONTRACT_CONVERSATION)?,
+    )?;
+    assert_eq!(
+        consumer
+            .accept(&conversation)
+            .await
+            .map_err(|error| format!("conversation admission: {error:?}"))?,
+        ArchiveEventAdmission::Conversation(SourceInboxAdmission::AcceptedCurrent)
+    );
+    let tombstone = envelope(
+        "ai_archive.subject.tombstoned.v1",
+        uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000812")?,
+        &serde_json::from_str(CONTRACT_TOMBSTONE)?,
+    )?;
+    assert_eq!(
+        consumer
+            .accept(&tombstone)
+            .await
+            .map_err(|error| format!("tombstone admission: {error:?}"))?,
+        ArchiveEventAdmission::Tombstone
+    );
+    assert_eq!(
+        consumer
+            .accept(&conversation)
+            .await
+            .map_err(|error| format!("stale replay admission: {error:?}"))?,
+        ArchiveEventAdmission::Conversation(SourceInboxAdmission::Tombstoned)
+    );
+    let heads: i64 = sqlx::query_scalar(
+        "select count(*) from knowledge.source_analysis_heads where family = 'ai_archive'",
+    )
+    .fetch_one(database.database.pool())
+    .await
+    .map_err(|error| format!("head check: {error:?}"))?;
+    assert_eq!(heads, 0);
+    let tombstones: i64 =
+        sqlx::query_scalar("select count(*) from knowledge.ai_archive_tombstones")
+            .fetch_one(database.database.pool())
+            .await
+            .map_err(|error| format!("tombstone check: {error:?}"))?;
+    assert_eq!(tombstones, 1);
+    database
+        .cleanup()
+        .await
+        .map_err(|error| format!("database cleanup: {error:?}"))?;
+    Ok(())
+}
+
+fn envelope(
+    event_type: &str,
+    event_id: uuid::Uuid,
+    payload: &serde_json::Value,
+) -> Result<EventEnvelope, serde_json::Error> {
+    serde_json::from_value(serde_json::json!({
+        "event_id": event_id,
+        "event_type": event_type,
+        "occurred_at": "2026-08-27T06:00:00Z",
+        "producer": "ratatoskr-claude",
+        "aggregate_id": "ai-archive:018f0000-0000-7000-8000-000000000402",
+        "correlation_id": "operation:018f0000-0000-7000-8000-000000000813",
+        "tenant_id": "user:018f0000-0000-7000-8000-000000000005",
+        "schema_version": 1,
+        "payload": payload
+    }))
 }
 
 /// An authoritative archive tombstone is a distinct, idempotent inbox receipt that atomically
