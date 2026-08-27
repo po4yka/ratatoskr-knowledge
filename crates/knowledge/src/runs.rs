@@ -420,7 +420,7 @@ impl Database {
                 content_digest_algorithm, content_digest_hex, source_blob
              ) values ($1, $2, $3, $4, $5, $6, $7, $8)
              on conflict (
-                tenant_ref, owner_context, source_document_id,
+                tenant_ref, owner_context, ai_archive_id, source_document_id,
                 content_digest_algorithm, content_digest_hex
              ) do update set source_ref_id = knowledge.source_refs.source_ref_id
              returning source_ref_id",
