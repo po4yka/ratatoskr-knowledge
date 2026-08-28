@@ -49,7 +49,8 @@ analysis, and persists the evidence and result.
   data and only reference-safe Knowledge blob bytes;
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
   regeneration after a model, chunking, or lexical-projection change;
-- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and `/internal/search`;
+- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and a loopback-only
+  `/internal/search` adapter;
 - tenant-scoped user content over accepted analyses: normalized tags and transactional tag merge,
   ordered collections of analysis outputs or immutable source revisions, read/favorite state,
   typed feedback, and Document-IR block anchored highlights.
@@ -159,10 +160,20 @@ ready. `SIGINT` or `SIGTERM` starts drain and uses the configured shutdown bound
 
 `POST /internal/user-content/command` accepts a bounded JSON command with a required `tenant`.
 Supported operations are `create_tag`, `merge_tags`, `tag_analysis`, `create_collection`,
-`add_collection_item`, `move_collection_item`, `set_analysis_state`, `record_feedback`, and
-`create_highlight`. `GET /internal/user-content/collection?tenant=<tenant>&collection_id=<uuid>`
+`add_collection_item`, `move_collection_item`, `set_analysis_state`, `set_read_state`,
+`record_feedback`, and `create_highlight`. `set_read_state` changes only the effective read state
+and preserves favorite. `GET /internal/user-content/collection?tenant=<tenant>&collection_id=<uuid>`
 lists collection items in durable order. All responses use `Cache-Control: no-store`; a foreign
 identifier is reported as the same scoped absence as a missing one.
+
+`GET /internal/search` requires `tenant` and accepts optional `q`, `read_state=read|unread`,
+`limit`, and `offset`. It returns the accepted `analysis_id`, effective `read_state`, and
+`has_more`; a missing state row is unread. Tenant and state filtering happen before ranking and
+pagination. This is a loopback adapter for Platform, not a public client API. Its fleet-visible
+contract is `library-search-read-state` in the `ratatoskr-workspace` OpenSpec store.
+`GET /v1/capabilities` is the bounded loopback document Platform samples; it names both
+`library.search` and `library.read_state`, and a partial document is not sufficient for either
+public capability.
 
 Highlights include only source revision identity, a stable Document IR block id, Unicode-scalar
 offsets, and style (`yellow`, `green`, `blue`, `pink`, `purple`, or `underline`). The command

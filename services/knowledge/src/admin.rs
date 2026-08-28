@@ -3,16 +3,17 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use ratatoskr_knowledge::{
     AnalysisState, CollectionTarget, Database, FeedbackCategory, HighlightAnchor, RankingPath,
-    SearchQuery, UserContentError, add_collection_item, create_collection, create_highlight,
-    create_tag, list_collection_items, merge_tags, move_collection_item, record_feedback,
-    search_page, set_analysis_state, tag_analysis, tag_name,
+    ReadState, ReadStateFilter, SearchQuery, UserContentError, add_collection_item,
+    create_collection, create_highlight, create_tag, list_collection_items, merge_tags,
+    move_collection_item, record_feedback, search_page, set_analysis_state, set_read_state,
+    tag_analysis, tag_name,
 };
 
 use crate::{HybridSearchRetriever, Metrics};
@@ -81,6 +82,7 @@ pub fn admin_router(
         .route("/ready", get(ready))
         .route("/metrics", get(metrics_route))
         .route("/version", get(version))
+        .route("/v1/capabilities", get(capabilities))
         .route("/internal/search", get(search))
         .route("/internal/user-content/command", post(user_content_command))
         .route("/internal/user-content/collection", get(collection_items))
@@ -108,26 +110,38 @@ async fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+async fn capabilities() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "knowledge",
+        "capabilities": ["library.search", "library.read_state"]
+    }))
+}
+
 /// Largest permitted page size when the request omits `limit`.
 const DEFAULT_SEARCH_LIMIT: i64 = 25;
 
 /// Parsed `/internal/search` query parameters.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchParams {
     tenant: Option<String>,
     q: Option<String>,
+    read_state: Option<ReadStateFilter>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
 async fn search(
     axum::extract::State(state): axum::extract::State<AdminState>,
-    axum::extract::Query(params): axum::extract::Query<SearchParams>,
+    params: Result<axum::extract::Query<SearchParams>, QueryRejection>,
 ) -> Response {
+    let Ok(axum::extract::Query(params)) = params else {
+        return bad_request("invalid_parameters");
+    };
     let Some(tenant) = params.tenant else {
         return bad_request("missing_tenant");
     };
-    let Ok(query) = SearchQuery::new(
+    let Ok(mut query) = SearchQuery::new(
         tenant,
         params.q.unwrap_or_default(),
         params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
@@ -135,6 +149,9 @@ async fn search(
     ) else {
         return bad_request("invalid_parameters");
     };
+    if let Some(read_state) = params.read_state {
+        query = query.with_read_state(read_state);
+    }
     let blank = query.raw_query().trim().is_empty();
     let served = if let (Some(retriever), false) = (&state.retriever, blank) {
         retriever
@@ -198,6 +215,11 @@ enum UserContentCommand {
         tenant: String,
         output_id: uuid::Uuid,
         state: AnalysisState,
+    },
+    SetReadState {
+        tenant: String,
+        output_id: uuid::Uuid,
+        read_state: ReadState,
     },
     RecordFeedback {
         tenant: String,
@@ -285,6 +307,11 @@ async fn user_content_command(
         } => set_analysis_state(state.database.pool(), &tenant, output_id, analysis_state)
             .await
             .map(|state| serde_json::json!({"state": state})),
+        UserContentCommand::SetReadState {
+            tenant,
+            output_id,
+            read_state,
+        } => read_state_response(&state.database, &tenant, output_id, read_state).await,
         UserContentCommand::RecordFeedback {
             tenant,
             output_id,
@@ -308,6 +335,17 @@ async fn user_content_command(
             .map(|id| serde_json::json!({"highlight_id": id})),
     };
     user_content_response(result)
+}
+
+async fn read_state_response(
+    database: &Database,
+    tenant: &str,
+    output_id: uuid::Uuid,
+    read_state: ReadState,
+) -> Result<serde_json::Value, UserContentError> {
+    set_read_state(database.pool(), tenant, output_id, read_state)
+        .await
+        .map(|read_state| serde_json::json!({"read_state": read_state}))
 }
 
 fn user_content_response(result: Result<serde_json::Value, UserContentError>) -> Response {

@@ -1,87 +1,166 @@
 //! Reader-side ranked retrieval checks over a disposable database.
 
+mod search_support;
+
 use ratatoskr_document_contracts::{Document, DocumentAddress, DocumentBlock};
 use ratatoskr_identifiers::{
-    BlobOwner, BlobRef, BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType,
-    TenantRef, UserId,
+    BlobOwner, BlobRef, BlockId, DocumentId, MediaType, TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
-use ratatoskr_knowledge::{ProviderError, SearchError, SearchQuery, SourceReference, search_page};
+use ratatoskr_knowledge::{
+    ProviderError, ReadStateFilter, SearchError, SearchQuery, SourceReference, search_page,
+};
 use sha2::Digest as _;
 
-fn digest(digit: char) -> Result<ContentDigest, ratatoskr_identifiers::IdentifierError> {
-    Ok(ContentDigest {
-        algorithm: DigestAlgorithm::Sha256,
-        hex: DigestHex::parse(&digit.to_string().repeat(64))?,
-    })
-}
+use search_support::{attach_accepted_output, digest, fixed_provider, project_row};
 
-/// Registers one source revision under `tenant` and projects its accepted
-/// search row directly, simulating a completed analysis whose output landed
-/// `age_seconds` ago. Returns the tenant's canonical text form.
-async fn project_row(
-    database: &TestDatabase,
-    tenant: &TenantRef,
-    owner_context: &str,
-    title: &str,
-    lead: &str,
-    body: &str,
-    age_seconds: i64,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let document = Document {
-        document_id: DocumentId::new_v7(),
-        source_address: DocumentAddress::parse("document:search")?,
-        content_digest: digest('a')?,
-        title: Some(title.to_owned()),
-        language: None,
-        blocks: vec![DocumentBlock::Paragraph {
-            block_id: BlockId::new_v7(),
-            text: lead.to_owned(),
-        }],
-        provenance: Vec::new(),
-    };
-    let source = database
-        .database
-        .register_source(&SourceReference {
-            tenant: *tenant,
-            owner_context: owner_context.to_owned(),
-            ai_archive_id: String::new(),
-            document_id: document.document_id,
-            content_digest: document.content_digest.clone(),
-            source_blob: BlobRef {
-                owner_service: BlobOwner::parse(owner_context)?,
-                digest: document.content_digest.clone(),
-                media_type: MediaType::parse("application/json")?,
-                length_bytes: 128,
-            },
-        })
-        .await?;
-    let (tenant_ref,): (String,) =
-        sqlx::query_as("select tenant_ref from knowledge.source_refs where source_ref_id = $1")
-            .bind(source.id)
-            .fetch_one(database.database.pool())
-            .await?;
-    sqlx::query(
-        "insert into knowledge.search_documents (
-             search_document_id, source_ref_id, latest_output_id, tenant_ref,
-             owner_context, document_id, title, lead, body, updated_at
-         )
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                 now() - make_interval(secs => $10::double precision))",
+#[tokio::test]
+async fn newest_accepted_output_carries_effective_read_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let tenant = TenantRef::of_user(UserId::new_v7());
+    let tenant_ref = project_row(
+        &database,
+        &tenant,
+        "state-owner",
+        "Stateful recovery",
+        "Recovery evidence.",
+        "",
+        10,
     )
-    .bind(uuid::Uuid::now_v7())
-    .bind(source.id)
-    .bind(uuid::Uuid::now_v7())
+    .await?;
+    let (source_ref_id, projected_output_id): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+        "select source_ref_id, latest_output_id
+         from knowledge.search_documents
+         where tenant_ref = $1",
+    )
     .bind(&tenant_ref)
-    .bind(owner_context)
-    .bind(document.document_id.0)
-    .bind(title)
-    .bind(lead)
-    .bind(body)
-    .bind(age_seconds)
+    .fetch_one(database.database.pool())
+    .await?;
+    let older_output_id = uuid::Uuid::now_v7();
+    let newest_output_id = uuid::Uuid::now_v7();
+    for (ordinal, output_id) in [older_output_id, newest_output_id].into_iter().enumerate() {
+        let run_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "insert into knowledge.analysis_runs (
+                 run_id, source_ref_id, contract_version, prompt_version,
+                 context_builder_version, model_policy, state
+             ) values ($1, $2, $3, 'state-test', 'state-test', 'state-test', 'completed')",
+        )
+        .bind(run_id)
+        .bind(source_ref_id)
+        .bind(format!("state-test-{ordinal}"))
+        .execute(database.database.pool())
+        .await?;
+        sqlx::query(
+            "insert into knowledge.analysis_outputs (
+                 output_id, run_id, result, raw_response, accepted
+             ) values ($1, $2, '{}'::jsonb, '{}'::jsonb, true)",
+        )
+        .bind(output_id)
+        .bind(run_id)
+        .execute(database.database.pool())
+        .await?;
+    }
+    sqlx::query(
+        "insert into knowledge.analysis_user_states (tenant_ref, output_id, read_state)
+         values ($1, $2, 'read')",
+    )
+    .bind(&tenant_ref)
+    .bind(older_output_id)
     .execute(database.database.pool())
     .await?;
-    Ok(tenant_ref)
+    sqlx::query(
+        "update knowledge.search_documents
+         set latest_output_id = $1
+         where latest_output_id = $2",
+    )
+    .bind(newest_output_id)
+    .bind(projected_output_id)
+    .execute(database.database.pool())
+    .await?;
+
+    let page = search_page(
+        database.database.pool(),
+        &SearchQuery::new(&tenant_ref, "recovery", 5, 0)?,
+    )
+    .await?;
+    let encoded = serde_json::to_value(&page)?;
+
+    assert_eq!(
+        encoded["results"][0]["analysis_id"],
+        newest_output_id.to_string()
+    );
+    assert_eq!(encoded["results"][0]["read_state"], "unread");
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_state_filter_precedes_ranking_offset_and_page_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let owner = TenantRef::of_user(UserId::new_v7());
+    let foreign = TenantRef::of_user(UserId::new_v7());
+    let owner_ref = project_row(
+        &database,
+        &owner,
+        "state-owner",
+        "Theta top",
+        "Theta evidence.",
+        "",
+        10,
+    )
+    .await?;
+    for (title, age_seconds) in [("Theta read", 20), ("Theta next", 30), ("Theta last", 40)] {
+        project_row(
+            &database,
+            &owner,
+            "state-owner",
+            title,
+            "Theta evidence.",
+            "",
+            age_seconds,
+        )
+        .await?;
+    }
+    let foreign_ref = project_row(
+        &database,
+        &foreign,
+        "foreign-owner",
+        "Theta foreign",
+        "Theta evidence.",
+        "",
+        5,
+    )
+    .await?;
+    attach_accepted_output(&database, &owner_ref, "Theta top", None).await?;
+    attach_accepted_output(&database, &owner_ref, "Theta read", Some("read")).await?;
+    attach_accepted_output(&database, &owner_ref, "Theta next", None).await?;
+    attach_accepted_output(&database, &owner_ref, "Theta last", None).await?;
+    attach_accepted_output(&database, &foreign_ref, "Theta foreign", None).await?;
+
+    let page = search_page(
+        database.database.pool(),
+        &SearchQuery::new(&owner_ref, "theta", 2, 0)?.with_read_state(ReadStateFilter::Unread),
+    )
+    .await?;
+
+    assert_eq!(
+        page.results
+            .iter()
+            .map(|result| result.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Theta top", "Theta next"]
+    );
+    assert!(
+        page.results
+            .iter()
+            .all(|result| result.read_state == ratatoskr_knowledge::ReadState::Unread)
+    );
+    assert!(page.has_more);
+    database.cleanup().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -641,54 +720,6 @@ async fn hybrid_legs_are_equally_tenant_scoped() -> Result<(), Box<dyn std::erro
     assert_eq!(page.results[0].title, "Own alpha fragment");
     database.cleanup().await?;
     Ok(())
-}
-
-/// Test double whose every call returns one fixed outcome: either an
-/// exact echo vector or a permanent failure, so fixture geometry stays
-/// predictable across both retrieval paths.
-struct FixedOutcomeProvider {
-    identity: ratatoskr_knowledge::EmbeddingIdentity,
-    outcome: Result<ratatoskr_knowledge::EmbeddingResponse, ProviderError>,
-}
-
-impl ratatoskr_knowledge::EmbeddingProvider for FixedOutcomeProvider {
-    fn identity(&self) -> ratatoskr_knowledge::EmbeddingIdentity {
-        self.identity.clone()
-    }
-
-    fn embed(
-        &self,
-        _inputs: Vec<String>,
-    ) -> impl std::future::Future<
-        Output = Result<
-            ratatoskr_knowledge::EmbeddingResponse,
-            ratatoskr_knowledge::ProviderFailure,
-        >,
-    > + Send {
-        let outcome = match &self.outcome {
-            Ok(response) => Ok(response.clone()),
-            Err(error) => Err(ratatoskr_knowledge::ProviderFailure {
-                error: *error,
-                class: ratatoskr_knowledge::ProviderFailureClass::Unclassified,
-                http_status: None,
-            }),
-        };
-        std::future::ready(outcome)
-    }
-}
-
-fn fixed_provider(
-    outcome: Result<ratatoskr_knowledge::EmbeddingResponse, ProviderError>,
-) -> FixedOutcomeProvider {
-    FixedOutcomeProvider {
-        identity: ratatoskr_knowledge::EmbeddingIdentity {
-            provider: "scripted_fake".to_owned(),
-            model: "fake_default_v1".to_owned(),
-            dimensions: 1536,
-            prompt_version: "none.v1".to_owned(),
-        },
-        outcome,
-    }
 }
 
 #[tokio::test]

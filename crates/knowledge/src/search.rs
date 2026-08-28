@@ -1,6 +1,11 @@
 //! Deterministic search-document text extracted from canonical Document IR.
 
+mod sql;
+
 use ratatoskr_document_contracts::{Document, DocumentBlock};
+
+use self::sql::HYBRID_SEARCH_SQL;
+use crate::ReadState;
 
 /// Searchable text fields extracted from one Document IR revision.
 ///
@@ -206,6 +211,25 @@ pub enum SearchError {
     InvalidParameters,
 }
 
+/// Closed effective-state filter for tenant-scoped search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadStateFilter {
+    /// Return only effectively unread analyses.
+    Unread,
+    /// Return only read analyses.
+    Read,
+}
+
+impl ReadStateFilter {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unread => "unread",
+            Self::Read => "read",
+        }
+    }
+}
+
 /// Validated parameters for one ranked search page.
 ///
 /// The constructor validates page bounds before any database work; the
@@ -214,6 +238,7 @@ pub enum SearchError {
 pub struct SearchQuery {
     tenant_ref: String,
     raw_query: String,
+    read_state: Option<ReadStateFilter>,
     limit: i64,
     offset: i64,
 }
@@ -237,6 +262,7 @@ impl SearchQuery {
         Ok(Self {
             tenant_ref: tenant_ref.into(),
             raw_query: raw_query.into(),
+            read_state: None,
             limit,
             offset,
         })
@@ -265,11 +291,26 @@ impl SearchQuery {
     pub fn offset(&self) -> i64 {
         self.offset
     }
+
+    /// Restricts the page to one effective read state.
+    #[must_use]
+    pub const fn with_read_state(mut self, filter: ReadStateFilter) -> Self {
+        self.read_state = Some(filter);
+        self
+    }
+
+    /// Optional effective-state restriction.
+    #[must_use]
+    pub const fn read_state(&self) -> Option<ReadStateFilter> {
+        self.read_state
+    }
 }
 
 /// One rendered hit from the ranked reader.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
+    /// Accepted analysis output represented by this projection.
+    pub analysis_id: uuid::Uuid,
     /// Owner context that captured the projected source.
     pub owner_context: String,
     /// Document identity of the projected revision.
@@ -280,6 +321,8 @@ pub struct SearchResult {
     pub snippet: Option<String>,
     /// Cover-density rank; absent while browsing.
     pub rank: Option<f32>,
+    /// Effective state of the accepted analysis; absent rows are unread.
+    pub read_state: ReadState,
 }
 
 /// One page of ranked results.
@@ -287,6 +330,8 @@ pub struct SearchResult {
 pub struct SearchPage {
     /// Ordered hits.
     pub results: Vec<SearchResult>,
+    /// Whether another result exists after this page.
+    pub has_more: bool,
 }
 
 /// Reads one ranked page for the query's tenant.
@@ -372,100 +417,47 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let depth = candidate_depth(query.limit(), query.offset());
-    let rows: Vec<(String, uuid::Uuid, String, String, f32)> = sqlx::query_as(
-        "with lex as (
-             select s.search_document_id,
-                    row_number() over (
-                        order by ts_rank_cd(s.search_vector, q.tsq) desc,
-                                 s.updated_at desc,
-                                 s.search_document_id desc
-                    ) as rnk
-             from knowledge.search_documents s,
-                  websearch_to_tsquery('english', $2) as q(tsq)
-             where s.tenant_ref = $1
-               and s.search_vector @@ q.tsq
-             limit $8
-         ),
-         sem as (
-             select d.search_document_id,
-                    row_number() over (
-                        order by best.dist asc,
-                                 d.updated_at desc,
-                                 d.search_document_id desc
-                    ) as rnk
-             from (
-                 select c.source_ref_id, min(c.embedding <=> $3) as dist
-                 from knowledge.embedding_chunks c
-                 where c.provider = $4
-                   and c.model = $5
-                   and c.prompt_version = $6
-                   and c.chunking_version = $7
-                 group by c.source_ref_id
-             ) best
-             join knowledge.search_documents d
-               on d.source_ref_id = best.source_ref_id
-             where d.tenant_ref = $1
-             limit $8
-         ),
-         fused as (
-             select search_document_id, 1.0::double precision / ($9 + rnk) as score
-             from lex
-             union all
-             select search_document_id, 1.0::double precision / ($9 + rnk) as score
-             from sem
-         )
-         select s.owner_context,
-                s.document_id,
-                s.title,
-                ts_headline(
-                    'english',
-                    s.lead || ' ' || s.body,
-                    websearch_to_tsquery('english', $2),
-                    'StartSel=<b>, StopSel=</b>, MaxWords=16, MinWords=6, MaxFragments=0'
-                ),
-                sum(f.score)::real
-         from fused f
-         join knowledge.search_documents s
-           on s.search_document_id = f.search_document_id
-         group by s.search_document_id,
-                  s.owner_context,
-                  s.document_id,
-                  s.title,
-                  s.lead,
-                  s.body,
-                  s.updated_at
-         order by sum(f.score) desc,
-                  s.updated_at desc,
-                  s.search_document_id desc
-         limit $10 offset $11",
-    )
-    .bind(query.tenant_ref())
-    .bind(query.raw_query())
-    .bind(pgvector::Vector::from(leg.vector.clone()))
-    .bind(&leg.provider)
-    .bind(&leg.model)
-    .bind(&leg.prompt_version)
-    .bind(&leg.chunking_version)
-    .bind(depth)
-    .bind(RRF_K)
-    .bind(query.limit())
-    .bind(query.offset())
-    .fetch_all(executor)
-    .await
-    .map_err(SearchError::Unavailable)?;
+    let mut rows: Vec<(uuid::Uuid, bool, String, uuid::Uuid, String, String, f32)> =
+        sqlx::query_as(HYBRID_SEARCH_SQL)
+            .bind(query.tenant_ref())
+            .bind(query.raw_query())
+            .bind(pgvector::Vector::from(leg.vector.clone()))
+            .bind(&leg.provider)
+            .bind(&leg.model)
+            .bind(&leg.prompt_version)
+            .bind(&leg.chunking_version)
+            .bind(query.read_state().map(ReadStateFilter::as_str))
+            .bind(depth)
+            .bind(RRF_K)
+            .bind(query.limit() + 1)
+            .bind(query.offset())
+            .fetch_all(executor)
+            .await
+            .map_err(SearchError::Unavailable)?;
+    let has_more = rows.len() > usize::try_from(query.limit()).unwrap_or(usize::MAX);
+    rows.truncate(usize::try_from(query.limit()).unwrap_or_default());
     Ok(SearchPage {
         results: rows
             .into_iter()
             .map(
-                |(owner_context, document_id, title, snippet, rank)| SearchResult {
-                    owner_context,
-                    document_id,
-                    title,
-                    snippet: Some(snippet),
-                    rank: Some(rank),
+                |(analysis_id, is_read, owner_context, document_id, title, snippet, rank)| {
+                    SearchResult {
+                        analysis_id,
+                        owner_context,
+                        document_id,
+                        title,
+                        snippet: Some(snippet),
+                        rank: Some(rank),
+                        read_state: if is_read {
+                            ReadState::Read
+                        } else {
+                            ReadState::Unread
+                        },
+                    }
                 },
             )
             .collect(),
+        has_more,
     })
 }
 
@@ -578,30 +570,50 @@ async fn browse_recent<'e, E>(executor: E, query: &SearchQuery) -> Result<Search
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let rows: Vec<(String, uuid::Uuid, String)> = sqlx::query_as(
-        "select owner_context, document_id, title
-         from knowledge.search_documents
-         where tenant_ref = $1
-         order by updated_at desc, search_document_id desc
-         limit $2 offset $3",
+    let mut rows: Vec<(uuid::Uuid, bool, String, uuid::Uuid, String)> = sqlx::query_as(
+        "select s.latest_output_id,
+                coalesce(us.read_state = 'read', false),
+                s.owner_context,
+                s.document_id,
+                s.title
+         from knowledge.search_documents s
+         left join knowledge.analysis_user_states us
+           on us.tenant_ref = s.tenant_ref
+          and us.output_id = s.latest_output_id
+         where s.tenant_ref = $1
+           and ($2::text is null or coalesce(us.read_state, 'unread') = $2)
+         order by s.updated_at desc, s.search_document_id desc
+         limit $3 offset $4",
     )
     .bind(query.tenant_ref())
-    .bind(query.limit())
+    .bind(query.read_state().map(ReadStateFilter::as_str))
+    .bind(query.limit() + 1)
     .bind(query.offset())
     .fetch_all(executor)
     .await
     .map_err(SearchError::Unavailable)?;
+    let has_more = rows.len() > usize::try_from(query.limit()).unwrap_or(usize::MAX);
+    rows.truncate(usize::try_from(query.limit()).unwrap_or_default());
     Ok(SearchPage {
         results: rows
             .into_iter()
-            .map(|(owner_context, document_id, title)| SearchResult {
-                owner_context,
-                document_id,
-                title,
-                snippet: None,
-                rank: None,
-            })
+            .map(
+                |(analysis_id, is_read, owner_context, document_id, title)| SearchResult {
+                    analysis_id,
+                    owner_context,
+                    document_id,
+                    title,
+                    snippet: None,
+                    rank: None,
+                    read_state: if is_read {
+                        ReadState::Read
+                    } else {
+                        ReadState::Unread
+                    },
+                },
+            )
             .collect(),
+        has_more,
     })
 }
 
@@ -610,8 +622,11 @@ async fn rank_matches<'e, E>(executor: E, query: &SearchQuery) -> Result<SearchP
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let rows: Vec<(String, uuid::Uuid, String, String, f32)> = sqlx::query_as(
-        "select s.owner_context,
+    let mut rows: Vec<(uuid::Uuid, bool, String, uuid::Uuid, String, String, f32)> =
+        sqlx::query_as(
+            "select s.latest_output_id,
+                coalesce(us.read_state = 'read', false),
+                s.owner_context,
                 s.document_id,
                 s.title,
                 ts_headline(
@@ -622,33 +637,49 @@ where
                 ),
                 ts_rank_cd(s.search_vector, websearch_to_tsquery('english', $2))
          from knowledge.search_documents s
+         left join knowledge.analysis_user_states us
+           on us.tenant_ref = s.tenant_ref
+          and us.output_id = s.latest_output_id
          where s.tenant_ref = $1
+           and ($3::text is null or coalesce(us.read_state, 'unread') = $3)
            and s.search_vector @@ websearch_to_tsquery('english', $2)
          order by ts_rank_cd(s.search_vector, websearch_to_tsquery('english', $2)) desc,
                   s.updated_at desc,
                   s.search_document_id desc
-         limit $3 offset $4",
-    )
-    .bind(query.tenant_ref())
-    .bind(query.raw_query())
-    .bind(query.limit())
-    .bind(query.offset())
-    .fetch_all(executor)
-    .await
-    .map_err(SearchError::Unavailable)?;
+         limit $4 offset $5",
+        )
+        .bind(query.tenant_ref())
+        .bind(query.raw_query())
+        .bind(query.read_state().map(ReadStateFilter::as_str))
+        .bind(query.limit() + 1)
+        .bind(query.offset())
+        .fetch_all(executor)
+        .await
+        .map_err(SearchError::Unavailable)?;
+    let has_more = rows.len() > usize::try_from(query.limit()).unwrap_or(usize::MAX);
+    rows.truncate(usize::try_from(query.limit()).unwrap_or_default());
     Ok(SearchPage {
         results: rows
             .into_iter()
             .map(
-                |(owner_context, document_id, title, snippet, rank)| SearchResult {
-                    owner_context,
-                    document_id,
-                    title,
-                    snippet: Some(snippet),
-                    rank: Some(rank),
+                |(analysis_id, is_read, owner_context, document_id, title, snippet, rank)| {
+                    SearchResult {
+                        analysis_id,
+                        owner_context,
+                        document_id,
+                        title,
+                        snippet: Some(snippet),
+                        rank: Some(rank),
+                        read_state: if is_read {
+                            ReadState::Read
+                        } else {
+                            ReadState::Unread
+                        },
+                    }
                 },
             )
             .collect(),
+        has_more,
     })
 }
 

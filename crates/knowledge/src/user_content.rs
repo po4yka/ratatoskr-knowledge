@@ -347,6 +347,43 @@ pub async fn set_analysis_state(
     })
 }
 
+/// Replaces one accepted analysis's read state.
+///
+/// # Errors
+/// Returns a scoped absence for a foreign or unaccepted analysis.
+pub async fn set_read_state(
+    pool: &PgPool,
+    tenant: &str,
+    output: Uuid,
+    read_state: ReadState,
+) -> Result<ReadState, UserContentError> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "insert into knowledge.analysis_user_states (tenant_ref, output_id, read_state)
+         select $1, $2, $3
+         where exists (
+             select 1
+             from knowledge.analysis_outputs o
+             join knowledge.analysis_runs r on r.run_id = o.run_id
+             join knowledge.source_refs s on s.source_ref_id = r.source_ref_id
+             where o.output_id = $2 and o.accepted and s.tenant_ref = $1
+         )
+         on conflict (tenant_ref, output_id) do update set
+             read_state = excluded.read_state,
+             updated_at = now()
+         returning read_state",
+    )
+    .bind(tenant)
+    .bind(output)
+    .bind(read_state_name(read_state))
+    .fetch_optional(pool)
+    .await
+    .map_err(UserContentError::Database)?;
+    let Some(stored) = stored else {
+        return Err(UserContentError::NotFound);
+    };
+    parse_read_state(&stored)
+}
+
 /// Persists bounded typed feedback without mutating the analysis.
 ///
 /// # Errors

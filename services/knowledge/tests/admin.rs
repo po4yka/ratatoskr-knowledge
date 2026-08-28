@@ -60,6 +60,40 @@ async fn assert_response(
 }
 
 #[tokio::test]
+async fn capability_document_declares_library_surfaces() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let app = admin_router(
+        Lifecycle::starting(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/capabilities")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    let document: Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(document["service"], "knowledge");
+    assert_eq!(
+        document["capabilities"],
+        serde_json::json!(["library.search", "library.read_state"])
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn search_endpoint_returns_ranked_results_and_requires_tenant()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
@@ -163,6 +197,150 @@ async fn user_content_routes_require_tenant_scope_and_hide_foreign_targets()
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn library_search_and_read_state_adapter_is_bounded_and_tenant_scoped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let (read_output, unread_output, foreign_output) = seed_library_state(&database).await?;
+    let app = admin_router(
+        Lifecycle::starting(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/search?tenant=library-owner&q=library&read_state=unread&limit=1&offset=0")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    let page: Value = serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(page["results"][0]["analysis_id"], unread_output.to_string());
+    assert_eq!(page["results"][0]["read_state"], "unread");
+    assert_eq!(page["has_more"], false);
+
+    let invalid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/search?tenant=library-owner&read_state=archived")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let update = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/user-content/command")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "operation": "set_read_state",
+                        "tenant": "library-owner",
+                        "output_id": read_output,
+                        "read_state": "read"
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(update.status(), StatusCode::OK);
+    assert_eq!(
+        update.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    let updated: Value = serde_json::from_slice(&update.into_body().collect().await?.to_bytes())?;
+    assert_eq!(updated["read_state"], "read");
+    let favorite: bool = sqlx::query_scalar(
+        "select favorite from knowledge.analysis_user_states
+         where tenant_ref = 'library-owner' and output_id = $1",
+    )
+    .bind(read_output)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert!(favorite);
+
+    let mut absence_bodies = Vec::new();
+    for output_id in [foreign_output, uuid::Uuid::now_v7()] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/user-content/command")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation": "set_read_state",
+                            "tenant": "library-owner",
+                            "output_id": output_id,
+                            "read_state": "read"
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        absence_bodies.push(response.into_body().collect().await?.to_bytes());
+    }
+    assert_eq!(absence_bodies[0], absence_bodies[1]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+async fn seed_library_state(
+    database: &TestDatabase,
+) -> Result<(uuid::Uuid, uuid::Uuid, uuid::Uuid), Box<dyn std::error::Error>> {
+    let read_output = seed_search_hit(
+        database.database.pool(),
+        "library-owner",
+        "owner",
+        "Library newest",
+        "Library evidence.",
+        5,
+    )
+    .await?;
+    let unread_output = seed_search_hit(
+        database.database.pool(),
+        "library-owner",
+        "owner",
+        "Library unread",
+        "Library evidence.",
+        10,
+    )
+    .await?;
+    let foreign_output = seed_search_hit(
+        database.database.pool(),
+        "library-foreign",
+        "foreign",
+        "Library foreign",
+        "Library evidence.",
+        1,
+    )
+    .await?;
+    sqlx::query(
+        "insert into knowledge.analysis_user_states (
+             tenant_ref, output_id, read_state, favorite
+         ) values ('library-owner', $1, 'read', true)",
+    )
+    .bind(read_output)
+    .execute(database.database.pool())
+    .await?;
+    Ok((read_output, unread_output, foreign_output))
 }
 
 #[tokio::test]
@@ -347,19 +525,41 @@ async fn seed_search_hit(
     title: &str,
     lead: &str,
     age_seconds: i64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let source_ref_id: String = sqlx::query_scalar(
+) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    let source_ref_id: uuid::Uuid = sqlx::query_scalar(
         "insert into knowledge.source_refs (
              source_ref_id, tenant_ref, owner_context, source_document_id,
              content_digest_algorithm, content_digest_hex, source_blob
          )
          values (gen_random_uuid(), $1, $2, gen_random_uuid()::text, 'sha256', $3, '{}'::jsonb)
-         returning source_ref_id::text",
+         returning source_ref_id",
     )
     .bind(tenant)
     .bind(owner_context)
     .bind("a".repeat(64))
     .fetch_one(pool)
+    .await?;
+    let run_id = uuid::Uuid::now_v7();
+    let output_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "insert into knowledge.analysis_runs (
+             run_id, source_ref_id, contract_version, prompt_version,
+             context_builder_version, model_policy, state
+         ) values ($1, $2, $3, 'admin-search', 'admin-search', 'admin-search', 'completed')",
+    )
+    .bind(run_id)
+    .bind(source_ref_id)
+    .bind(format!("admin-search-{output_id}"))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "insert into knowledge.analysis_outputs (
+             output_id, run_id, result, raw_response, accepted
+         ) values ($1, $2, '{}'::jsonb, '{}'::jsonb, true)",
+    )
+    .bind(output_id)
+    .bind(run_id)
+    .execute(pool)
     .await?;
     sqlx::query(
         "insert into knowledge.search_documents (
@@ -367,12 +567,13 @@ async fn seed_search_hit(
              owner_context, document_id, title, lead, body, updated_at
          )
          values (
-             gen_random_uuid(), $1::uuid, gen_random_uuid(), $2, $3,
-             gen_random_uuid(), $4, $5, '',
-             now() - make_interval(secs => $6::double precision)
+             gen_random_uuid(), $1, $2, $3, $4,
+             gen_random_uuid(), $5, $6, '',
+             now() - make_interval(secs => $7::double precision)
          )",
     )
     .bind(source_ref_id)
+    .bind(output_id)
     .bind(tenant)
     .bind(owner_context)
     .bind(title)
@@ -380,5 +581,5 @@ async fn seed_search_hit(
     .bind(age_seconds)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(output_id)
 }
