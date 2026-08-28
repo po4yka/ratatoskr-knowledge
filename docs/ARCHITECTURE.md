@@ -711,17 +711,20 @@ Provider or prompt changes cannot become default solely because examples look su
 
 ## 24. Deployment architecture
 
-The current deployment is one admin-only process. It requires PostgreSQL 17 and a writable owned
-blob directory. It does not require NATS, model credentials, FTS, pgvector, or Qdrant.
+The current deployment is one admin-only process. It requires PostgreSQL 17 with pgvector and a
+writable owned blob directory. It does not require NATS, model credentials, or Qdrant. PostgreSQL
+FTS is the offline retrieval path; configured embeddings add hybrid ranking.
 
 The admin listener is loopback-only. `check-config` validates strict environment settings without
 binding. Readiness becomes successful after storage and the current schema are ready. `SIGINT` and
 `SIGTERM` start drain; the process joins server shutdown within its configured bound.
 
 The `OpenRouter` adapter exists in the library and manual smoke example, but the admin-only service
-does not invoke it. Analysis consumers, service wiring for model execution, additional adapters,
-indexing workers, and public or internal search endpoints are future deployment changes. Split
-processes only after a measured scaling or security need exists.
+does not invoke it. The loopback `/internal/search` and user-content adapters expose tenant-scoped
+query and read-state behavior to Platform; they are not public routes. Their cross-repository
+contract is `library-search-read-state` in the workspace OpenSpec store. Analysis consumers,
+service wiring for model execution, and additional adapters remain future deployment changes.
+Split processes only after a measured scaling or security need exists.
 
 ## 25. Migration architecture
 

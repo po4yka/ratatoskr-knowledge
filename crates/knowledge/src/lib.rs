@@ -101,8 +101,8 @@ pub use runs::{
     SourceReference, SourceRevision,
 };
 pub use search::{
-    HybridRetriever, RankingPath, SearchDocumentProjection, SearchError, SearchPage, SearchQuery,
-    SearchResult, SemanticLeg, hybrid_search_page, record_search_document,
+    HybridRetriever, RankingPath, ReadStateFilter, SearchDocumentProjection, SearchError,
+    SearchPage, SearchQuery, SearchResult, SemanticLeg, hybrid_search_page, record_search_document,
     record_search_projection_input, search_page,
 };
 pub use source_inbox::{
@@ -114,5 +114,6 @@ pub use user_content::{
     AnalysisState, CollectionItem, CollectionTarget, FeedbackCategory, HighlightAnchor,
     HighlightStyle, ReadState, TagName, UserContentError, add_collection_item, create_collection,
     create_highlight, create_tag, list_collection_items, merge_tags, move_collection_item,
-    record_feedback, set_analysis_state, tag_analysis, tag_name, validate_highlight_anchor,
+    record_feedback, set_analysis_state, set_read_state, tag_analysis, tag_name,
+    validate_highlight_anchor,
 };

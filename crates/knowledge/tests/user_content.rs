@@ -6,8 +6,8 @@ use ratatoskr_knowledge::test_support::TestDatabase;
 use ratatoskr_knowledge::{
     AnalysisState, CollectionTarget, FeedbackCategory, HighlightStyle, ReadState, UserContentError,
     add_collection_item, create_collection, create_tag, list_collection_items, merge_tags,
-    move_collection_item, record_feedback, set_analysis_state, tag_analysis, tag_name,
-    validate_highlight_anchor,
+    move_collection_item, record_feedback, set_analysis_state, set_read_state, tag_analysis,
+    tag_name, validate_highlight_anchor,
 };
 use uuid::Uuid;
 
@@ -133,6 +133,72 @@ async fn analysis_state_transitions_are_idempotent_and_tenant_scoped()
     .fetch_one(database.database.pool())
     .await?;
     assert_eq!(count, 1);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_state_only_transition_is_idempotent_and_preserves_favorite()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let (_, absent_state_output) = seed_accepted(&database, "user:read-state").await?;
+    assert_eq!(
+        set_read_state(
+            database.database.pool(),
+            "user:read-state",
+            absent_state_output,
+            ReadState::Read,
+        )
+        .await?,
+        ReadState::Read
+    );
+
+    let (_, favorite_output) = seed_accepted(&database, "user:read-state").await?;
+    set_analysis_state(
+        database.database.pool(),
+        "user:read-state",
+        favorite_output,
+        AnalysisState {
+            read_state: ReadState::Unread,
+            favorite: true,
+        },
+    )
+    .await?;
+    for _ in 0..2 {
+        assert_eq!(
+            set_read_state(
+                database.database.pool(),
+                "user:read-state",
+                favorite_output,
+                ReadState::Read,
+            )
+            .await?,
+            ReadState::Read
+        );
+    }
+    let (stored_state, favorite, row_count): (String, bool, i64) = sqlx::query_as(
+        "select min(read_state), bool_and(favorite), count(*)
+         from knowledge.analysis_user_states
+         where tenant_ref = $1 and output_id = $2",
+    )
+    .bind("user:read-state")
+    .bind(favorite_output)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(stored_state, "read");
+    assert!(favorite, "read-state-only replacement reset favorite");
+    assert_eq!(row_count, 1);
+    assert!(matches!(
+        set_read_state(
+            database.database.pool(),
+            "user:foreign",
+            favorite_output,
+            ReadState::Read,
+        )
+        .await,
+        Err(UserContentError::NotFound)
+    ));
+
     database.cleanup().await?;
     Ok(())
 }
