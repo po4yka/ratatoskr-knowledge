@@ -110,6 +110,47 @@ fn provider_keys_are_finite_strict_and_secret() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn channel_recap_result_reader_secret_is_redacted_and_bounded()
+-> Result<(), Box<dyn std::error::Error>> {
+    const KEY: &str = "RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET";
+    const SECRET: &str = "channel-result-reader-LEAKME";
+
+    let defaults = Config::default();
+    assert!(
+        defaults
+            .channel_recap
+            .result_reader_service_secret
+            .is_none()
+    );
+    assert!(!serde_json::to_string(&defaults)?.contains("RESULT_READER_SERVICE_SECRET"));
+
+    let configured = Config::from_environment([(KEY, SECRET)])?;
+    assert!(!configured.channel_recap.enabled);
+    assert_eq!(
+        configured
+            .channel_recap
+            .result_reader_service_secret
+            .as_ref()
+            .ok_or("result-reader secret must be configured")?
+            .expose_secret(),
+        SECRET
+    );
+    assert!(!serde_json::to_string(&configured)?.contains(SECRET));
+    assert!(!format!("{configured:?}").contains(SECRET));
+
+    for invalid in [String::new(), "x".repeat(4_097)] {
+        let error = Config::from_environment([(KEY, invalid.as_str())])
+            .expect_err("empty and oversized service secrets must fail")
+            .to_string();
+        assert!(error.contains(KEY));
+        if !invalid.is_empty() {
+            assert!(!error.contains(invalid.as_str()));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn embeddings_configuration_parses_strictly() -> Result<(), Box<dyn std::error::Error>> {
     let defaults = Config::default();
     assert!(defaults.provider.embeddings.is_none());

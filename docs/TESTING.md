@@ -20,6 +20,10 @@ The process test starts the real binary with a disposable database, blob root, J
 and fake authenticated digest source. It proves that `check-config` does not bind, scripted recap
 needs no inference credentials, readiness waits for both recap dependencies, `/analyze` is absent,
 `SIGTERM` drains within the bound, and a restart reopens the same durable and reprobes the source.
+The result-reader matrix uses disposable PostgreSQL rows and the real router to prove completed-only
+reads, exact digest/schema revalidation, uniform missing/wrong authorization, scoped absence,
+finite no-store responses, safe `502`/`503` failures, disabled/enabled process startup, restart, and
+bounded drain. All identifiers, secrets, and recap text are synthetic.
 
 Default tests use the scripted provider, recorded fixtures, and the loopback fake transport; none of
 them makes an external inference request. Database tests create disposable databases from the

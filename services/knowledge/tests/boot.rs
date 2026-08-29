@@ -39,6 +39,67 @@ async fn configured_process_serves_admin_without_inference_credentials()
 }
 
 #[tokio::test]
+async fn result_reader_configuration_survives_restart_and_bounded_drain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let database_name: String = sqlx::query_scalar("select current_database()")
+        .fetch_one(database.database.pool())
+        .await?;
+    let database_url = test_database_url(&database_name)?;
+    let blob_root = std::env::temp_dir().join(format!("knowledge-reader-boot-{database_name}"));
+    std::fs::create_dir_all(&blob_root)?;
+    let absent_path = "/internal/channel-digest-results/018f0000-0000-7000-8000-000000000218";
+
+    let (mut disabled, disabled_address) = spawn_reader_process(&database_url, &blob_root, None)?;
+    assert_eq!(http_status(disabled_address, absent_path)?, 404);
+    stop_process(&mut disabled)?;
+
+    for _restart in 0..2 {
+        let (mut child, address) = spawn_reader_process(
+            &database_url,
+            &blob_root,
+            Some("knowledge-reader-boot-secret"),
+        )?;
+        assert_eq!(
+            http_status_with_bearer(address, absent_path, Some("wrong-reader-secret"))?,
+            401
+        );
+        assert_eq!(
+            http_status_with_bearer(address, absent_path, Some("knowledge-reader-boot-secret"))?,
+            404
+        );
+        stop_process(&mut child)?;
+    }
+
+    let _ignored = std::fs::remove_dir_all(blob_root);
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn spawn_reader_process(
+    database_url: &str,
+    blob_root: &std::path::Path,
+    secret: Option<&str>,
+) -> Result<(Child, SocketAddr), Box<dyn std::error::Error>> {
+    let reserved = TcpListener::bind("127.0.0.1:0")?;
+    let address = reserved.local_addr()?;
+    let mut command = configured_command(address, database_url, blob_root);
+    if let Some(secret) = secret {
+        command.env(
+            "RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET",
+            secret,
+        );
+    }
+    drop(reserved);
+    let mut child = command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    exercise_process(&mut child, address)?;
+    Ok((child, address))
+}
+
+#[tokio::test]
 async fn channel_recap_scripted_configuration_requires_no_inference_credentials()
 -> Result<(), Box<dyn std::error::Error>> {
     let database_url = "postgres://knowledge:knowledge@127.0.0.1:5432/knowledge";
@@ -658,11 +719,22 @@ fn exercise_process(
 }
 
 fn http_status(address: SocketAddr, path: &str) -> Result<u16, Box<dyn std::error::Error>> {
+    http_status_with_bearer(address, path, None)
+}
+
+fn http_status_with_bearer(
+    address: SocketAddr,
+    path: &str,
+    bearer: Option<&str>,
+) -> Result<u16, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(100))?;
     stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let authorization = bearer.map_or_else(String::new, |secret| {
+        format!("Authorization: Bearer {secret}\r\n")
+    });
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Connection: close\r\n\r\n"
     )?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;

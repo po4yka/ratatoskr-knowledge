@@ -1838,6 +1838,7 @@ dependencies = [
  "ratatoskr-knowledge",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror",
  "tokio",

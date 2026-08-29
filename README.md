@@ -54,7 +54,7 @@ analysis, and persists the evidence and result.
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
   regeneration after a model, chunking, or lexical-projection change;
 - an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and a loopback-only
-  `/internal/search` adapter;
+  `/internal/search` adapter plus an independently authenticated channel-recap result reader;
 - tenant-scoped user content over accepted analyses: normalized tags and transactional tag merge,
   ordered collections of analysis outputs or immutable source revisions, read/favorite state,
   typed feedback, and Document-IR block anchored highlights.
@@ -146,6 +146,7 @@ RATATOSKR__CHANNEL_RECAP__ENABLED
 RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE
 RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL
 RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET
+RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET
 RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT
 RATATOSKR__CHANNEL_RECAP__BUS_STREAM
 RATATOSKR__CHANNEL_RECAP__BUS_DURABLE
@@ -159,6 +160,9 @@ Unknown or invalid `RATATOSKR__` keys stop startup without printing their values
 `RATATOSKR__PROVIDER__OPENROUTER__API_KEY` the process stays offline and the real adapter cannot
 make a request; without `RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY` the process serves lexical
 search only and performs no embedding calls.
+Without `RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET`, the result-reader route is not
+installed. Supplying it enables only that route; it does not enable the recap worker and it is not
+interchangeable with the digest-source credential used in the opposite direction.
 The credential redacts itself in diagnostics and serialization and is never persisted to the
 database; ordinary logs carry only bounded facts such as provider, model, outcome class, status,
 token counts, and latency. Validate
@@ -180,6 +184,23 @@ an authenticated `GET /ready` from the loopback digest source. `SIGINT` or `SIGT
 fail, drains the consumer, and joins it within the configured shutdown bound. Scripted recap mode
 requires no inference credential; `openrouter` mode requires the existing controlled provider
 configuration and spend limits.
+
+## Internal channel-recap result surface
+
+`GET /internal/channel-digest-results/{analysis_id}` is installed on the loopback admin listener
+only when the dedicated result-reader secret is configured. It accepts `Authorization: Bearer
+<secret>` and one UUID from the published recap completion fact. A successful response contains
+only `analysis_id`, its exact SHA-256 `result_digest`, and the closed typed `recap`; it is bounded to
+64 KiB and uses `Cache-Control: no-store`. Missing, incomplete, failed, foreign-family, and random
+identifiers are all the same scoped `404`. Stored digest/schema failure is `502`; database
+unavailability is `503`; no failure returns partial recap content.
+
+For deployment, keep the listener on loopback and inject this secret from the service secret source
+into Knowledge and the channel-digest reader only. Rotate it by installing a new value in both
+secret sources, restarting Knowledge first and its reader second, and probing a random UUID: the
+new credential must receive scoped `404` while the old credential receives `401`. Rollback reverses
+the consumer first, then Knowledge. Never print either value or pass it on a command line captured
+by process listings.
 
 ## Internal user-content surface
 
