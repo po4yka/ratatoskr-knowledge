@@ -228,6 +228,193 @@ create index if not exists source_analysis_inbox_archive_idx
     on knowledge.source_analysis_inbox (tenant_ref, archive_id, source_id)
     where archive_id is not null;
 
+-- Channel recap commands are retained as content-free typed receipts. The natural request identity
+-- converges redeliveries carrying a different transport command id.
+create table if not exists knowledge.channel_recap_inbox (
+    command_id uuid primary key,
+    owner_ref text not null,
+    operation_id uuid not null,
+    digest_run_id uuid not null,
+    manifest_ref text not null,
+    manifest_digest_hex text not null,
+    window_start_at timestamptz not null,
+    window_end_at timestamptz not null,
+    source_count integer not null,
+    channel_count integer not null,
+    analysis_family text not null,
+    analysis_contract text not null,
+    output_language text not null,
+    request_payload jsonb not null,
+    accepted_at timestamptz not null default now(),
+    constraint channel_recap_inbox_owner_check
+        check (owner_ref ~ '^user:[0-9a-f-]{36}$'),
+    constraint channel_recap_inbox_manifest_ref_check
+        check (manifest_ref ~ '^channel-digest-manifest:[0-9a-f-]{36}$'),
+    constraint channel_recap_inbox_manifest_digest_check
+        check (manifest_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint channel_recap_inbox_window_check
+        check (window_start_at < window_end_at and window_end_at <= window_start_at + interval '7 days'),
+    constraint channel_recap_inbox_count_check
+        check (source_count between 1 and 100 and channel_count between 1 and 20
+            and channel_count <= source_count),
+    constraint channel_recap_inbox_family_check
+        check (analysis_family = 'channel_digest_recap'),
+    constraint channel_recap_inbox_contract_check
+        check (analysis_contract = 'channel_digest_recap.v1'),
+    constraint channel_recap_inbox_language_check
+        check (output_language in ('ru', 'en')),
+    constraint channel_recap_inbox_payload_object_check
+        check (jsonb_typeof(request_payload) = 'object'),
+    constraint channel_recap_inbox_semantic_key unique (
+        owner_ref,
+        digest_run_id,
+        manifest_digest_hex,
+        analysis_contract,
+        output_language
+    )
+);
+
+create table if not exists knowledge.channel_recap_runs (
+    recap_run_id uuid primary key,
+    inbox_command_id uuid not null unique
+        references knowledge.channel_recap_inbox(command_id),
+    owner_ref text not null,
+    digest_run_id uuid not null,
+    manifest_digest_hex text not null,
+    analysis_family text not null,
+    analysis_contract text not null,
+    prompt_version text not null,
+    context_version text not null,
+    output_language text not null,
+    state text not null default 'received',
+    manifest_attempt_count smallint not null default 0,
+    manifest_retry_not_before timestamptz,
+    attempt_count smallint not null default 0,
+    failure_code text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint channel_recap_runs_state_check check (state in (
+        'received', 'manifest_retry', 'manifest_verified', 'context_prepared',
+        'model_requested', 'response_received', 'schema_validated', 'repaired',
+        'persisted', 'completed', 'failed'
+    )),
+    constraint channel_recap_runs_attempt_check check (attempt_count between 0 and 2),
+    constraint channel_recap_runs_manifest_attempt_check check (
+        manifest_attempt_count between 0 and 2
+        and ((state = 'manifest_retry') = (manifest_retry_not_before is not null))
+    ),
+    constraint channel_recap_runs_terminal_check check (
+        (state = 'failed' and failure_code is not null)
+        or (state <> 'failed' and failure_code is null)
+    ),
+    constraint channel_recap_runs_identity_key unique (
+        owner_ref,
+        digest_run_id,
+        manifest_digest_hex,
+        analysis_contract,
+        prompt_version,
+        context_version,
+        output_language
+    )
+);
+
+-- Exact accepted source evidence is committed before provider work. The JSON value is bounded by
+-- the source client and verifier; the scalar columns preserve the natural immutable identity.
+create table if not exists knowledge.channel_recap_manifests (
+    recap_run_id uuid primary key references knowledge.channel_recap_runs(recap_run_id),
+    owner_ref text not null,
+    digest_run_id uuid not null,
+    manifest_ref text not null,
+    manifest_digest_hex text not null,
+    window_start_at timestamptz not null,
+    window_end_at timestamptz not null,
+    source_count integer not null,
+    channel_count integer not null,
+    manifest jsonb not null,
+    accepted_at timestamptz not null default now(),
+    constraint channel_recap_manifests_digest_check
+        check (manifest_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint channel_recap_manifests_window_check check (window_start_at < window_end_at),
+    constraint channel_recap_manifests_count_check check (
+        source_count between 1 and 100 and channel_count between 1 and 20
+        and channel_count <= source_count
+    ),
+    constraint channel_recap_manifests_object_check check (jsonb_typeof(manifest) = 'object'),
+    constraint channel_recap_manifests_identity_key unique (
+        owner_ref, digest_run_id, manifest_ref, manifest_digest_hex
+    )
+);
+
+create table if not exists knowledge.channel_recap_attempts (
+    recap_run_id uuid not null references knowledge.channel_recap_runs(recap_run_id),
+    ordinal smallint not null,
+    reason text not null,
+    provider text not null,
+    model text not null,
+    provider_request_id text,
+    raw_response jsonb,
+    raw_response_digest_hex text,
+    input_tokens bigint,
+    output_tokens bigint,
+    outcome text not null,
+    validation_code text,
+    failure_class text,
+    duration_ms integer not null,
+    created_at timestamptz not null default now(),
+    primary key (recap_run_id, ordinal),
+    constraint channel_recap_attempts_ordinal_check check (ordinal between 1 and 2),
+    constraint channel_recap_attempts_reason_check check (reason in ('initial', 'retry', 'repair')),
+    constraint channel_recap_attempts_outcome_check check (outcome in (
+        'requested', 'response_received', 'accepted', 'invalid',
+        'transient_failure', 'permanent_failure'
+    )),
+    constraint channel_recap_attempts_digest_check check (
+        raw_response_digest_hex is null or raw_response_digest_hex ~ '^[0-9a-f]{64}$'
+    ),
+    constraint channel_recap_attempts_raw_link_check check (
+        (raw_response is null) = (raw_response_digest_hex is null)
+    ),
+    constraint channel_recap_attempts_usage_check check (
+        (input_tokens is null or input_tokens >= 0) and (output_tokens is null or output_tokens >= 0)
+    ),
+    constraint channel_recap_attempts_duration_check check (duration_ms >= 0),
+    constraint channel_recap_attempts_validation_check check (
+        validation_code is null or validation_code in ('json_syntax', 'schema', 'grounding')
+    ),
+    constraint channel_recap_attempts_failure_check check (
+        failure_class is null or failure_class in (
+            'timeout', 'network', 'rate_limited', 'server_error', 'auth_error',
+            'request_invalid', 'size_limit', 'budget_exhausted', 'unclassified'
+        )
+    )
+);
+
+create table if not exists knowledge.channel_recap_results (
+    result_id uuid primary key,
+    recap_run_id uuid not null unique references knowledge.channel_recap_runs(recap_run_id),
+    result jsonb not null,
+    result_digest_hex text not null,
+    coverage jsonb not null,
+    created_at timestamptz not null default now(),
+    constraint channel_recap_results_result_object_check check (jsonb_typeof(result) = 'object'),
+    constraint channel_recap_results_coverage_object_check check (jsonb_typeof(coverage) = 'object'),
+    constraint channel_recap_results_digest_check check (result_digest_hex ~ '^[0-9a-f]{64}$')
+);
+
+create table if not exists knowledge.channel_recap_outbox (
+    outbox_id uuid primary key,
+    recap_run_id uuid not null unique references knowledge.channel_recap_runs(recap_run_id),
+    subject text not null,
+    payload jsonb not null,
+    created_at timestamptz not null default now(),
+    published_at timestamptz,
+    constraint channel_recap_outbox_subject_check check (subject in (
+        'knowledge.channel_digest_recap.completed.v1',
+        'knowledge.channel_digest_recap.failed.v1'
+    )),
+    constraint channel_recap_outbox_payload_object_check check (jsonb_typeof(payload) = 'object')
+);
+
 -- Authoritative archive deletion facts are retained after their derived source snapshots are
 -- removed so an old at-least-once conversation delivery cannot recreate a tombstoned projection.
 create table if not exists knowledge.ai_archive_tombstones (

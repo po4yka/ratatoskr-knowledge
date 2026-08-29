@@ -11,7 +11,9 @@ use ratatoskr_knowledge::{
     DeletionReceipt, EmbeddingsSettings, HybridRetriever, Indexer, IndexerLimits,
     OpenAiCompatibleEmbeddings, RateLimiter, RetryPolicy, TokenPrices, init_telemetry,
 };
-use ratatoskr_knowledge_service::{HybridSearchRetriever, Lifecycle, Metrics, admin_router};
+use ratatoskr_knowledge_service::{
+    HybridSearchRetriever, Lifecycle, Metrics, admin_router, spawn_channel_recap_worker,
+};
 use tokio::sync::watch;
 
 #[tokio::main]
@@ -27,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     init_telemetry()?;
     tokio::fs::create_dir_all(&config.storage.blob_root).await?;
-    let _blobs = BlobStore::new(
+    let blobs = BlobStore::new(
         &config.storage.blob_root,
         config
             .limits
@@ -42,9 +44,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     database.apply_schema().await?;
 
-    let lifecycle = Lifecycle::starting();
+    let lifecycle = if config.channel_recap.enabled {
+        Lifecycle::starting_with_channel_recap()
+    } else {
+        Lifecycle::starting()
+    };
     let metrics = Arc::new(Metrics::new());
     let (drain_tx, drain_rx) = watch::channel(false);
+    let recap_worker = config.channel_recap.enabled.then(|| {
+        spawn_channel_recap_worker(
+            config.clone(),
+            database.clone(),
+            blobs.clone(),
+            lifecycle.clone(),
+            drain_rx.clone(),
+        )
+    });
 
     // One shared control stack backs both background indexing and hybrid
     // search; without an embeddings credential both stay offline.
@@ -64,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(config.admin.listen_address).await?;
     lifecycle.mark_ready();
-    serve_admin(
+    let serve_result = serve_admin(
         listener,
         AdminServer {
             lifecycle,
@@ -72,11 +87,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metrics,
             retriever,
         },
-        drain_tx,
+        drain_tx.clone(),
         drain_rx,
         Duration::from_millis(config.limits.shutdown_timeout_ms),
     )
-    .await?;
+    .await;
+    let _ignored = drain_tx.send(true);
+    if let Some(worker) = recap_worker {
+        tokio::time::timeout(
+            Duration::from_millis(config.limits.shutdown_timeout_ms),
+            worker,
+        )
+        .await??;
+    }
+    serve_result?;
     database.close().await;
     Ok(())
 }

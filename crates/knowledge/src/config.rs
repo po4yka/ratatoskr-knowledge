@@ -57,6 +57,47 @@ pub struct Config {
     pub limits: Limits,
     /// Real provider configuration; absent keeps the process offline.
     pub provider: ProviderConfig,
+    /// Optional channel-digest recap worker and exact transport topology.
+    pub channel_recap: ChannelRecapConfig,
+}
+
+/// Provider selection for the recap worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelRecapProviderMode {
+    /// Deterministic offline provider for fixtures and composed acceptance.
+    Scripted,
+    /// Configured controlled `OpenRouter` provider.
+    OpenRouter,
+}
+
+/// Exact dormant channel-recap consumer and digest-source configuration.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelRecapConfig {
+    /// Whether the recap consumer is part of this process.
+    pub enabled: bool,
+    /// Provider mode; scripted mode needs no inference credential.
+    pub provider_mode: ChannelRecapProviderMode,
+    /// Loopback digest-source origin.
+    pub digest_source_base_url: String,
+    /// Service-to-service digest-source credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest_source_service_secret: Option<crate::DigestSourceSecret>,
+    /// NATS or TLS NATS endpoint.
+    pub bus_endpoint: String,
+    /// Canonical pre-provisioned command stream.
+    pub bus_stream: String,
+    /// Canonical pre-provisioned durable name.
+    pub bus_durable: String,
+    /// Exact recap command subject.
+    pub bus_subject: String,
+    /// Optional absolute `NKey` seed file; loopback scripted profiles may use anonymous NATS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bus_credentials_file: Option<PathBuf>,
+    /// Maximum messages pulled per batch.
+    pub fetch_batch: u32,
+    /// Exact durable acknowledgement deadline.
+    pub ack_wait_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -235,6 +276,7 @@ impl Config {
         }
         config.provider.openrouter = draft.finish()?;
         config.provider.embeddings = embeddings_draft.finish()?;
+        validate_channel_recap(&config)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -275,6 +317,9 @@ fn apply_entry(
     }
     if key.starts_with("RATATOSKR__PROVIDER__EMBEDDINGS__") {
         return apply_embeddings_entry(embeddings_draft, key, value);
+    }
+    if key.starts_with("RATATOSKR__CHANNEL_RECAP__") {
+        return apply_channel_recap_entry(&mut config.channel_recap, key, value);
     }
     match key {
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
@@ -323,6 +368,159 @@ fn apply_entry(
         _ => return Err(ConfigError::new(key, "is not recognized")),
     }
     Ok(())
+}
+
+fn apply_channel_recap_entry(
+    recap: &mut ChannelRecapConfig,
+    key: &str,
+    value: &str,
+) -> Result<(), ConfigError> {
+    match key {
+        "RATATOSKR__CHANNEL_RECAP__ENABLED" => {
+            recap.enabled = value
+                .parse::<bool>()
+                .map_err(|_| ConfigError::new(key, "must be true or false"))?;
+        }
+        "RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE" => {
+            recap.provider_mode = match value {
+                "scripted" => ChannelRecapProviderMode::Scripted,
+                "openrouter" => ChannelRecapProviderMode::OpenRouter,
+                _ => return Err(ConfigError::new(key, "must be scripted or openrouter")),
+            };
+        }
+        "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL" => {
+            value.clone_into(&mut recap.digest_source_base_url);
+        }
+        "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET" => {
+            if value.is_empty() {
+                return Err(ConfigError::new(key, "must be a non-empty credential"));
+            }
+            recap.digest_source_service_secret =
+                Some(crate::DigestSourceSecret::new(value.to_owned()));
+        }
+        "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT" => value.clone_into(&mut recap.bus_endpoint),
+        "RATATOSKR__CHANNEL_RECAP__BUS_STREAM" => value.clone_into(&mut recap.bus_stream),
+        "RATATOSKR__CHANNEL_RECAP__BUS_DURABLE" => value.clone_into(&mut recap.bus_durable),
+        "RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT" => value.clone_into(&mut recap.bus_subject),
+        "RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE" => {
+            recap.bus_credentials_file = Some(PathBuf::from(value));
+        }
+        "RATATOSKR__CHANNEL_RECAP__FETCH_BATCH" => {
+            recap.fetch_batch = parse_positive(key, value)?;
+        }
+        "RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS" => {
+            recap.ack_wait_seconds = parse_positive(key, value)?;
+        }
+        _ => return Err(ConfigError::new(key, "is not recognized")),
+    }
+    Ok(())
+}
+
+fn validate_channel_recap(config: &Config) -> Result<(), ConfigError> {
+    let recap = &config.channel_recap;
+    if !recap.enabled {
+        return Ok(());
+    }
+    if recap.digest_source_service_secret.is_none() {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET",
+            "is required when channel recap is enabled",
+        ));
+    }
+    let source = reqwest::Url::parse(&recap.digest_source_base_url).map_err(|_| {
+        ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL",
+            "must be a loopback HTTP URL",
+        )
+    })?;
+    if source.scheme() != "http"
+        || !url_is_loopback(&source)
+        || !source.username().is_empty()
+        || source.password().is_some()
+        || source.query().is_some()
+        || source.fragment().is_some()
+    {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL",
+            "must be a loopback HTTP URL",
+        ));
+    }
+    let bus = reqwest::Url::parse(&recap.bus_endpoint).map_err(|_| {
+        ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+            "must be a valid NATS URL",
+        )
+    })?;
+    let allowed_bus = matches!(bus.scheme(), "tls" | "nats")
+        && (bus.scheme() == "tls" || url_is_loopback(&bus))
+        && bus.username().is_empty()
+        && bus.password().is_none()
+        && bus.query().is_none()
+        && bus.fragment().is_none();
+    if !allowed_bus {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+            "must use TLS or loopback NATS",
+        ));
+    }
+    if let Some(path) = recap.bus_credentials_file.as_ref()
+        && (!path.is_absolute() || !path.is_file())
+    {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE",
+            "must be a readable absolute file",
+        ));
+    }
+    if bus.scheme() == "tls" && recap.bus_credentials_file.is_none() {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE",
+            "must be a readable absolute file for remote TLS NATS",
+        ));
+    }
+    for (actual, expected, key) in [
+        (
+            recap.bus_stream.as_str(),
+            "ratatoskr_commands",
+            "RATATOSKR__CHANNEL_RECAP__BUS_STREAM",
+        ),
+        (
+            recap.bus_durable.as_str(),
+            "ratatoskr_knowledge_channel_recap",
+            "RATATOSKR__CHANNEL_RECAP__BUS_DURABLE",
+        ),
+        (
+            recap.bus_subject.as_str(),
+            "cmd.knowledge.channel_digest_recap.requested.v1",
+            "RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT",
+        ),
+    ] {
+        if actual != expected {
+            return Err(ConfigError::new(
+                key,
+                "must equal the canonical fleet value",
+            ));
+        }
+    }
+    if !(1..=256).contains(&recap.fetch_batch) || !(1..=600).contains(&recap.ack_wait_seconds) {
+        return Err(ConfigError::new(
+            "RATATOSKR__CHANNEL_RECAP__FETCH_BATCH",
+            "fetch and acknowledgement limits are invalid",
+        ));
+    }
+    if recap.provider_mode == ChannelRecapProviderMode::OpenRouter
+        && config.provider.openrouter.is_none()
+    {
+        return Err(ConfigError::new(
+            "RATATOSKR__PROVIDER__OPENROUTER__API_KEY",
+            "is required for openrouter recap mode",
+        ));
+    }
+    Ok(())
+}
+
+fn url_is_loopback(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1"))
 }
 
 fn apply_limits_entry(limits: &mut Limits, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -611,6 +809,19 @@ impl Default for Config {
             provider: ProviderConfig {
                 openrouter: None,
                 embeddings: None,
+            },
+            channel_recap: ChannelRecapConfig {
+                enabled: false,
+                provider_mode: ChannelRecapProviderMode::Scripted,
+                digest_source_base_url: "http://127.0.0.1:8098/".to_owned(),
+                digest_source_service_secret: None,
+                bus_endpoint: "nats://127.0.0.1:4222".to_owned(),
+                bus_stream: "ratatoskr_commands".to_owned(),
+                bus_durable: "ratatoskr_knowledge_channel_recap".to_owned(),
+                bus_subject: "cmd.knowledge.channel_digest_recap.requested.v1".to_owned(),
+                bus_credentials_file: None,
+                fetch_batch: 32,
+                ack_wait_seconds: 30,
             },
         }
     }

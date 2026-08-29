@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use ratatoskr_knowledge::test_support::TestDatabase;
+use ratatoskr_knowledge::test_support::{FakeReply, FakeTransport, TestDatabase};
 
 #[tokio::test]
 async fn configured_process_serves_admin_without_inference_credentials()
@@ -36,6 +36,152 @@ async fn configured_process_serves_admin_without_inference_credentials()
     let _ignored = std::fs::remove_dir_all(blob_root);
     database.cleanup().await?;
     result
+}
+
+#[tokio::test]
+async fn channel_recap_scripted_configuration_requires_no_inference_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database_url = "postgres://knowledge:knowledge@127.0.0.1:5432/knowledge";
+    let reserved = TcpListener::bind("127.0.0.1:0")?;
+    let address = reserved.local_addr()?;
+    let source = TcpListener::bind("127.0.0.1:0")?;
+    let blob_root = std::env::temp_dir().join(format!("knowledge-recap-boot-{}", address.port()));
+    std::fs::create_dir_all(&blob_root)?;
+
+    let status = configured_command(address, database_url, &blob_root)
+        .env("RATATOSKR__CHANNEL_RECAP__ENABLED", "true")
+        .env("RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE", "scripted")
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL",
+            format!("http://{}/", source.local_addr()?),
+        )
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET",
+            "synthetic-service-secret",
+        )
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+            "nats://127.0.0.1:4222",
+        )
+        .env("RATATOSKR__CHANNEL_RECAP__BUS_STREAM", "ratatoskr_commands")
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__BUS_DURABLE",
+            "ratatoskr_knowledge_channel_recap",
+        )
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT",
+            "cmd.knowledge.channel_digest_recap.requested.v1",
+        )
+        .arg("check-config")
+        .status()?;
+
+    assert!(
+        status.success(),
+        "scripted recap configuration must not require inference credentials"
+    );
+    drop(source);
+    drop(reserved);
+    let _ignored = std::fs::remove_dir_all(blob_root);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_recap_consumer_source_readiness_drains_and_resumes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let database_name: String = sqlx::query_scalar("select current_database()")
+        .fetch_one(database.database.pool())
+        .await?;
+    let database_url = test_database_url(&database_name)?;
+    let blob_root = std::env::temp_dir().join(format!("knowledge-recap-runtime-{database_name}"));
+    std::fs::create_dir_all(&blob_root)?;
+    let source = FakeTransport::start(
+        std::iter::repeat_with(|| FakeReply::bytes(200, Vec::new()))
+            .take(16)
+            .collect(),
+    )
+    .await?;
+    let nats_url = std::env::var("KNOWLEDGE_TEST_NATS_URL")
+        .unwrap_or_else(|_| "nats://127.0.0.1:14223".to_owned());
+    provision_recap_consumer(&nats_url).await?;
+
+    for _restart in 0..2 {
+        let reserved = TcpListener::bind("127.0.0.1:0")?;
+        let address = reserved.local_addr()?;
+        let mut command = configured_command(address, &database_url, &blob_root);
+        configure_recap_runtime(&mut command, source.local_addr(), &nats_url);
+        drop(reserved);
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        exercise_process(&mut child, address)?;
+        stop_process(&mut child)?;
+    }
+
+    let requests = source.recorded()?;
+    assert!(
+        requests.len() >= 2,
+        "source readiness must be reprobed after restart"
+    );
+    assert!(requests.iter().all(|request| request.path == "/ready"));
+    assert!(requests.iter().all(|request| {
+        request.authorization.as_deref() == Some("Bearer synthetic-service-secret")
+    }));
+    let _ignored = std::fs::remove_dir_all(blob_root);
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn configure_recap_runtime(command: &mut Command, source: SocketAddr, nats_url: &str) {
+    command
+        .env("RATATOSKR__CHANNEL_RECAP__ENABLED", "true")
+        .env("RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE", "scripted")
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL",
+            format!("http://{source}/"),
+        )
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET",
+            "synthetic-service-secret",
+        )
+        .env("RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT", nats_url)
+        .env("RATATOSKR__CHANNEL_RECAP__BUS_STREAM", "ratatoskr_commands")
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__BUS_DURABLE",
+            "ratatoskr_knowledge_channel_recap",
+        )
+        .env(
+            "RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT",
+            "cmd.knowledge.channel_digest_recap.requested.v1",
+        );
+}
+
+async fn provision_recap_consumer(nats_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let client = async_nats::connect(nats_url).await?;
+    let context = async_nats::jetstream::new(client);
+    let stream = context
+        .get_or_create_stream(async_nats::jetstream::stream::Config {
+            name: "ratatoskr_commands".to_owned(),
+            subjects: vec!["cmd.knowledge.channel_digest_recap.requested.v1".to_owned()],
+            max_messages: 1_000,
+            max_bytes: 16_777_216,
+            ..async_nats::jetstream::stream::Config::default()
+        })
+        .await?;
+    stream
+        .get_or_create_consumer(
+            "ratatoskr_knowledge_channel_recap",
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some("ratatoskr_knowledge_channel_recap".to_owned()),
+                filter_subject: "cmd.knowledge.channel_digest_recap.requested.v1".to_owned(),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(30),
+                ..async_nats::jetstream::consumer::pull::Config::default()
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 /// One source seeded with every derived row kind for deletion.

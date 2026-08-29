@@ -46,9 +46,10 @@ source file above 850 lines.
 4. Add grounding/citation, injection, cost, latency, and authorization tests.
 5. Reindex or backfill through explicit versioned jobs, never hidden request-time mutation.
 
-Default tests use the scripted provider, recorded fixtures, and a loopback fake transport; they need
-no inference credentials and never reach the live API. Database tests create disposable databases
-from the current `schema.sql`; this development repository has no migrations. The live `OpenRouter`
+Default tests use the scripted provider, recorded fixtures, loopback fake transports, and a
+disposable local `JetStream`; they need no inference credentials and never reach the live API.
+Database tests create disposable databases from the current `schema.sql`; this development
+repository has no migrations. The live `OpenRouter`
 smoke check (`cargo run --locked -p ratatoskr-knowledge --example live_openrouter_smoke`) spends
 real credit and is never part of the gate.
 
@@ -58,11 +59,13 @@ Run the committed quality corpus without credentials, sockets, or live provider 
 
 ```bash
 cargo run --locked -p ratatoskr-knowledge --example eval_harness
+cargo run --locked -p ratatoskr-knowledge --example channel_recap_eval
 ```
 
 The output is a timestamp-free report ordered by response-set label and fixture id, so it can be
 compared byte-for-byte between prompt or model recordings. It reads only
-`crates/knowledge/fixtures/eval/`.
+`crates/knowledge/fixtures/eval/`. The channel recap evaluator similarly uses only its committed
+synthetic manifest/result corpus and opens no socket.
 
 The service also exposes non-listening one-shot jobs:
 
@@ -114,6 +117,18 @@ export KNOWLEDGE_TEST_DATABASE_URL=postgres://knowledge:knowledge@127.0.0.1:1543
 
 A stock `postgres:17` image fails schema application with "extension vector is not available"; that
 error means the image, not the code.
+
+The recap process boot test also expects a disposable JetStream endpoint. Start the digest-pinned
+fixture on the documented local port before the full gate:
+
+```bash
+docker run -d --name ratatoskr-knowledge-nats -p 127.0.0.1:14223:4222 \
+  nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da -js
+export KNOWLEDGE_TEST_NATS_URL=nats://127.0.0.1:14223
+```
+
+The test provisions only its fixed command stream and durable on this disposable broker. Production
+topology remains an operator-owned precondition; Knowledge never creates or widens it.
 
 ## The Rust skills in this repository
 
