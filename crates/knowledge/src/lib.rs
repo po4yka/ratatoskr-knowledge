@@ -31,6 +31,7 @@ mod provider;
 mod rate_limit;
 mod reindex;
 mod repository_analysis;
+mod result_reader_secret;
 mod runs;
 pub mod search;
 mod source_inbox;
@@ -76,8 +77,8 @@ pub use channel_digest_recap_result::{
 };
 pub use channel_digest_recap_store::{
     ChannelRecapAdmissionError, ChannelRecapInbox, ChannelRecapInboxAdmission,
-    ChannelRecapInboxError, ChannelRecapRunError, ChannelRecapRunState, ChannelRecapRunStore,
-    admit_channel_digest_recap,
+    ChannelRecapInboxError, ChannelRecapResultProjection, ChannelRecapResultReadError,
+    ChannelRecapRunError, ChannelRecapRunState, ChannelRecapRunStore, admit_channel_digest_recap,
 };
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
 pub use config::{
@@ -138,6 +139,7 @@ pub use reindex::{
 pub use repository_analysis::{
     RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RepositoryAnalysisError,
 };
+pub use result_reader_secret::ResultReaderSecret;
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,
     SourceReference, SourceRevision,

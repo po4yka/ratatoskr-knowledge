@@ -4,6 +4,8 @@ use std::{error, fmt};
 
 use serde::Serialize;
 
+use crate::result_reader_secret::ResultReaderSecret;
+
 const ENV_PREFIX: &str = "RATATOSKR__";
 
 /// Vector dimensionality every stored embedding must carry.
@@ -83,6 +85,9 @@ pub struct ChannelRecapConfig {
     /// Service-to-service digest-source credential.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest_source_service_secret: Option<crate::DigestSourceSecret>,
+    /// Dedicated credential enabling authenticated recap result reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_reader_service_secret: Option<ResultReaderSecret>,
     /// NATS or TLS NATS endpoint.
     pub bus_endpoint: String,
     /// Canonical pre-provisioned command stream.
@@ -397,6 +402,15 @@ fn apply_channel_recap_entry(
             }
             recap.digest_source_service_secret =
                 Some(crate::DigestSourceSecret::new(value.to_owned()));
+        }
+        "RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET" => {
+            if value.is_empty() || value.len() > 4_096 {
+                return Err(ConfigError::new(
+                    key,
+                    "must be a non-empty credential of at most 4096 bytes",
+                ));
+            }
+            recap.result_reader_service_secret = Some(ResultReaderSecret::new(value.to_owned()));
         }
         "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT" => value.clone_into(&mut recap.bus_endpoint),
         "RATATOSKR__CHANNEL_RECAP__BUS_STREAM" => value.clone_into(&mut recap.bus_stream),
@@ -815,6 +829,7 @@ impl Default for Config {
                 provider_mode: ChannelRecapProviderMode::Scripted,
                 digest_source_base_url: "http://127.0.0.1:8098/".to_owned(),
                 digest_source_service_secret: None,
+                result_reader_service_secret: None,
                 bus_endpoint: "nats://127.0.0.1:4222".to_owned(),
                 bus_stream: "ratatoskr_commands".to_owned(),
                 bus_durable: "ratatoskr_knowledge_channel_recap".to_owned(),

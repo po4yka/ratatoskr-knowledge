@@ -53,6 +53,18 @@ repository has no migrations. The live `OpenRouter`
 smoke check (`cargo run --locked -p ratatoskr-knowledge --example live_openrouter_smoke`) spends
 real credit and is never part of the gate.
 
+To dry-run the result-reader configuration without binding a listener, pass the value through the
+environment and use the production parser:
+
+```bash
+RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET=test-only-reader-secret \
+  cargo run --locked -p ratatoskr-knowledge-service -- check-config
+```
+
+The route test uses an in-process router and disposable database; the boot test starts the real
+binary twice and verifies enabled/disabled routing plus bounded `SIGTERM` drain. No gate command
+uses a production credential or a real recap.
+
 ## Offline evaluation and one-shot jobs
 
 Run the committed quality corpus without credentials, sockets, or live provider requests:

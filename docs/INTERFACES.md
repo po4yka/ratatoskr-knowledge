@@ -11,6 +11,8 @@ The loopback admin listener exposes only:
 - `GET /internal/search?tenant=<tenant>&q=<query>&read_state=read|unread&limit=<n>&offset=<n>`;
 - `POST /internal/user-content/command`, including the narrow `set_read_state` operation;
 - `GET /internal/user-content/collection`.
+- `GET /internal/channel-digest-results/{analysis_id}` when the dedicated result-reader secret is
+  configured.
 
 Every response uses `Cache-Control: no-store`. Search returns accepted analysis identity, effective
 read state, and bounded page facts under an explicit tenant; the read-state command preserves
@@ -18,6 +20,14 @@ favorite and hides foreign targets as missing. These routes remain loopback-only
 through Platform's authenticated public facade defined by workspace contract
 `library-search-read-state`. There is no public Knowledge HTTP route. The process accepts strict
 `RATATOSKR__` configuration and a `check-config` command that does not bind a socket.
+
+The channel-digest result route requires `Authorization: Bearer <dedicated result-reader secret>`
+before it parses the UUID. Its fixed response is `{analysis_id, result_digest, recap}` under 64 KiB.
+It reads only a completed `channel_recap_results` row, verifies the stored SHA-256 digest and closed
+recap schema on every request, and never exports provider attempts, prompt/source content, owner
+lookups, or storage metadata. Scoped absence is `404`, integrity failure is `502`, and store
+unavailability is `503`; all are content-free and non-cacheable. It is an internal Knowledge-owned
+read-through boundary for the channel-digest service, not a public analysis API.
 
 ## Current library interfaces
 
@@ -49,6 +59,8 @@ through Platform's authenticated public facade defined by workspace contract
   manifest authority headers, refuses redirects, and verifies readiness before the consumer is ready.
 - `ChannelRecapPipeline` uses the shared provider seam and two-call budget, stores raw bytes before
   validation, and commits exactly one typed completion or safe failure through the recap outbox.
+- `ChannelRecapRunStore::read_completed_result` joins a terminal recap run to its owned result by
+  opaque result identity, revalidates digest and type, and returns only the typed projection.
 
 There are no public analysis routes. The optional recap worker opens and verifies but never creates
 the fixed JetStream durable; Platform/source services remain owners of public APIs and channel data.

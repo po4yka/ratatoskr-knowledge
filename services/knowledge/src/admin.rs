@@ -4,16 +4,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use axum::Json;
 use axum::Router;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use ratatoskr_knowledge::{
-    AnalysisState, CollectionTarget, Database, FeedbackCategory, HighlightAnchor, RankingPath,
-    ReadState, ReadStateFilter, SearchQuery, UserContentError, add_collection_item,
-    create_collection, create_highlight, create_tag, list_collection_items, merge_tags,
-    move_collection_item, record_feedback, search_page, set_analysis_state, set_read_state,
-    tag_analysis, tag_name,
+    AnalysisState, ChannelRecapResultReadError, ChannelRecapRunStore, CollectionTarget, Database,
+    FeedbackCategory, HighlightAnchor, RankingPath, ReadState, ReadStateFilter, ResultReaderSecret,
+    SearchQuery, UserContentError, add_collection_item, create_collection, create_highlight,
+    create_tag, list_collection_items, merge_tags, move_collection_item, record_feedback,
+    search_page, set_analysis_state, set_read_state, tag_analysis, tag_name,
 };
 
 use crate::{HybridSearchRetriever, Metrics};
@@ -22,6 +22,10 @@ const STORAGE_READY: u8 = 1;
 const CHANNEL_RECAP_REQUIRED: u8 = 2;
 const CHANNEL_RECAP_READY: u8 = 4;
 const DRAINING: u8 = 8;
+const CHANNEL_DIGEST_RESULT_RESPONSE_BYTES: usize = 65_536;
+
+/// Fixed loopback route for one completed Knowledge-owned channel recap.
+pub const CHANNEL_DIGEST_RESULT_ROUTE: &str = "/internal/channel-digest-results/{analysis_id}";
 
 /// Shared process lifecycle used by readiness checks.
 #[derive(Debug, Clone)]
@@ -80,6 +84,7 @@ struct AdminState {
     database: Database,
     metrics: Arc<Metrics>,
     retriever: Option<Arc<HybridSearchRetriever>>,
+    result_reader_secret: Option<ResultReaderSecret>,
 }
 
 /// Builds the loopback operator router over lifecycle and storage handles.
@@ -91,14 +96,16 @@ pub fn admin_router(
     database: Database,
     metrics: Arc<Metrics>,
     retriever: Option<Arc<HybridSearchRetriever>>,
+    result_reader_secret: Option<ResultReaderSecret>,
 ) -> Router {
     let state = AdminState {
         lifecycle,
         database,
         metrics,
         retriever,
+        result_reader_secret,
     };
-    Router::new()
+    let router = Router::new()
         .route("/live", get(live))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics_route))
@@ -106,9 +113,118 @@ pub fn admin_router(
         .route("/v1/capabilities", get(capabilities))
         .route("/internal/search", get(search))
         .route("/internal/user-content/command", post(user_content_command))
-        .route("/internal/user-content/collection", get(collection_items))
+        .route("/internal/user-content/collection", get(collection_items));
+    let router = if state.result_reader_secret.is_some() {
+        router.route(CHANNEL_DIGEST_RESULT_ROUTE, get(channel_digest_result))
+    } else {
+        router
+    };
+    router
         .with_state(state)
         .layer(middleware::from_fn(no_store))
+}
+
+async fn channel_digest_result(
+    axum::extract::State(state): axum::extract::State<AdminState>,
+    headers: HeaderMap,
+    axum::extract::Path(analysis_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(secret) = &state.result_reader_secret else {
+        return channel_digest_result_failure(
+            StatusCode::NOT_FOUND,
+            "channel_digest_result_not_found",
+        );
+    };
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .map_or(&[][..], HeaderValue::as_bytes);
+    let expected = format!("Bearer {}", secret.expose_secret());
+    if !constant_time_equal(supplied, expected.as_bytes()) {
+        return channel_digest_result_failure(StatusCode::UNAUTHORIZED, "result_unauthorized");
+    }
+    let Ok(analysis_id) = uuid::Uuid::parse_str(&analysis_id) else {
+        return channel_digest_result_failure(StatusCode::BAD_REQUEST, "invalid_analysis_id");
+    };
+    match ChannelRecapRunStore::new(&state.database)
+        .read_completed_result(analysis_id)
+        .await
+    {
+        Ok(projection) => {
+            let value = serde_json::json!({
+                "analysis_id": projection.analysis_id,
+                "result_digest": {
+                    "algorithm": "sha256",
+                    "hex": projection.result_digest_hex,
+                },
+                "recap": projection.recap,
+            });
+            match serde_json::to_vec(&value) {
+                Ok(body) if body.len() <= CHANNEL_DIGEST_RESULT_RESPONSE_BYTES => (
+                    StatusCode::OK,
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    body,
+                )
+                    .into_response(),
+                _ => {
+                    tracing::warn!(
+                        route = "channel_digest_result",
+                        class = "response_integrity"
+                    );
+                    channel_digest_result_failure(
+                        StatusCode::BAD_GATEWAY,
+                        "channel_digest_result_integrity",
+                    )
+                }
+            }
+        }
+        Err(ChannelRecapResultReadError::NotFound) => {
+            channel_digest_result_failure(StatusCode::NOT_FOUND, "channel_digest_result_not_found")
+        }
+        Err(ChannelRecapResultReadError::Integrity) => {
+            tracing::warn!(route = "channel_digest_result", class = "stored_integrity");
+            channel_digest_result_failure(
+                StatusCode::BAD_GATEWAY,
+                "channel_digest_result_integrity",
+            )
+        }
+        Err(ChannelRecapResultReadError::Persistence(_)) => {
+            tracing::warn!(
+                route = "channel_digest_result",
+                class = "storage_unavailable"
+            );
+            channel_digest_result_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "channel_digest_result_unavailable",
+            )
+        }
+        Err(_) => {
+            tracing::warn!(route = "channel_digest_result", class = "read_unavailable");
+            channel_digest_result_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "channel_digest_result_unavailable",
+            )
+        }
+    }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    let length = left.len().max(right.len());
+    let left_bytes = left.iter().copied().chain(std::iter::repeat(0));
+    let right_bytes = right.iter().copied().chain(std::iter::repeat(0));
+    let difference = left_bytes
+        .zip(right_bytes)
+        .take(length)
+        .fold(left.len() ^ right.len(), |difference, (left, right)| {
+            difference | usize::from(left ^ right)
+        });
+    difference == 0
+}
+
+fn channel_digest_result_failure(status: StatusCode, code: &'static str) -> Response {
+    json_response(status, &serde_json::json!({"error": code}))
 }
 
 async fn live() -> StatusCode {

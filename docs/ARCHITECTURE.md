@@ -722,6 +722,13 @@ binding. Readiness becomes successful after storage and the current schema are r
 is enabled, after both recap dependencies are verified. `SIGINT` and `SIGTERM` start drain; the
 process joins the recap supervisor and server shutdown within its configured bound.
 
+An optional dedicated result-reader secret installs
+`GET /internal/channel-digest-results/{analysis_id}` on this same loopback listener. It does not
+enable the worker or widen readiness: the route is a bounded authenticated projection of an already
+completed Knowledge-owned recap. Single-host deployment injects the independent value only into
+Knowledge and channel-digest, rotates Knowledge before its consumer, and rolls back the consumer
+before disabling or reverting the producer route.
+
 The recap worker may use the existing controlled `OpenRouter` composition, while scripted mode is
 the credential-free composed-test path. The loopback `/internal/search` and user-content adapters expose tenant-scoped
 query and read-state behavior to Platform; they are not public routes. Their cross-repository

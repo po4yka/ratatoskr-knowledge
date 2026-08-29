@@ -24,6 +24,7 @@ async fn readiness_follows_storage_startup_and_drain() -> Result<(), Box<dyn std
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
+        None,
     );
 
     assert_response(&app, "/live", StatusCode::OK).await?;
@@ -49,6 +50,7 @@ async fn channel_recap_readiness_requires_consumer_and_source_and_fails_on_drain
         lifecycle.clone(),
         database.database.clone(),
         Arc::new(Metrics::new()),
+        None,
         None,
     );
 
@@ -93,6 +95,7 @@ async fn capability_document_declares_library_surfaces() -> Result<(), Box<dyn s
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
+        None,
     );
 
     let response = app
@@ -136,6 +139,7 @@ async fn search_endpoint_returns_ranked_results_and_requires_tenant()
         Lifecycle::starting(),
         database.database.clone(),
         Arc::new(Metrics::new()),
+        None,
         None,
     );
 
@@ -186,6 +190,7 @@ async fn user_content_routes_require_tenant_scope_and_hide_foreign_targets()
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
+        None,
     );
     let created = app
         .clone()
@@ -234,6 +239,7 @@ async fn library_search_and_read_state_adapter_is_bounded_and_tenant_scoped()
         Lifecycle::starting(),
         database.database.clone(),
         Arc::new(Metrics::new()),
+        None,
         None,
     );
 
@@ -387,6 +393,7 @@ async fn metrics_counters_track_served_search_paths_without_embeddings()
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
+        None,
     );
 
     // A blank query browses by recency.
@@ -511,6 +518,7 @@ async fn search_uses_the_hybrid_retrieval_selection_when_configured()
         database.database.clone(),
         Arc::new(Metrics::new()),
         Some(Arc::clone(&retriever)),
+        None,
     );
 
     let response = app

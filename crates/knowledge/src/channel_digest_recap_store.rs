@@ -6,9 +6,39 @@ use ratatoskr_channel_digest_contracts::{
 };
 use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_identifiers::WireTimestamp;
+use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 
-use crate::{Database, PersistenceError, VerifiedDigestManifest};
+use crate::{
+    ChannelDigestRecap, Database, PersistenceError, VerifiedDigestManifest,
+    channel_digest_recap_schema,
+};
+
+/// Completed, integrity-checked channel recap projection owned by Knowledge.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChannelRecapResultProjection {
+    /// Opaque Knowledge analysis identifier used by internal consumers.
+    pub analysis_id: uuid::Uuid,
+    /// Exact SHA-256 digest of the canonical stored recap JSON.
+    pub result_digest_hex: String,
+    /// Closed typed recap result; provider attempts and source content are excluded.
+    pub recap: ChannelDigestRecap,
+}
+
+/// Safe result-reader failure without owner data or recap content.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ChannelRecapResultReadError {
+    /// The identifier does not name a completed channel recap result.
+    #[error("the channel recap result was not found")]
+    NotFound,
+    /// Durable recap JSON or its digest failed closed integrity validation.
+    #[error("the channel recap result failed integrity validation")]
+    Integrity,
+    /// Knowledge-owned durable state could not be read.
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+}
 
 /// Safe, content-free recap command admission failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -130,6 +160,53 @@ impl<'a> ChannelRecapRunStore<'a> {
     #[must_use]
     pub const fn new(database: &'a Database) -> Self {
         Self { database }
+    }
+
+    /// Reads one completed typed recap by its opaque analysis identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns a scoped absence for every identifier outside the completed recap family.
+    pub async fn read_completed_result(
+        &self,
+        analysis_id: uuid::Uuid,
+    ) -> Result<ChannelRecapResultProjection, ChannelRecapResultReadError> {
+        let stored: Option<(serde_json::Value, String)> = sqlx::query_as(
+            "select result.result, result.result_digest_hex
+             from knowledge.channel_recap_results result
+             inner join knowledge.channel_recap_runs run
+                on run.recap_run_id = result.recap_run_id
+             where result.result_id = $1 and run.state = 'completed'",
+        )
+        .bind(analysis_id)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        let Some((value, result_digest_hex)) = stored else {
+            return Err(ChannelRecapResultReadError::NotFound);
+        };
+        let canonical =
+            serde_json::to_vec(&value).map_err(|_| ChannelRecapResultReadError::Integrity)?;
+        let observed_digest_hex = format!("{:x}", Sha256::digest(canonical));
+        if observed_digest_hex != result_digest_hex {
+            return Err(ChannelRecapResultReadError::Integrity);
+        }
+        let schema =
+            channel_digest_recap_schema().map_err(|_| ChannelRecapResultReadError::Integrity)?;
+        let validator = jsonschema::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .map_err(|_| ChannelRecapResultReadError::Integrity)?;
+        validator
+            .validate(&value)
+            .map_err(|_| ChannelRecapResultReadError::Integrity)?;
+        let recap =
+            serde_json::from_value(value).map_err(|_| ChannelRecapResultReadError::Integrity)?;
+        Ok(ChannelRecapResultProjection {
+            analysis_id,
+            result_digest_hex,
+            recap,
+        })
     }
 
     /// Applies one legal non-terminal expected-state transition.

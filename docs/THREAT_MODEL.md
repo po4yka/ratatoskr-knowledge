@@ -20,5 +20,11 @@ Private documents/conversations, model credentials, prompts, derived insights, e
   separate fields; forbid external fetch and reject foreign/omitted citations and generated URLs.
 - **Consumer authority drift:** open only the exact pre-provisioned durable and remain unready on any
   subject, ack-policy, deadline, source, or credential mismatch.
+- **Recap result exfiltration:** keep the result read on loopback behind a separate redacted service
+  secret, authenticate before parsing identifiers, return only the closed typed recap and exact
+  digest, cap/no-store every response, and make missing, incomplete, and foreign identities
+  indistinguishable.
+- **Stored recap corruption:** recompute SHA-256 and re-run the closed schema on every read; return a
+  content-free `502` rather than truncating, repairing, or exposing partial bytes.
 
 Re-review for tools/agents, new providers, external search, shared collections, local models, or cross-user collaboration.

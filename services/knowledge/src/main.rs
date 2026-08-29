@@ -9,7 +9,8 @@ use std::time::Duration;
 use ratatoskr_knowledge::{
     BlobStore, BudgetLedger, BudgetLimits, ChunkPolicy, Config, ControlledEmbeddings, Database,
     DeletionReceipt, EmbeddingsSettings, HybridRetriever, Indexer, IndexerLimits,
-    OpenAiCompatibleEmbeddings, RateLimiter, RetryPolicy, TokenPrices, init_telemetry,
+    OpenAiCompatibleEmbeddings, RateLimiter, ResultReaderSecret, RetryPolicy, TokenPrices,
+    init_telemetry,
 };
 use ratatoskr_knowledge_service::{
     HybridSearchRetriever, Lifecycle, Metrics, admin_router, spawn_channel_recap_worker,
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             database: database.clone(),
             metrics,
             retriever,
+            result_reader_secret: config.channel_recap.result_reader_service_secret.clone(),
         },
         drain_tx.clone(),
         drain_rx,
@@ -503,6 +505,7 @@ struct AdminServer {
     database: Database,
     metrics: Arc<Metrics>,
     retriever: Option<Arc<HybridSearchRetriever>>,
+    result_reader_secret: Option<ResultReaderSecret>,
 }
 
 async fn serve_admin(
@@ -517,10 +520,17 @@ async fn serve_admin(
         database,
         metrics,
         retriever,
+        result_reader_secret,
     } = server;
     let server = axum::serve(
         listener,
-        admin_router(lifecycle.clone(), database, metrics, retriever),
+        admin_router(
+            lifecycle.clone(),
+            database,
+            metrics,
+            retriever,
+            result_reader_secret,
+        ),
     )
     .with_graceful_shutdown(async move {
         let _ignored = drain_rx.changed().await;
