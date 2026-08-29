@@ -1,5 +1,6 @@
 //! Disposable database and transport support for integration tests.
 
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,8 @@ pub struct RecordedRequest {
     pub path: String,
     /// Authorization header value exactly as received.
     pub authorization: Option<String>,
+    /// Lower-cased request headers exactly as received by the fake.
+    pub headers: BTreeMap<String, String>,
     /// Received body byte count.
     pub body_bytes: usize,
 }
@@ -180,6 +183,7 @@ async fn serve(
                 body.extend_from_slice(received);
             }
             let authorization = header_value(&head_text, "authorization");
+            let headers = request_headers(&head_text);
             let path = request_path(&head_text);
             requests
                 .lock()
@@ -187,6 +191,7 @@ async fn serve(
                 .push(RecordedRequest {
                     path,
                     authorization,
+                    headers,
                     body_bytes: body.len(),
                 });
             let reply = scripted
@@ -200,6 +205,17 @@ async fn serve(
             return Ok(());
         }
     }
+}
+
+fn request_headers(head_text: &str) -> BTreeMap<String, String> {
+    head_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect()
 }
 
 async fn write_reply(

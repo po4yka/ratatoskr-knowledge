@@ -16,6 +16,13 @@ only `knowledge.*` objects:
 - `provider_usage` records one row per real provider response with provider, model, input and output
   tokens, estimated cost in micro-US dollars, and recording time, indexed for UTC day and month
   windows that back the pre-call spend ceilings.
+- `channel_recap_inbox` deduplicates transport and semantic owner/run/manifest requests;
+- `channel_recap_runs` carries monotonic manifest, context, provider, persistence, and terminal
+  states plus the immutable analysis identity;
+- `channel_recap_manifests` stores the verified canonical manifest projection and its exact digest;
+- `channel_recap_attempts` records at most two raw-response-first provider attempts;
+- `channel_recap_results` stores one grounded typed recap and exact coverage;
+- `channel_recap_outbox` stores one completion or failure until JetStream acknowledges publication.
 
 ## Constraints
 
@@ -26,5 +33,6 @@ replay from moving a terminal run backwards.
 The accepted output insert and transition to `persisted` use one transaction. A replay changes a
 persisted run to `completed` and returns its existing output without a provider call.
 
-No table writes another schema or has a foreign key to another service. Search, embeddings,
-entities, topics, outbox, inbox, deletion propagation, and retention automation are not implemented.
+No table writes another schema or has a foreign key to another service. Channel post bodies remain
+owned by the digest service; the verified manifest is bounded analysis evidence, not a cross-schema
+copy or acquisition authority.

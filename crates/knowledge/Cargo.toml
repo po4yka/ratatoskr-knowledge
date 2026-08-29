@@ -14,6 +14,7 @@ ratatoskr-identifiers.workspace = true
 ratatoskr-github-contracts.workspace = true
 ratatoskr-social-contracts.workspace = true
 ratatoskr-ai-archive-contracts.workspace = true
+ratatoskr-channel-digest-contracts.workspace = true
 ratatoskr-event-envelope.workspace = true
 reqwest.workspace = true
 schemars.workspace = true

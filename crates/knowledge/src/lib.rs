@@ -7,6 +7,13 @@ mod archive_events;
 mod article;
 mod blob_store;
 mod budget;
+mod channel_digest_recap;
+mod channel_digest_recap_context;
+mod channel_digest_recap_evaluation;
+mod channel_digest_recap_pipeline;
+mod channel_digest_recap_prompt;
+mod channel_digest_recap_result;
+mod channel_digest_recap_store;
 mod chunking;
 mod config;
 mod context;
@@ -40,8 +47,43 @@ pub use article::{
 };
 pub use blob_store::{BlobError, BlobStore};
 pub use budget::{BudgetError, BudgetLedger, BudgetLimits, BudgetWindow, TokenPrices};
+pub use channel_digest_recap::{
+    DigestManifest, DigestManifestAttemptError, DigestManifestAttemptOutcome, DigestManifestError,
+    DigestManifestRequest, DigestManifestSchema, DigestManifestSource, DigestSourceClient,
+    DigestSourceClientError, DigestSourceClientSettings, DigestSourceSecret,
+    VerifiedDigestManifest, attempt_digest_manifest, verify_digest_manifest,
+};
+pub use channel_digest_recap_context::{
+    CHANNEL_RECAP_CONTEXT_VERSION, ChannelRecapContextError, ChannelRecapContextPolicy,
+    ChannelRecapOmission, ChannelRecapOmissionReason, PreparedChannelRecapContext,
+    PreparedChannelRecapSource, prepare_channel_recap_context,
+};
+pub use channel_digest_recap_evaluation::{
+    ChannelRecapEvalCaseReport, ChannelRecapEvalCheck, ChannelRecapEvaluationError,
+    ChannelRecapEvaluationReport, run_committed_channel_recap_evaluation,
+};
+pub use channel_digest_recap_pipeline::{ChannelRecapPipeline, ChannelRecapPipelineError};
+pub use channel_digest_recap_prompt::{
+    CHANNEL_RECAP_PROMPT_VERSION, ChannelRecapGenerationError, ChannelRecapProviderRequest,
+    ChannelRecapSourceContent, ChannelRecapSourceLabel, build_channel_recap_provider_request,
+};
+pub use channel_digest_recap_result::{
+    ChannelDigestRecap, ChannelRecapCitation, ChannelRecapContextVersion,
+    ChannelRecapContractVersion, ChannelRecapCoverage, ChannelRecapNotableItem,
+    ChannelRecapOutputLanguage, ChannelRecapPromptVersion, ChannelRecapResultError,
+    ChannelRecapTopic, ChannelRecapWarning, channel_digest_recap_schema,
+    validate_channel_digest_recap,
+};
+pub use channel_digest_recap_store::{
+    ChannelRecapAdmissionError, ChannelRecapInbox, ChannelRecapInboxAdmission,
+    ChannelRecapInboxError, ChannelRecapRunError, ChannelRecapRunState, ChannelRecapRunStore,
+    admit_channel_digest_recap,
+};
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
-pub use config::{AdminConfig, Config, ConfigError, Limits, ProviderSecret, StorageConfig};
+pub use config::{
+    AdminConfig, ChannelRecapConfig, ChannelRecapProviderMode, Config, ConfigError, Limits,
+    ProviderSecret, StorageConfig,
+};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };

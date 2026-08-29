@@ -40,6 +40,32 @@ async fn readiness_follows_storage_startup_and_drain() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[tokio::test]
+async fn channel_recap_readiness_requires_consumer_and_source_and_fails_on_drain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let lifecycle = Lifecycle::starting_with_channel_recap();
+    let app = admin_router(
+        lifecycle.clone(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+    );
+
+    lifecycle.mark_ready();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.set_channel_recap_ready(true);
+    assert_response(&app, "/ready", StatusCode::OK).await?;
+    lifecycle.set_channel_recap_ready(false);
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.set_channel_recap_ready(true);
+    lifecycle.begin_drain();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn assert_response(
     app: &axum::Router,
     path: &str,

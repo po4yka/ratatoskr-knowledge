@@ -16,9 +16,10 @@ attempts that carry adapter identity, model, latency, status, and failure class;
 consistency with idempotent replay; and retry/repair bounds under a permanently or intermittently
 failing transport. Ordinary logs are asserted to contain neither credentials nor source content.
 
-The process test starts the real binary with a disposable database and blob root. It proves that
-`check-config` does not bind, readiness arrives without inference credentials, `/analyze` is absent,
-and `SIGTERM` finishes within the configured bound.
+The process test starts the real binary with a disposable database, blob root, JetStream durable,
+and fake authenticated digest source. It proves that `check-config` does not bind, scripted recap
+needs no inference credentials, readiness waits for both recap dependencies, `/analyze` is absent,
+`SIGTERM` drains within the bound, and a restart reopens the same durable and reprobes the source.
 
 Default tests use the scripted provider, recorded fixtures, and the loopback fake transport; none of
 them makes an external inference request. Database tests create disposable databases from the
@@ -45,6 +46,12 @@ runs, attempts, outputs, projection-input snapshots, lexical rows, chunks, failu
 blob bytes; they also prove tenant isolation, reference-safe blob sweep, and one-transaction audit
 visibility. Process tests cover the operator deletion/reindex receipts, deterministic progress, and
 the missing-embeddings fail-fast path.
+
+`channel_recap_eval` adds eight synthetic cases: empty, partial/full multi-channel, edited,
+repeated/conflicting, context-budget, malformed-manifest, and prompt-injection windows. It runs
+canonical manifest verification, deterministic context preparation, and strict result validation,
+then reports schema, citation, unsupported-claim, coverage, context-digest, and budget metrics. It
+contains no real channel text and opens no socket.
 
 Future real-provider recordings are deliberate manual artifacts, not gate inputs. Repository,
 social, AI-archive, and workspace end-to-end retrieval remain separate analysis-family work.

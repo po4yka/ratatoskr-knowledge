@@ -711,19 +711,22 @@ Provider or prompt changes cannot become default solely because examples look su
 
 ## 24. Deployment architecture
 
-The current deployment is one admin-only process. It requires PostgreSQL 17 with pgvector and a
-writable owned blob directory. It does not require NATS, model credentials, or Qdrant. PostgreSQL
-FTS is the offline retrieval path; configured embeddings add hybrid ranking.
+The current deployment is one process with an admin plane and optional channel-recap worker. It
+requires PostgreSQL 17 with pgvector and a writable owned blob directory. The default profile does
+not require NATS, model credentials, or Qdrant; enabling recap additionally requires an exact
+pre-provisioned JetStream durable and the authenticated loopback digest-source readiness endpoint.
+PostgreSQL FTS is the offline retrieval path; configured embeddings add hybrid ranking.
 
 The admin listener is loopback-only. `check-config` validates strict environment settings without
-binding. Readiness becomes successful after storage and the current schema are ready. `SIGINT` and
-`SIGTERM` start drain; the process joins server shutdown within its configured bound.
+binding. Readiness becomes successful after storage and the current schema are ready and, when recap
+is enabled, after both recap dependencies are verified. `SIGINT` and `SIGTERM` start drain; the
+process joins the recap supervisor and server shutdown within its configured bound.
 
-The `OpenRouter` adapter exists in the library and manual smoke example, but the admin-only service
-does not invoke it. The loopback `/internal/search` and user-content adapters expose tenant-scoped
+The recap worker may use the existing controlled `OpenRouter` composition, while scripted mode is
+the credential-free composed-test path. The loopback `/internal/search` and user-content adapters expose tenant-scoped
 query and read-state behavior to Platform; they are not public routes. Their cross-repository
-contract is `library-search-read-state` in the workspace OpenSpec store. Analysis consumers,
-service wiring for model execution, and additional adapters remain future deployment changes.
+contract is `library-search-read-state` in the workspace OpenSpec store. Additional analysis
+transport adapters remain future deployment changes.
 Split processes only after a measured scaling or security need exists.
 
 ## 25. Migration architecture

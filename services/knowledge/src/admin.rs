@@ -18,9 +18,10 @@ use ratatoskr_knowledge::{
 
 use crate::{HybridSearchRetriever, Metrics};
 
-const STARTING: u8 = 0;
-const READY: u8 = 1;
-const DRAINING: u8 = 2;
+const STORAGE_READY: u8 = 1;
+const CHANNEL_RECAP_REQUIRED: u8 = 2;
+const CHANNEL_RECAP_READY: u8 = 4;
+const DRAINING: u8 = 8;
 
 /// Shared process lifecycle used by readiness checks.
 #[derive(Debug, Clone)]
@@ -33,22 +34,42 @@ impl Lifecycle {
     #[must_use]
     pub fn starting() -> Self {
         Self {
-            state: Arc::new(AtomicU8::new(STARTING)),
+            state: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    /// Creates a starting lifecycle that will require recap dependencies.
+    #[must_use]
+    pub fn starting_with_channel_recap() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(CHANNEL_RECAP_REQUIRED)),
+        }
+    }
+
+    /// Records whether both recap transport and source dependencies are usable.
+    pub fn set_channel_recap_ready(&self, ready: bool) {
+        if ready {
+            self.state.fetch_or(CHANNEL_RECAP_READY, Ordering::AcqRel);
+        } else {
+            self.state.fetch_and(!CHANNEL_RECAP_READY, Ordering::AcqRel);
         }
     }
 
     /// Marks storage startup complete.
     pub fn mark_ready(&self) {
-        self.state.store(READY, Ordering::Release);
+        self.state.fetch_or(STORAGE_READY, Ordering::AcqRel);
     }
 
     /// Starts drain and makes readiness fail.
     pub fn begin_drain(&self) {
-        self.state.store(DRAINING, Ordering::Release);
+        self.state.fetch_or(DRAINING, Ordering::AcqRel);
     }
 
     fn is_ready(&self) -> bool {
-        self.state.load(Ordering::Acquire) == READY
+        let state = self.state.load(Ordering::Acquire);
+        state & STORAGE_READY != 0
+            && state & DRAINING == 0
+            && (state & CHANNEL_RECAP_REQUIRED == 0 || state & CHANNEL_RECAP_READY != 0)
     }
 }
 

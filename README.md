@@ -8,8 +8,9 @@ analysis, and persists the evidence and result.
 > now with a real `OpenRouter` adapter behind timeout, size-cap, rate, retry, cancellation, and
 > budget controls, alongside a tenant-scoped full-text projection and operator-plane retrieval.
 > Versioned pgvector embeddings and hybrid ranking are implemented behind an optional embeddings
-> credential; lexical search remains the offline default. There is no message-bus consumer or
-> public analysis endpoint yet.
+> credential; lexical search remains the offline default. The optional channel-recap role consumes
+> one exact pre-provisioned JetStream durable and publishes terminal recap facts; there is no public
+> analysis endpoint.
 
 > [!IMPORTANT]
 > Ratatoskr is in development. The API, database, and contracts keep their first version. The
@@ -45,6 +46,9 @@ analysis, and persists the evidence and result.
 - hybrid Reciprocal Rank Fusion (k=60) over equally tenant-scoped lexical and semantic legs, with
   deterministic tiebreakers and graceful fallback to pure lexical ranking without a credential;
 - committed offline evaluation fixtures and a deterministic labeled report runner;
+- a dormant `knowledge.channel_digest_recap.requested.v1` consumer with owner-scoped inbox
+  convergence, authenticated immutable-manifest retrieval, complete-revision context selection,
+  strict grounded recap validation, terminal outbox publication, and synthetic evaluations;
 - atomic, audited `delete-source` and `delete-tenant` operator jobs that remove all owned derived
   data and only reference-safe Knowledge blob bytes;
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
@@ -81,6 +85,12 @@ collection_items
 analysis_user_states
 highlights
 analysis_feedback
+channel_recap_inbox
+channel_recap_runs
+channel_recap_manifests
+channel_recap_attempts
+channel_recap_results
+channel_recap_outbox
 ```
 
 Source bytes stay with the source-owning service. Knowledge stores the immutable Document IR
@@ -132,6 +142,17 @@ RATATOSKR__PROVIDER__EMBEDDINGS__MODEL
 RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS
 RATATOSKR__PROVIDER__EMBEDDINGS__PROMPT_VERSION
 RATATOSKR__PROVIDER__EMBEDDINGS__INPUT_MICRO_USD_PER_MTOKEN
+RATATOSKR__CHANNEL_RECAP__ENABLED
+RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE
+RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL
+RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET
+RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT
+RATATOSKR__CHANNEL_RECAP__BUS_STREAM
+RATATOSKR__CHANNEL_RECAP__BUS_DURABLE
+RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT
+RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE
+RATATOSKR__CHANNEL_RECAP__FETCH_BATCH
+RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS
 ```
 
 Unknown or invalid `RATATOSKR__` keys stop startup without printing their values. Without
@@ -154,7 +175,11 @@ cargo run --locked -p ratatoskr-knowledge-service
 ```
 
 Readiness becomes successful after the blob directory, database connection, and current schema are
-ready. `SIGINT` or `SIGTERM` starts drain and uses the configured shutdown bound.
+ready. When channel recap is enabled it additionally requires the exact pre-provisioned durable and
+an authenticated `GET /ready` from the loopback digest source. `SIGINT` or `SIGTERM` makes readiness
+fail, drains the consumer, and joins it within the configured shutdown bound. Scripted recap mode
+requires no inference credential; `openrouter` mode requires the existing controlled provider
+configuration and spend limits.
 
 ## Internal user-content surface
 
@@ -198,6 +223,9 @@ RATATOSKR__PROVIDER__OPENROUTER__API_KEY=... \
 The committed result schema is
 [`schemas/article-analysis.v1.schema.json`](schemas/article-analysis.v1.schema.json), and prompt
 artifacts are under [`prompts/article-analysis.v1`](prompts/article-analysis.v1).
+The recap prompt is independently fixed under
+[`prompts/channel-digest-recap.v1`](prompts/channel-digest-recap.v1); source labels and untrusted
+complete revisions remain separate request fields, and external fetch is always disabled.
 
 ## Offline evaluation and operator jobs
 
@@ -206,6 +234,7 @@ fixtures and recorded response sets, grouping results by provider/prompt label:
 
 ```bash
 cargo run --locked -p ratatoskr-knowledge --example eval_harness
+cargo run --locked -p ratatoskr-knowledge --example channel_recap_eval
 ```
 
 Operator jobs use the configured database and blob root. `delete-source` removes every revision of

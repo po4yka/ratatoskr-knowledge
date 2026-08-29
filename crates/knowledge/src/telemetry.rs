@@ -47,3 +47,18 @@ pub fn record_validation_failure(class: ValidationClass, _source_text: &str, _re
         duration_ms = 0_u64
     );
 }
+
+/// Records one channel-recap pipeline boundary with closed, content-free fields.
+pub(crate) fn record_channel_recap_pipeline(
+    state: &'static str,
+    outcome: &'static str,
+    duration_ms: i32,
+) {
+    tracing::info!(
+        operation = "channel_digest_recap",
+        state = state,
+        outcome = outcome,
+        attempt_count = 1_u8,
+        duration_ms = duration_ms
+    );
+}

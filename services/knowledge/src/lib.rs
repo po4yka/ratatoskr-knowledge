@@ -4,11 +4,13 @@
 //! Process boundary for Ratatoskr Knowledge.
 
 mod admin;
+mod channel_recap;
 mod metrics;
 
 use ratatoskr_knowledge::{ControlledEmbeddings, HybridRetriever, OpenAiCompatibleEmbeddings};
 
 pub use admin::{Lifecycle, admin_router};
+pub use channel_recap::{ChannelRecapWorkerError, spawn_channel_recap_worker};
 pub use metrics::Metrics;
 
 /// The production hybrid retrieval selector over the controlled embeddings

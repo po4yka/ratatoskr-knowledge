@@ -43,6 +43,12 @@ through Platform's authenticated public facade defined by workspace contract
 - `ArticlePipeline` records attempts with adapter identity, model, latency, HTTP status, and failure
   class; stores raw bytes before parsing; validates the result; and persists one accepted output.
 - `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
+- `ChannelRecapInbox` admits only `knowledge.channel_digest_recap.requested.v1`; the transport
+  adapter separately verifies the `cmd.` subject and `ratatoskr-channel-digests` producer.
+- `DigestSourceClient` accepts only a loopback origin, sends the service secret plus owner/run/
+  manifest authority headers, refuses redirects, and verifies readiness before the consumer is ready.
+- `ChannelRecapPipeline` uses the shared provider seam and two-call budget, stores raw bytes before
+  validation, and commits exactly one typed completion or safe failure through the recap outbox.
 
-There are no public analysis routes, event transport adapters, or additional analysis workers in
-this slice. A second real adapter implements the same seam without further trait changes.
+There are no public analysis routes. The optional recap worker opens and verifies but never creates
+the fixed JetStream durable; Platform/source services remain owners of public APIs and channel data.
