@@ -1,3 +1,4 @@
+use std::future::IntoFuture as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,7 +69,7 @@ async fn consume_once(
     drain: &mut watch::Receiver<bool>,
 ) -> Result<(), ()> {
     let client = connect(config).await?;
-    let context = jetstream::new(client);
+    let context = jetstream::new(client.clone());
     let consumer: jetstream::consumer::PullConsumer = context
         .get_consumer_from_stream(&config.primary.bus_durable, &config.primary.bus_stream)
         .await
@@ -80,11 +81,18 @@ async fn consume_once(
         .messages()
         .await
         .map_err(|_| ())?;
+    let mut connection_check = tokio::time::interval(Duration::from_millis(100));
+    connection_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     lifecycle.set_primary_bus_ready(true);
     loop {
         tokio::select! {
             biased;
             _ = drain.changed() => return Ok(()),
+            _ = connection_check.tick() => {
+                if client.connection_state() != async_nats::connection::State::Connected {
+                    return Err(());
+                }
+            }
             next = messages.next() => {
                 let Some(next) = next else { return Err(()); };
                 let message = next.map_err(|_| ())?;
@@ -147,10 +155,15 @@ async fn publish_once(
     drain: &mut watch::Receiver<bool>,
 ) -> Result<(), ()> {
     let client = connect(config).await?;
-    let context = jetstream::new(client);
+    let context = jetstream::new(client.clone());
     lifecycle.set_primary_outbox_ready(true);
     let outbox = TerminalOutbox::new(database);
+    let mut connection_check = tokio::time::interval(Duration::from_millis(100));
+    connection_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if client.connection_state() != async_nats::connection::State::Connected {
+            return Err(());
+        }
         let Some(entry) = outbox.next_pending().await.map_err(|_| ())? else {
             if *drain.borrow() {
                 return Ok(());
@@ -169,7 +182,23 @@ async fn publish_once(
             .publish_with_headers(entry.subject.clone(), headers, payload.into())
             .await
             .map_err(|_| ())?;
-        acknowledgement.await.map_err(|_| ())?;
+        let acknowledgement = acknowledgement.into_future();
+        let mut acknowledgement = std::pin::pin!(acknowledgement);
+        loop {
+            tokio::select! {
+                biased;
+                _ = drain.changed() => return Ok(()),
+                _ = connection_check.tick() => {
+                    if client.connection_state() != async_nats::connection::State::Connected {
+                        return Err(());
+                    }
+                }
+                result = &mut acknowledgement => {
+                    result.map_err(|_| ())?;
+                    break;
+                }
+            }
+        }
         outbox
             .mark_published(entry.outbox_id)
             .await
