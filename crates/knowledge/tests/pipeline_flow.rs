@@ -17,7 +17,7 @@ mod support;
 use support::*;
 
 #[tokio::test]
-async fn cancelled_mid_request_keeps_durable_state_and_replays_once()
+async fn cancelled_mid_request_keeps_durable_state_without_blind_replay()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let root = TemporaryBlobRoot::create().await?;
@@ -84,8 +84,11 @@ async fn cancelled_mid_request_keeps_durable_state_and_replays_once()
     );
     let replayed = replay_pipeline
         .execute(run_id, request, &context, &document)
-        .await?;
-    assert_eq!(replayed.summary, "A grounded summary.");
+        .await;
+    assert!(matches!(
+        replayed,
+        Err(ratatoskr_knowledge::PipelineError::ProviderOutcomeUnknown)
+    ));
     let (state, attempts, outputs): (String, i64, i64) = sqlx::query_as(
         "select state,
                 (select count(*) from knowledge.analysis_attempts where run_id = $1),
@@ -95,19 +98,18 @@ async fn cancelled_mid_request_keeps_durable_state_and_replays_once()
     .bind(run_id)
     .fetch_one(database.database.pool())
     .await?;
-    assert_eq!(state, "persisted");
-    assert_eq!(attempts, 2);
-    assert_eq!(outputs, 1);
+    assert_eq!(state, "provider_outcome_unknown");
+    assert_eq!(attempts, 1);
+    assert_eq!(outputs, 0);
+    assert_eq!(healthy.request_count()?, 0);
 
     database.cleanup().await?;
     Ok(())
 }
 
-// A second cancellation consumes the last ordinal; the next replay must fail
-// the run explicitly instead of leaving it stuck mid-state.
 #[tokio::test]
-async fn exhausted_cancellation_replay_fails_explicitly() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn persisted_requested_attempt_becomes_explicitly_uncertain()
+-> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let root = TemporaryBlobRoot::create().await?;
     let blobs = BlobStore::new(root.path(), 4_096);
@@ -126,43 +128,13 @@ async fn exhausted_cancellation_replay_fails_explicitly() -> Result<(), Box<dyn 
         .await?;
     let exhausted = FakeTransport::start(vec![FakeReply::stall()]).await?;
     let exhausted_provider = controlled_openrouter(&database, &exhausted, 1)?;
-    let task_database = database.database.clone();
-    let task_blobs = blobs.clone();
-    let task_context = second_context.clone();
-    let task_document = second_document.clone();
-    let second_request = build_generation_request(&second_context)?;
-    let second_handle = tokio::spawn(async move {
-        let pipeline = ArticlePipeline::new(
-            &task_database,
-            &exhausted_provider,
-            &task_blobs,
-            std::time::Duration::from_millis(50),
-        );
-        pipeline
-            .execute(second_run_id, second_request, &task_context, &task_document)
-            .await
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while exhausted.request_count()? == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the stalled transport never received a request"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    second_handle.abort();
-    let _ignored = second_handle.await;
-
-    let healthy_again =
-        FakeTransport::start(vec![FakeReply::bytes(200, valid_envelope_bytes())]).await?;
-    let again_provider = controlled_openrouter(&database, &healthy_again, 1)?;
-    let again_pipeline = ArticlePipeline::new(
+    let pipeline = ArticlePipeline::new(
         &database.database,
-        &again_provider,
+        &exhausted_provider,
         &blobs,
         std::time::Duration::from_secs(5),
     );
-    let replay_outcome = again_pipeline
+    let replay_outcome = pipeline
         .execute(
             second_run_id,
             build_generation_request(&second_context)?,
@@ -170,13 +142,17 @@ async fn exhausted_cancellation_replay_fails_explicitly() -> Result<(), Box<dyn 
             &second_document,
         )
         .await;
-    assert!(replay_outcome.is_err());
+    assert!(matches!(
+        replay_outcome,
+        Err(ratatoskr_knowledge::PipelineError::ProviderOutcomeUnknown)
+    ));
     let final_state: String =
         sqlx::query_scalar("select state from knowledge.analysis_runs where run_id = $1")
             .bind(second_run_id)
             .fetch_one(database.database.pool())
             .await?;
-    assert_eq!(final_state, "failed");
+    assert_eq!(final_state, "provider_outcome_unknown");
+    assert_eq!(exhausted.request_count()?, 0);
 
     database.cleanup().await?;
     Ok(())
@@ -215,9 +191,9 @@ async fn flaky_transport_keeps_retry_and_repair_bounded() -> Result<(), Box<dyn 
     .bind(failing_run_id)
     .fetch_one(database.database.pool())
     .await?;
-    assert_eq!(state, "failed");
-    assert_eq!(attempts, 2);
-    assert_eq!(always_fault.request_count()?, 6);
+    assert_eq!(state, "provider_outcome_unknown");
+    assert_eq!(attempts, 1);
+    assert_eq!(always_fault.request_count()?, 3);
 
     let (repair_run_id, repair_context, repair_document) = run_and_context(&database).await?;
     let invalid_content = FakeReply::bytes(

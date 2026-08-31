@@ -21,7 +21,8 @@ analysis, and persists the evidence and result.
 - two Rust packages: `crates/knowledge` and `services/knowledge`;
 - exact shared Document IR and identifier contract pins;
 - immutable source revisions and idempotent analysis-run identities;
-- monotonic run states and at most two recorded provider attempts;
+- monotonic run states, at most two automatic provider attempts, and one explicitly
+  operator-authorized replay after an uncertain provider outcome;
 - `ArticleAnalysis` with a summary and source-block-backed key points;
 - deterministic complete-block context selection and a versioned prompt;
 - a hand-written scripted provider that makes no external request;
@@ -97,15 +98,27 @@ Source bytes stay with the source-owning service. Knowledge stores the immutable
 identity and source `BlobRef`. Raw model-response bytes stay in the Knowledge blob root under their
 SHA-256 address.
 
-## Run the admin-only process
+## Run the process
 
 The process needs PostgreSQL 17 and a writable blob directory. These settings have finite defaults
 and can be changed with strict environment keys:
 
 ```text
 RATATOSKR__ADMIN__LISTEN_ADDRESS
+RATATOSKR__RUNTIME__ROLE
 RATATOSKR__STORAGE__DATABASE_URL
 RATATOSKR__STORAGE__BLOB_ROOT
+RATATOSKR__PRIMARY__BUS_ENDPOINT
+RATATOSKR__PRIMARY__BUS_STREAM
+RATATOSKR__PRIMARY__BUS_DURABLE
+RATATOSKR__PRIMARY__BUS_CREDENTIALS_FILE
+RATATOSKR__PRIMARY__GITHUB_BASE_URL
+RATATOSKR__PRIMARY__GITHUB_TOKEN_FILE
+RATATOSKR__PRIMARY__FETCH_BATCH
+RATATOSKR__PRIMARY__ACK_WAIT_SECONDS
+RATATOSKR__PRIMARY__WORKER_COUNT
+RATATOSKR__PRIMARY__LEASE_SECONDS
+RATATOSKR__PRIMARY__README_RESPONSE_BYTES
 RATATOSKR__LIMITS__DATABASE_CONNECTIONS
 RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS
 RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS
@@ -179,11 +192,35 @@ cargo run --locked -p ratatoskr-knowledge-service
 ```
 
 Readiness becomes successful after the blob directory, database connection, and current schema are
-ready. When channel recap is enabled it additionally requires the exact pre-provisioned durable and
-an authenticated `GET /ready` from the loopback digest source. `SIGINT` or `SIGTERM` makes readiness
-fail, drains the consumer, and joins it within the configured shutdown bound. Scripted recap mode
-requires no inference credential; `openrouter` mode requires the existing controlled provider
-configuration and spend limits.
+ready. The default `admin` role opens only the operator/search surface. The `primary` role additionally
+requires the controlled provider, an authenticated GitHub Catalog boundary, and the exact
+pre-provisioned `ratatoskr_knowledge_main` durable on `ratatoskr_events`; it never creates or widens
+the consumer. Its configured lease must exceed the provider deadline by at least five seconds.
+Credential files must be absolute regular files and, on Unix, mode `0600` or stricter. Remote NATS
+must use TLS and an NKey seed file; loopback NATS may omit it.
+
+Primary intake consumes the registered document, social, AI-archive, and GitHub repository-analysis
+subjects. A delivery is acknowledged only after collision-checked receipt, current source head,
+retained source state, and schedulable work are committed together. Unsupported or content-free
+events are terminated with a bounded rejection record. Work is leased with `SKIP LOCKED`, resumes
+from durable run state, and stores the terminal request state and canonical outbox event in one
+transaction. Ambiguous provider outcomes stop for an explicit policy-authorized requeue; they are
+never replayed blindly. The outbox publishes with the event id as `Nats-Msg-Id`, so a reconnect may
+repeat delivery but not the logical fact.
+
+When channel recap is enabled readiness additionally requires its exact pre-provisioned durable and
+an authenticated `GET /ready` from the loopback digest source. In the primary role readiness also
+tracks the primary consumer, workers, dependencies, storage probe, and outbox publisher. `SIGINT` or
+`SIGTERM` fails readiness first, stops intake and new claims, settles any in-flight delivery, drains
+publishable outbox rows within the configured bound, joins every supervisor, and closes the database
+last. Rows that cannot be published because the broker is unavailable remain pending for restart.
+Scripted recap mode requires no inference credential; `openrouter` mode requires the existing
+controlled provider configuration and spend limits.
+
+Roll back the primary deployable by stopping the Knowledge process without deleting or changing the
+pre-provisioned durable. Pending JetStream deliveries, leased work, and outbox rows are durable and
+resume on the previous compatible binary. This repository is in development: recreate a test
+database from the current `schema.sql`; do not add or run migrations.
 
 ## Internal channel-recap result surface
 

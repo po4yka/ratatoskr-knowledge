@@ -22,6 +22,10 @@ const STORAGE_READY: u8 = 1;
 const CHANNEL_RECAP_REQUIRED: u8 = 2;
 const CHANNEL_RECAP_READY: u8 = 4;
 const DRAINING: u8 = 8;
+const PRIMARY_REQUIRED: u8 = 16;
+const PRIMARY_BUS_READY: u8 = 32;
+const PRIMARY_WORKERS_READY: u8 = 64;
+const PRIMARY_OUTBOX_READY: u8 = 128;
 const CHANNEL_DIGEST_RESULT_RESPONSE_BYTES: usize = 65_536;
 
 /// Fixed loopback route for one completed Knowledge-owned channel recap.
@@ -50,12 +54,48 @@ impl Lifecycle {
         }
     }
 
+    /// Creates a starting lifecycle that requires the full primary supervisor set.
+    #[must_use]
+    pub fn starting_primary(channel_recap: bool) -> Self {
+        let recap = if channel_recap {
+            CHANNEL_RECAP_REQUIRED
+        } else {
+            0
+        };
+        Self {
+            state: Arc::new(AtomicU8::new(PRIMARY_REQUIRED | recap)),
+        }
+    }
+
     /// Records whether both recap transport and source dependencies are usable.
     pub fn set_channel_recap_ready(&self, ready: bool) {
         if ready {
             self.state.fetch_or(CHANNEL_RECAP_READY, Ordering::AcqRel);
         } else {
             self.state.fetch_and(!CHANNEL_RECAP_READY, Ordering::AcqRel);
+        }
+    }
+
+    /// Records whether the exact primary durable is open on a live broker connection.
+    pub fn set_primary_bus_ready(&self, ready: bool) {
+        self.set_flag(PRIMARY_BUS_READY, ready);
+    }
+
+    /// Records whether every configured leased analysis worker is alive.
+    pub fn set_primary_workers_ready(&self, ready: bool) {
+        self.set_flag(PRIMARY_WORKERS_READY, ready);
+    }
+
+    /// Records whether the independent terminal outbox publisher is connected and alive.
+    pub fn set_primary_outbox_ready(&self, ready: bool) {
+        self.set_flag(PRIMARY_OUTBOX_READY, ready);
+    }
+
+    fn set_flag(&self, flag: u8, ready: bool) {
+        if ready {
+            self.state.fetch_or(flag, Ordering::AcqRel);
+        } else {
+            self.state.fetch_and(!flag, Ordering::AcqRel);
         }
     }
 
@@ -74,6 +114,9 @@ impl Lifecycle {
         state & STORAGE_READY != 0
             && state & DRAINING == 0
             && (state & CHANNEL_RECAP_REQUIRED == 0 || state & CHANNEL_RECAP_READY != 0)
+            && (state & PRIMARY_REQUIRED == 0
+                || state & (PRIMARY_BUS_READY | PRIMARY_WORKERS_READY | PRIMARY_OUTBOX_READY)
+                    == (PRIMARY_BUS_READY | PRIMARY_WORKERS_READY | PRIMARY_OUTBOX_READY))
     }
 }
 

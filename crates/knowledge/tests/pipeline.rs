@@ -6,8 +6,8 @@ use ratatoskr_identifiers::BlobRef;
 use ratatoskr_knowledge::test_support::{FakeTransport, TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     ArticlePipeline, BlobStore, GenerationRequest, LlmProvider, PipelineError, ProviderError,
-    ProviderFailure, ProviderIdentity, ProviderResponse, ProviderUsage, ScriptedProvider,
-    build_generation_request,
+    ProviderFailure, ProviderIdentity, ProviderResponse, ProviderRetrySafety, ProviderUsage,
+    ScriptedProvider, build_generation_request,
 };
 
 mod support;
@@ -16,6 +16,71 @@ use support::*;
 
 static TELEMETRY: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static TELEMETRY_INIT: Once = Once::new();
+
+#[tokio::test]
+async fn durable_raw_response_and_indexed_output_resume_without_provider_replay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    let response = valid_response("durable-response");
+    let raw = blobs.store_raw(&response.bytes).await?;
+    sqlx::query(
+        "insert into knowledge.analysis_attempts (
+             run_id, ordinal, reason, provider, model_policy, model, provider_request_id,
+             raw_response, input_tokens, output_tokens, outcome, duration_ms
+         ) values ($1, 1, 'initial', 'scripted_fake', 'fake_default_v1', 'fake_default_v1',
+             $2, $3, $4, $5, 'response_received', 1)",
+    )
+    .bind(run_id)
+    .bind(response.request_id.as_deref())
+    .bind(serde_json::to_value(&raw)?)
+    .bind(i64::try_from(response.usage.input_tokens)?)
+    .bind(i64::try_from(response.usage.output_tokens)?)
+    .execute(database.database.pool())
+    .await?;
+    sqlx::query("update knowledge.analysis_runs set state = 'model_requested' where run_id = $1")
+        .bind(run_id)
+        .execute(database.database.pool())
+        .await?;
+
+    let provider =
+        ScriptedProvider::new(std::iter::empty::<Result<ProviderResponse, ProviderError>>());
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    let article = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(article.summary, "A grounded summary.");
+    assert_eq!(provider.call_count()?, 0);
+
+    sqlx::query("update knowledge.analysis_runs set state = 'indexed' where run_id = $1")
+        .bind(run_id)
+        .execute(database.database.pool())
+        .await?;
+    let resumed = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(resumed, article);
+    assert_eq!(provider.call_count()?, 0);
+    database.cleanup().await?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn malformed_response_is_stored_before_json_validation()
@@ -370,6 +435,71 @@ async fn completed_replay_returns_one_atomic_result_without_provider_call()
     Ok(())
 }
 
+#[tokio::test]
+async fn operator_authorized_replay_after_two_uncertain_attempts_executes_exactly_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    sqlx::query(
+        "insert into knowledge.analysis_attempts (
+             run_id, ordinal, reason, provider, model_policy, model, outcome
+         ) values
+             ($1, 1, 'initial', 'scripted_fake', 'fake_default_v1',
+              'fake_default_v1', 'transient_failure'),
+             ($1, 2, 'retry', 'scripted_fake', 'fake_default_v1',
+              'fake_default_v1', 'transient_failure')",
+    )
+    .bind(run_id)
+    .execute(database.database.pool())
+    .await?;
+    sqlx::query(
+        "update knowledge.analysis_runs
+         set state = 'model_requested',
+             provider_replay_key = 'operator-reconciled-request',
+             provider_replay_authorized = true
+         where run_id = $1",
+    )
+    .bind(run_id)
+    .execute(database.database.pool())
+    .await?;
+
+    let provider = ScriptedProvider::new([Ok(valid_response("operator-replay"))]);
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(1),
+    );
+    let article = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+
+    assert_eq!(article.summary, "A grounded summary.");
+    assert_eq!(provider.call_count()?, 1);
+    let (state, replay_authorized, attempts): (String, bool, Vec<i16>) = sqlx::query_as(
+        "select state, provider_replay_authorized,
+                array(select ordinal from knowledge.analysis_attempts
+                      where run_id = $1 order by ordinal)
+         from knowledge.analysis_runs where run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(state, "persisted");
+    assert!(!replay_authorized);
+    assert_eq!(attempts, [1, 2, 3]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct SharedWriter(&'static Mutex<Vec<u8>>);
 
@@ -407,6 +537,10 @@ impl LlmProvider for SlowProvider {
         }
     }
 
+    fn retry_safety(&self) -> ProviderRetrySafety {
+        ProviderRetrySafety::Idempotent
+    }
+
     async fn generate_json(
         &self,
         _request: GenerationRequest,
@@ -442,7 +576,7 @@ async fn real_attempts_record_identity_latency_and_failure_class()
         .await;
 
     assert!(outcome.is_err());
-    assert_eq!(transport.request_count()?, 6);
+    assert_eq!(transport.request_count()?, 3);
     let attempts: Vec<AttemptFacts> = sqlx::query_as(
         "select ordinal, provider, model, duration_ms, error_class, http_status
          from knowledge.analysis_attempts where run_id = $1 order by ordinal",
@@ -450,7 +584,7 @@ async fn real_attempts_record_identity_latency_and_failure_class()
     .bind(run_id)
     .fetch_all(database.database.pool())
     .await?;
-    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.len(), 1);
     for attempt in &attempts {
         assert_eq!(attempt.1, "openrouter");
         assert_eq!(attempt.2, "openai/gpt-oss-20b");

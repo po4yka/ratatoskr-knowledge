@@ -27,10 +27,12 @@ mod family_pipeline;
 mod indexer;
 mod openrouter;
 mod pipeline;
+mod primary;
 mod provider;
 mod rate_limit;
 mod reindex;
 mod repository_analysis;
+mod repository_readme;
 mod result_reader_secret;
 mod runs;
 pub mod search;
@@ -83,7 +85,7 @@ pub use channel_digest_recap_store::{
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
 pub use config::{
     AdminConfig, ChannelRecapConfig, ChannelRecapProviderMode, Config, ConfigError, Limits,
-    ProviderSecret, StorageConfig,
+    OpenRouterProviderConfig, PrimaryConfig, ProviderSecret, RuntimeRole, StorageConfig,
 };
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
@@ -127,9 +129,14 @@ pub use openrouter::{
     classify_error, parse_success_envelope,
 };
 pub use pipeline::{ArticlePipeline, PipelineError};
+pub use primary::{
+    AdmissionDisposition, AnalysisWork, AnalysisWorkState, OutboxEntry, PRIMARY_EVENT_SUBJECTS,
+    PrimaryAdmissionError, PrimaryAdmissionStore, TerminalOutbox, TerminalOutboxError, WorkQueue,
+    WorkQueueError,
+};
 pub use provider::{
     LlmProvider, ProviderError, ProviderFailure, ProviderFailureClass, ProviderIdentity,
-    ProviderResponse, ProviderUsage, ScriptedProvider,
+    ProviderResponse, ProviderRetrySafety, ProviderUsage, ScriptedProvider,
 };
 pub use rate_limit::RateLimiter;
 pub use reindex::{
@@ -139,6 +146,7 @@ pub use reindex::{
 pub use repository_analysis::{
     RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RepositoryAnalysisError,
 };
+pub use repository_readme::{GithubReadmeSettings, GithubRepositoryReadmeResolver};
 pub use result_reader_secret::ResultReaderSecret;
 pub use runs::{
     AnalysisIdentity, AnalysisRun, Attempt, AttemptInput, AttemptOutcome, AttemptReason, RunState,

@@ -3,6 +3,7 @@
 //! Ratatoskr Knowledge service process.
 
 use std::future::IntoFuture as _;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use ratatoskr_knowledge::{
     init_telemetry,
 };
 use ratatoskr_knowledge_service::{
-    HybridSearchRetriever, Lifecycle, Metrics, admin_router, spawn_channel_recap_worker,
+    HybridSearchRetriever, Lifecycle, Metrics, PrimaryRuntime, admin_router,
+    spawn_channel_recap_worker,
 };
 use tokio::sync::watch;
 
@@ -45,7 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     database.apply_schema().await?;
 
-    let lifecycle = if config.channel_recap.enabled {
+    let lifecycle = if config.runtime_role == ratatoskr_knowledge::RuntimeRole::Primary {
+        Lifecycle::starting_primary(config.channel_recap.enabled)
+    } else if config.channel_recap.enabled {
         Lifecycle::starting_with_channel_recap()
     } else {
         Lifecycle::starting()
@@ -71,12 +75,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))),
         None => None,
     };
-    spawn_indexing_worker(
+    let indexing_worker = spawn_indexing_worker(
         build_indexing_worker(&config, &database, stack.as_ref())?,
         Duration::from_millis(config.limits.embeddings_poll_interval_ms),
         drain_rx.clone(),
         Arc::clone(&metrics),
     );
+
+    let primary_runtime = PrimaryRuntime::start(
+        &config,
+        &database,
+        &blobs,
+        &lifecycle,
+        Arc::clone(&metrics),
+        drain_rx.clone(),
+    )
+    .await?;
 
     let listener = tokio::net::TcpListener::bind(config.admin.listen_address).await?;
     lifecycle.mark_ready();
@@ -95,16 +109,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
     let _ignored = drain_tx.send(true);
-    if let Some(worker) = recap_worker {
-        tokio::time::timeout(
-            Duration::from_millis(config.limits.shutdown_timeout_ms),
-            worker,
-        )
-        .await??;
-    }
+    shutdown_runtime(
+        recap_worker,
+        indexing_worker,
+        primary_runtime,
+        Duration::from_millis(config.limits.shutdown_timeout_ms),
+    )
+    .await?;
     serve_result?;
     database.close().await;
     Ok(())
+}
+
+/// Drains every runtime lane concurrently before one process-wide deadline.
+async fn shutdown_runtime(
+    recap_worker: Option<tokio::task::JoinHandle<()>>,
+    indexing_worker: tokio::task::JoinHandle<()>,
+    primary_runtime: PrimaryRuntime,
+    shutdown_timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let shutdown_deadline = tokio::time::Instant::now() + shutdown_timeout;
+    let recap_join = async move {
+        match recap_worker {
+            Some(worker) => join_task_until(worker, shutdown_deadline).await,
+            None => Ok(()),
+        }
+    };
+    let (recap_result, indexing_result, primary_result) = tokio::join!(
+        recap_join,
+        join_task_until(indexing_worker, shutdown_deadline),
+        primary_runtime.join_until(shutdown_deadline),
+    );
+    recap_result?;
+    indexing_result?;
+    primary_result?;
+    Ok(())
+}
+
+/// Joins one owned process task before the shared shutdown deadline.
+///
+/// A timed-out task is aborted and awaited so no detached work can outlive
+/// database closure or process teardown.
+async fn join_task_until(
+    mut handle: tokio::task::JoinHandle<()>,
+    deadline: tokio::time::Instant,
+) -> Result<(), io::Error> {
+    match tokio::time::timeout_at(deadline, &mut handle).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(io::Error::other("a supervised runtime task failed")),
+        Err(_) => {
+            handle.abort();
+            let _result = handle.await;
+            Err(io::Error::other(
+                "a supervised runtime task exceeded the shutdown deadline",
+            ))
+        }
+    }
 }
 
 /// One-shot `delete-source` job: strict config, scoped deletion, receipt.
@@ -458,7 +518,7 @@ fn spawn_indexing_worker(
     poll_interval: Duration,
     mut drain: watch::Receiver<bool>,
     metrics: Arc<Metrics>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -473,7 +533,7 @@ fn spawn_indexing_worker(
                 _ = drain.changed() => break,
             }
         }
-    });
+    })
 }
 
 /// Runs passes until one makes no progress.
@@ -561,4 +621,40 @@ async fn shutdown_signal() -> Result<(), std::io::Error> {
 #[cfg(not(unix))]
 async fn shutdown_signal() -> Result<(), std::io::Error> {
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn process_task_timeout_aborts_and_awaits_the_task() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&dropped);
+        let handle = tokio::spawn(async move {
+            let _signal = DropSignal(signal);
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        assert!(
+            join_task_until(
+                handle,
+                tokio::time::Instant::now() + Duration::from_millis(10)
+            )
+            .await
+            .is_err()
+        );
+        assert!(dropped.load(Ordering::Acquire), "aborted task was detached");
+    }
 }

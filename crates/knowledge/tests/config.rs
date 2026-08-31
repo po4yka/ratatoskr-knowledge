@@ -36,6 +36,96 @@ fn invalid_environment_is_reported_without_its_value() {
 }
 
 #[test]
+fn primary_role_requires_bus_provider_and_authenticated_github_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let token_file = std::env::temp_dir().join(format!(
+        "ratatoskr-knowledge-github-token-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::write(&token_file, "bounded-test-service-token\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let token_path = token_file.to_string_lossy().into_owned();
+    let entries = [
+        ("RATATOSKR__RUNTIME__ROLE", "primary"),
+        (
+            "RATATOSKR__PROVIDER__OPENROUTER__API_KEY",
+            "synthetic-provider-token",
+        ),
+        (
+            "RATATOSKR__PROVIDER__OPENROUTER__MODEL",
+            "scripted/knowledge",
+        ),
+        (
+            "RATATOSKR__PROVIDER__OPENROUTER__BASE_URL",
+            "http://127.0.0.1:8099/v1",
+        ),
+        ("RATATOSKR__PRIMARY__GITHUB_TOKEN_FILE", token_path.as_str()),
+        (
+            "RATATOSKR__PRIMARY__GITHUB_BASE_URL",
+            "http://github-catalog:9083/",
+        ),
+    ];
+    let configured = Config::from_environment(entries)?;
+    assert_eq!(configured.primary.bus_stream, "ratatoskr_events");
+    assert_eq!(configured.primary.bus_durable, "ratatoskr_knowledge_main");
+    assert_eq!(configured.primary.readme_response_bytes, 1_048_576);
+
+    let missing_provider = Config::from_environment([
+        ("RATATOSKR__RUNTIME__ROLE", "primary"),
+        ("RATATOSKR__PRIMARY__GITHUB_TOKEN_FILE", token_path.as_str()),
+    ])
+    .expect_err("primary must not silently become admin-only")
+    .to_string();
+    assert!(missing_provider.contains("RATATOSKR__PROVIDER__OPENROUTER__API_KEY"));
+
+    let drifted = Config::from_environment(entries.into_iter().chain([(
+        "RATATOSKR__PRIMARY__BUS_DURABLE",
+        "knowledge-created-consumer",
+    )]))
+    .expect_err("primary must refuse a non-canonical durable")
+    .to_string();
+    assert!(drifted.contains("RATATOSKR__PRIMARY__BUS_DURABLE"));
+
+    let unsafe_lease = Config::from_environment(entries.into_iter().chain([
+        ("RATATOSKR__PRIMARY__LEASE_SECONDS", "5"),
+        ("RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS", "5000"),
+    ]))
+    .expect_err("a lease must outlive every external-call deadline")
+    .to_string();
+    assert!(unsafe_lease.contains("RATATOSKR__PRIMARY__LEASE_SECONDS"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bus_seed = std::env::temp_dir().join(format!(
+            "ratatoskr-knowledge-nkey-seed-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::write(&bus_seed, "synthetic-nkey-seed\n")?;
+        std::fs::set_permissions(&bus_seed, std::fs::Permissions::from_mode(0o640))?;
+        let seed_path = bus_seed.to_string_lossy().into_owned();
+        let insecure = Config::from_environment(entries.into_iter().chain([(
+            "RATATOSKR__PRIMARY__BUS_CREDENTIALS_FILE",
+            seed_path.as_str(),
+        )]))
+        .expect_err("group-readable bus credentials must fail closed")
+        .to_string();
+        assert!(insecure.contains("RATATOSKR__PRIMARY__BUS_CREDENTIALS_FILE"));
+        assert!(!insecure.contains("synthetic-nkey-seed"));
+        std::fs::remove_file(bus_seed)?;
+    }
+
+    std::fs::remove_file(token_file)?;
+    Ok(())
+}
+
+#[test]
 fn provider_keys_are_finite_strict_and_secret() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::default();
 

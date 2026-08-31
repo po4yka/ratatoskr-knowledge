@@ -17,6 +17,13 @@ pub struct Metrics {
     search_browse: AtomicU64,
     search_lexical: AtomicU64,
     search_hybrid: AtomicU64,
+    primary_admitted: AtomicU64,
+    primary_rejected: AtomicU64,
+    primary_collisions: AtomicU64,
+    primary_retries: AtomicU64,
+    primary_uncertain: AtomicU64,
+    outbox_published: AtomicU64,
+    outbox_retries: AtomicU64,
 }
 
 impl Metrics {
@@ -53,6 +60,41 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records one newly admitted primary fact.
+    pub fn record_primary_admitted(&self) {
+        self.primary_admitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one content-free permanent primary rejection.
+    pub fn record_primary_rejected(&self) {
+        self.primary_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one immutable event-id collision.
+    pub fn record_primary_collision(&self) {
+        self.primary_collisions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one bounded dependency retry.
+    pub fn record_primary_retry(&self) {
+        self.primary_retries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one provider outcome requiring operator review.
+    pub fn record_primary_uncertain(&self) {
+        self.primary_uncertain.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one broker-acknowledged terminal publication.
+    pub fn record_outbox_published(&self) {
+        self.outbox_published.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one retained outbox publication retry.
+    pub fn record_outbox_retry(&self) {
+        self.outbox_retries.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Renders the Prometheus exposition text.
     #[must_use]
     pub fn render(&self) -> String {
@@ -62,16 +104,6 @@ impl Metrics {
             &mut text,
             "embedding_index_passes_total",
             self.embedding_index_passes.load(Ordering::Relaxed),
-        );
-        push_counter(
-            &mut text,
-            "embedding_sources_indexed_total",
-            self.embedding_sources_indexed.load(Ordering::Relaxed),
-        );
-        push_counter(
-            &mut text,
-            "embedding_index_failures_total",
-            self.embedding_index_failures.load(Ordering::Relaxed),
         );
         push_counter(
             &mut text,
@@ -98,6 +130,38 @@ impl Metrics {
             "search_hybrid_total",
             self.search_hybrid.load(Ordering::Relaxed),
         );
+        for (name, value) in [
+            (
+                "primary_admitted_total",
+                self.primary_admitted.load(Ordering::Relaxed),
+            ),
+            (
+                "primary_rejected_total",
+                self.primary_rejected.load(Ordering::Relaxed),
+            ),
+            (
+                "primary_collisions_total",
+                self.primary_collisions.load(Ordering::Relaxed),
+            ),
+            (
+                "primary_retries_total",
+                self.primary_retries.load(Ordering::Relaxed),
+            ),
+            (
+                "primary_uncertain_total",
+                self.primary_uncertain.load(Ordering::Relaxed),
+            ),
+            (
+                "outbox_published_total",
+                self.outbox_published.load(Ordering::Relaxed),
+            ),
+            (
+                "outbox_retries_total",
+                self.outbox_retries.load(Ordering::Relaxed),
+            ),
+        ] {
+            push_counter(&mut text, name, value);
+        }
         text
     }
 }

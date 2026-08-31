@@ -1,7 +1,7 @@
 use ratatoskr_document_contracts::Document;
 use uuid::Uuid;
 
-use crate::runs::AttemptUpdate;
+use crate::runs::{AttemptUpdate, RecoveredAttempt, RunResumeAction};
 use crate::search::{
     SearchDocumentProjection, extract_search_text, record_search_document,
     record_search_projection_input,
@@ -9,8 +9,8 @@ use crate::search::{
 use crate::{
     ArticleAnalysis, ArticleValidationError, AttemptInput, AttemptOutcome, AttemptReason,
     BlobError, BlobStore, Database, GenerationRequest, LlmProvider, PersistenceError,
-    PreparedContext, ProviderError, ProviderFailureClass, ProviderIdentity, RunState,
-    ValidationClass, record_validation_failure,
+    PreparedContext, ProviderError, ProviderFailureClass, ProviderIdentity, ProviderResponse,
+    ProviderRetrySafety, ProviderUsage, RunState, ValidationClass, record_validation_failure,
 };
 
 /// First-slice article pipeline failure with no source or response content.
@@ -32,6 +32,9 @@ pub enum PipelineError {
     /// Provider execution exceeded its finite deadline.
     #[error("the provider request timed out")]
     Timeout,
+    /// The provider may have accepted a billable request and replay is unsafe.
+    #[error("the provider outcome is unknown")]
+    ProviderOutcomeUnknown,
 }
 
 /// Durable fake-provider article pipeline.
@@ -83,17 +86,39 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         context: &PreparedContext,
         document: &Document,
     ) -> Result<ArticleAnalysis, PipelineError> {
-        if let Some(article) = self.resume_output(run_id).await? {
-            return Ok(article);
-        }
-        self.database
-            .transition_run(run_id, RunState::Queued, RunState::ContextPrepared)
+        let action = self
+            .database
+            .prepare_run_resume(run_id, self.provider.retry_safety())
             .await?;
-        self.database
-            .transition_run(run_id, RunState::ContextPrepared, RunState::ModelRequested)
-            .await?;
-        let mut reason = AttemptReason::Initial;
-        for call in 0..2 {
+        let (first_call, call_limit, mut reason) = match action {
+            RunResumeAction::Output(value) => {
+                return serde_json::from_value(value)
+                    .map_err(PersistenceError::Encode)
+                    .map_err(PipelineError::from);
+            }
+            RunResumeAction::ProviderOutcomeUnknown => {
+                return Err(PipelineError::ProviderOutcomeUnknown);
+            }
+            RunResumeAction::Failed => return Err(PipelineError::Invalid),
+            RunResumeAction::StoredResponse { attempt, .. } => {
+                return self
+                    .resume_stored_response(run_id, &attempt, request, context, document)
+                    .await;
+            }
+            RunResumeAction::Call {
+                first_call,
+                call_limit,
+                reason,
+                repair_code,
+            } => {
+                if let Some(code) = repair_code {
+                    request = repair_request(&request, &code);
+                }
+                (first_call, call_limit, reason)
+            }
+        };
+
+        for call in first_call..call_limit {
             let flow = self
                 .execute_attempt(run_id, call, request.clone(), context, document, reason)
                 .await?;
@@ -116,7 +141,81 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         Err(PersistenceError::AttemptBudgetExhausted.into())
     }
 
+    async fn resume_stored_response(
+        &self,
+        run_id: Uuid,
+        attempt: &RecoveredAttempt,
+        mut request: GenerationRequest,
+        context: &PreparedContext,
+        document: &Document,
+    ) -> Result<ArticleAnalysis, PipelineError> {
+        let reference = attempt
+            .raw_response
+            .as_ref()
+            .ok_or(PersistenceError::InvalidAnalysisIdentity)?;
+        let response = ProviderResponse {
+            bytes: self.blobs.read(reference).await?,
+            request_id: attempt.request_id.clone(),
+            usage: ProviderUsage {
+                input_tokens: attempt.input_tokens,
+                output_tokens: attempt.output_tokens,
+            },
+        };
+        let call = u8::try_from(attempt.ordinal.saturating_sub(1)).unwrap_or(1);
+        match self
+            .process_or_fail(
+                run_id,
+                attempt.ordinal,
+                &response,
+                context,
+                document,
+                attempt.duration_ms,
+            )
+            .await?
+        {
+            ResponseOutcome::Accepted(article) => Ok(article),
+            ResponseOutcome::Invalid(code) if call == 0 => {
+                self.require_transition(run_id, RunState::ResponseReceived, RunState::Repaired)
+                    .await?;
+                self.require_transition(run_id, RunState::Repaired, RunState::ModelRequested)
+                    .await?;
+                request = repair_request(&request, code);
+                match self
+                    .execute_attempt(run_id, 1, request, context, document, AttemptReason::Repair)
+                    .await?
+                {
+                    AttemptFlow::Accepted(article) => Ok(article),
+                    AttemptFlow::Retry | AttemptFlow::Repair(_) => {
+                        Err(PersistenceError::AttemptBudgetExhausted.into())
+                    }
+                }
+            }
+            ResponseOutcome::Invalid(_) => {
+                self.require_transition(run_id, RunState::ResponseReceived, RunState::Failed)
+                    .await?;
+                Err(PipelineError::Invalid)
+            }
+        }
+    }
+
+    async fn require_transition(
+        &self,
+        run_id: Uuid,
+        expected: RunState,
+        next: RunState,
+    ) -> Result<(), PipelineError> {
+        if self.database.transition_run(run_id, expected, next).await? {
+            Ok(())
+        } else {
+            Err(PersistenceError::InvalidAnalysisIdentity.into())
+        }
+    }
+
     /// Runs one recorded provider attempt and reports how the loop continues.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one function keeps a provider attempt and its durable outcome transitions adjacent"
+    )]
     async fn execute_attempt(
         &self,
         run_id: Uuid,
@@ -154,8 +253,18 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                     duration_ms,
                 )
                 .await?;
-            if call == 0 {
+            if call == 0 && self.provider.retry_safety() == ProviderRetrySafety::Idempotent {
                 return Ok(AttemptFlow::Retry);
+            }
+            if self.provider.retry_safety() == ProviderRetrySafety::Uncertain {
+                self.database
+                    .transition_run(
+                        run_id,
+                        RunState::ModelRequested,
+                        RunState::ProviderOutcomeUnknown,
+                    )
+                    .await?;
+                return Err(PipelineError::ProviderOutcomeUnknown);
             }
             self.fail_requested_run(run_id).await?;
             return Err(PipelineError::Timeout);
@@ -180,8 +289,23 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                         duration_ms,
                     )
                     .await?;
-                if failure.is_transient() && call == 0 {
+                if failure.is_transient()
+                    && call == 0
+                    && self.provider.retry_safety() == ProviderRetrySafety::Idempotent
+                {
                     return Ok(AttemptFlow::Retry);
+                }
+                if failure.is_transient()
+                    && self.provider.retry_safety() == ProviderRetrySafety::Uncertain
+                {
+                    self.database
+                        .transition_run(
+                            run_id,
+                            RunState::ModelRequested,
+                            RunState::ProviderOutcomeUnknown,
+                        )
+                        .await?;
+                    return Err(PipelineError::ProviderOutcomeUnknown);
                 }
                 self.fail_requested_run(run_id).await?;
                 return Err(PipelineError::Provider(failure.error));
@@ -207,32 +331,6 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
                 Err(PipelineError::Invalid)
             }
         }
-    }
-
-    async fn resume_output(&self, run_id: Uuid) -> Result<Option<ArticleAnalysis>, PipelineError> {
-        let stored: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-            "select runs.state, outputs.result
-             from knowledge.analysis_runs runs
-             left join knowledge.analysis_outputs outputs
-                on outputs.run_id = runs.run_id and outputs.accepted
-             where runs.run_id = $1",
-        )
-        .bind(run_id)
-        .fetch_optional(self.database.pool())
-        .await
-        .map_err(PersistenceError::Query)?;
-        let Some((state, result)) = stored else {
-            return Ok(None);
-        };
-        if !matches!(state.as_str(), "persisted" | "completed") {
-            return Ok(None);
-        }
-        let article =
-            serde_json::from_value(result.ok_or(PersistenceError::InvalidAnalysisIdentity)?)
-                .map_err(PersistenceError::Encode)?;
-        // Both resting states resolve the same accepted output; neither
-        // replay mutates run state.
-        Ok(Some(article))
     }
 
     async fn process_or_fail(

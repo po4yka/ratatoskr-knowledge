@@ -6,7 +6,7 @@
 The first article-analysis slice uses a scripted provider for offline gates, an `OpenRouter` adapter
 for real inference behind timeout, size-cap, rate, retry, cancellation, and budget controls, and a
 disposable `PostgreSQL` 17 database. PostgreSQL full-text search, pgvector embeddings with hybrid
-ranking, and explicit reindex jobs are implemented; external message handling is not.
+ranking, explicit reindex jobs, and the primary JetStream document/event intake are implemented.
 
 ## Toolchain and gate
 
@@ -139,8 +139,18 @@ docker run -d --name ratatoskr-knowledge-nats -p 127.0.0.1:14223:4222 \
 export KNOWLEDGE_TEST_NATS_URL=nats://127.0.0.1:14223
 ```
 
-The test provisions only its fixed command stream and durable on this disposable broker. Production
-topology remains an operator-owned precondition; Knowledge never creates or widens it.
+The tests provision their fixed command and primary streams and durables only on this disposable
+broker. `primary_boot` deletes the primary durable first to prove Knowledge refuses startup without
+creating it, then provisions the exact thirteen-subject consumer and proves readiness follows the
+live supervisors. Production topology remains an operator-owned precondition; Knowledge never
+creates or widens it.
+
+For a local primary-role smoke run, provision the canonical `ratatoskr_events` stream and the
+`ratatoskr_knowledge_main` durable with exactly the subjects asserted by `primary_boot`, then set
+`RATATOSKR__RUNTIME__ROLE=primary`, the primary bus and GitHub boundary keys, and the controlled
+provider keys. Put NATS and GitHub credentials in absolute `0600` files rather than command-line
+arguments. Use `check-config` before startup. Do not point the smoke run at production credentials or
+the fleet broker.
 
 ## The Rust skills in this repository
 

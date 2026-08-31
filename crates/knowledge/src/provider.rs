@@ -140,10 +140,24 @@ pub struct ProviderIdentity {
     pub model: String,
 }
 
+/// Whether an ambiguous accepted provider request can be repeated automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRetrySafety {
+    /// The provider has no idempotency or reconciliation primitive.
+    Uncertain,
+    /// The adapter proves repeated request identities have one external effect.
+    Idempotent,
+}
+
 /// Narrow provider-neutral JSON generation boundary.
 pub trait LlmProvider: Send + Sync {
     /// Returns the stable adapter and model identity for attempt records.
     fn identity(&self) -> ProviderIdentity;
+
+    /// Declares whether transport-ambiguous calls can be replayed automatically.
+    fn retry_safety(&self) -> ProviderRetrySafety {
+        ProviderRetrySafety::Uncertain
+    }
 
     /// Generates one raw JSON response.
     fn generate_json(
@@ -196,6 +210,10 @@ impl LlmProvider for ScriptedProvider {
             provider: "scripted_fake".to_owned(),
             model: "fake_default_v1".to_owned(),
         }
+    }
+
+    fn retry_safety(&self) -> ProviderRetrySafety {
+        ProviderRetrySafety::Idempotent
     }
 
     fn generate_json(

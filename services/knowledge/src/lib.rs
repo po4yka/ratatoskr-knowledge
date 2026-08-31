@@ -6,12 +6,14 @@
 mod admin;
 mod channel_recap;
 mod metrics;
+mod primary;
 
 use ratatoskr_knowledge::{ControlledEmbeddings, HybridRetriever, OpenAiCompatibleEmbeddings};
 
 pub use admin::{CHANNEL_DIGEST_RESULT_ROUTE, Lifecycle, admin_router};
 pub use channel_recap::{ChannelRecapWorkerError, spawn_channel_recap_worker};
 pub use metrics::Metrics;
+pub use primary::{PrimaryRuntime, PrimaryRuntimeError};
 
 /// The production hybrid retrieval selector over the controlled embeddings
 /// adapter.

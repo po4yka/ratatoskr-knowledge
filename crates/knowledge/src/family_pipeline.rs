@@ -1,8 +1,5 @@
 //! Durable execution and search projection for repository, social, and archive analyses.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use ratatoskr_ai_archive_contracts::{
     AiArchiveAnalysisCompleted, AiArchiveSubject, AiConversation,
 };
@@ -10,102 +7,33 @@ use ratatoskr_github_contracts::{
     ReadmeRevision, RepositoryAnalysisCompleted, RepositoryAnalysisRequested,
 };
 use ratatoskr_identifiers::{
-    BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, EntityRef, Extensions,
-    TenantRef, WireTimestamp,
+    BlobRef, ContentDigest, DocumentId, EntityRef, Extensions, TenantRef, WireTimestamp,
 };
 use ratatoskr_social_contracts::SocialSourceSnapshot;
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::runs::AttemptUpdate;
+use crate::runs::{AttemptUpdate, RunResumeAction};
 use crate::search::{
     SearchDocumentProjection, record_search_document, record_search_projection_input,
 };
 use crate::{
     AnalysisIdentity, AttemptInput, AttemptOutcome, AttemptReason, BlobError, BlobStore, Database,
     FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError, ProviderError,
-    ProviderFailureClass, ProviderIdentity, RepositoryAnalysis, RepositoryAnalysisAdmission,
-    RepositoryAnalysisConsumer, RunState, SocialAnalysis, SourceInbox, SourceInboxError,
-    SourceReference, archive_generation_request, archive_project_generation_request,
-    repository_generation_request, social_generation_request, validate_archive_analysis,
-    validate_archive_project_analysis, validate_repository_analysis, validate_social_analysis,
+    ProviderFailureClass, ProviderIdentity, ProviderResponse, ProviderRetrySafety, ProviderUsage,
+    RepositoryAnalysis, RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RunState,
+    SocialAnalysis, SourceInbox, SourceInboxError, SourceReference, archive_generation_request,
+    archive_project_generation_request, repository_generation_request, social_generation_request,
+    validate_archive_analysis, validate_archive_project_analysis, validate_repository_analysis,
+    validate_social_analysis,
 };
 
-/// Authorized byte resolver for a GitHub-owned README reference.
-///
-/// The resolver is a boundary adapter. It may call only the GitHub service's documented blob
-/// endpoint; Knowledge never reads another bounded context's database or fetches GitHub URLs.
-pub trait RepositoryReadmeResolver: Send + Sync {
-    /// Resolves exactly the supplied immutable README reference.
-    fn read_readme<'a>(
-        &'a self,
-        reference: &'a BlobRef,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RepositoryReadmeError>> + Send + 'a>>;
-}
-
-/// Safe repository README retrieval failure.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum RepositoryReadmeError {
-    /// The referenced source bytes cannot currently be resolved.
-    #[error("the repository README source is unavailable")]
-    Unavailable,
-    /// The resolver returned bytes that do not match the immutable reference.
-    #[error("the repository README source is corrupt")]
-    Integrity,
-}
-
-/// Durable family-analysis execution failure without source contents.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum FamilyPipelineError {
-    /// Knowledge-owned state could not be written.
-    #[error("the family analysis state could not be persisted")]
-    Persistence(#[from] PersistenceError),
-    /// Raw source or response storage failed.
-    #[error("the family analysis blob could not be stored")]
-    Blob(#[from] BlobError),
-    /// The provider failed.
-    #[error("the family analysis provider failed")]
-    Provider(#[from] ProviderError),
-    /// The provider response is not valid for the requested family.
-    #[error("the family analysis response is invalid")]
-    Invalid,
-    /// The provider request exceeded its finite deadline.
-    #[error("the family analysis provider timed out")]
-    Timeout,
-    /// A contract snapshot could not be encoded or decoded.
-    #[error("the family analysis contract could not be encoded")]
-    Contract(#[from] serde_json::Error),
-    /// Inbox state could not be loaded safely.
-    #[error("the family source inbox could not be read")]
-    Inbox(#[from] SourceInboxError),
-    /// A GitHub README could not be acquired from its authorized source owner.
-    #[error(transparent)]
-    RepositorySource(#[from] RepositoryReadmeError),
-    /// The immutable family source identity is invalid.
-    #[error("the family analysis source identity is invalid")]
-    Source,
-}
-
-/// Result of executing a repository request, including at-most-once terminal fact creation.
-#[derive(Debug, Clone)]
-pub struct RepositoryAnalysisExecution {
-    /// Persisted, validated repository analysis.
-    pub analysis: RepositoryAnalysis,
-    /// Completion fact to publish through the transactional outbox, if this call linked it.
-    pub completion: Option<RepositoryAnalysisCompleted>,
-}
-
-/// Result of executing one published archive conversation, including its producer-linkable
-/// completion fact.
-#[derive(Debug, Clone)]
-pub struct ArchiveAnalysisExecution {
-    /// Grounded analysis persisted for this immutable conversation revision.
-    pub analysis: crate::ArchiveAnalysis,
-    /// Completion naming precisely the archive subject revision that was analysed.
-    pub completion: AiArchiveAnalysisCompleted,
-}
+mod helpers;
+mod types;
+use helpers::{repository_digest, verify_readme};
+pub use types::{
+    ArchiveAnalysisExecution, FamilyPipelineError, RepositoryAnalysisExecution,
+    RepositoryReadmeError, RepositoryReadmeResolver,
+};
 
 /// Durable, idempotent family-analysis worker.
 #[derive(Debug)]
@@ -358,7 +286,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             .map_err(|_| FamilyPipelineError::Source)?;
         let (readme, source) = match &request.source_revision.readme {
             ReadmeRevision::Present { content_ref } => {
-                let bytes = resolver.read_readme(content_ref).await?;
+                let bytes = resolver.read_readme(request, content_ref).await?;
                 verify_readme(content_ref, &bytes)?;
                 let text =
                     String::from_utf8(bytes).map_err(|_| RepositoryReadmeError::Integrity)?;
@@ -426,10 +354,16 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             serde_json::from_value(value).map_err(FamilyPipelineError::Contract)?;
         let result_ref = EntityRef::parse(&format!("analysis:{run}"))
             .map_err(|_| FamilyPipelineError::Source)?;
-        let completion = consumer
-            .complete(request, result_ref)
-            .await
-            .map_err(|_| FamilyPipelineError::Source)?;
+        let completion = Some(RepositoryAnalysisCompleted {
+            owner: request.owner,
+            repository_id: request.repository_id,
+            github_repository_numeric_id: request.github_repository_numeric_id,
+            request_id: request.request_id,
+            source_revision: request.source_revision.clone(),
+            analysis_result_ref: result_ref,
+            completed_at: WireTimestamp::now(),
+            extensions: Extensions::new(),
+        });
         Ok(RepositoryAnalysisExecution {
             analysis,
             completion,
@@ -527,15 +461,127 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
     where
         F: Fn(&serde_json::Value) -> Result<serde_json::Value, FamilyValidationError>,
     {
-        if let Some(result) = self.resume(run_id).await? {
-            return Ok(result);
-        }
-        self.transition(run_id, RunState::Queued, RunState::ContextPrepared)
-            .await?;
-        self.transition(run_id, RunState::ContextPrepared, RunState::ModelRequested)
+        let action = self
+            .database
+            .prepare_run_resume(run_id, self.provider.retry_safety())
             .await?;
         let mut reason = AttemptReason::Initial;
-        for call in 0..2 {
+        let mut first_call = 0_u8;
+        let mut call_limit = 2_u8;
+        let mut stored_state = None;
+        let mut stored_attempt = None;
+        match action {
+            RunResumeAction::Output(value) => return Ok(value),
+            RunResumeAction::ProviderOutcomeUnknown => {
+                return Err(FamilyPipelineError::ProviderOutcomeUnknown);
+            }
+            RunResumeAction::Failed => return Err(FamilyPipelineError::Invalid),
+            RunResumeAction::StoredResponse { state, attempt } => {
+                stored_state = Some(state);
+                stored_attempt = Some(attempt);
+            }
+            RunResumeAction::Call {
+                first_call: next_call,
+                call_limit: next_limit,
+                reason: next_reason,
+                repair_code,
+            } => {
+                first_call = next_call;
+                call_limit = next_limit;
+                reason = next_reason;
+                if repair_code.is_some() {
+                    request
+                        .task_instruction
+                        .push_str("\nRepair validation code: family_schema.");
+                }
+            }
+        }
+
+        if let Some(attempt) = stored_attempt.as_ref() {
+            let raw = attempt
+                .raw_response
+                .as_ref()
+                .ok_or(FamilyPipelineError::Source)?;
+            let response = ProviderResponse {
+                bytes: self.blobs.read(raw).await?,
+                request_id: attempt.request_id.clone(),
+                usage: ProviderUsage {
+                    input_tokens: attempt.input_tokens,
+                    output_tokens: attempt.output_tokens,
+                },
+            };
+            if stored_state == Some(RunState::ModelRequested) {
+                self.transition(run_id, RunState::ModelRequested, RunState::ResponseReceived)
+                    .await?;
+            }
+            let value = serde_json::from_slice::<serde_json::Value>(&response.bytes)
+                .ok()
+                .and_then(|value| validate(&value).ok());
+            if let Some(value) = value {
+                self.database
+                    .update_attempt(
+                        run_id,
+                        attempt.ordinal,
+                        &AttemptUpdate {
+                            raw_response: raw,
+                            request_id: response.request_id.as_deref(),
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                            outcome: AttemptOutcome::Accepted,
+                            validation_code: None,
+                            duration_ms: attempt.duration_ms,
+                        },
+                    )
+                    .await?;
+                if stored_state != Some(RunState::SchemaValidated) {
+                    self.transition(
+                        run_id,
+                        RunState::ResponseReceived,
+                        RunState::SchemaValidated,
+                    )
+                    .await?;
+                }
+                self.persist(run_id, value.clone(), raw.clone(), fields)
+                    .await?;
+                return Ok(value);
+            }
+            self.database
+                .update_attempt(
+                    run_id,
+                    attempt.ordinal,
+                    &AttemptUpdate {
+                        raw_response: raw,
+                        request_id: response.request_id.as_deref(),
+                        input_tokens: response.usage.input_tokens,
+                        output_tokens: response.usage.output_tokens,
+                        outcome: AttemptOutcome::Invalid,
+                        validation_code: Some("family_schema"),
+                        duration_ms: attempt.duration_ms,
+                    },
+                )
+                .await?;
+            if stored_state == Some(RunState::SchemaValidated) {
+                self.transition(run_id, RunState::SchemaValidated, RunState::Failed)
+                    .await?;
+                return Err(FamilyPipelineError::Invalid);
+            }
+            if attempt.ordinal >= 2 {
+                self.transition(run_id, RunState::ResponseReceived, RunState::Failed)
+                    .await?;
+                return Err(FamilyPipelineError::Invalid);
+            }
+            self.transition(run_id, RunState::ResponseReceived, RunState::Repaired)
+                .await?;
+            self.transition(run_id, RunState::Repaired, RunState::ModelRequested)
+                .await?;
+            request
+                .task_instruction
+                .push_str("\nRepair validation code: family_schema.");
+            first_call = u8::try_from(attempt.ordinal).unwrap_or(2);
+            reason = AttemptReason::Repair;
+        }
+
+        for call in first_call..call_limit {
             let attempt = self
                 .database
                 .record_attempt(run_id, &attempt_input(&self.provider.identity(), reason))
@@ -559,9 +605,19 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                             duration_ms,
                         )
                         .await?;
-                    if call == 0 {
+                    if call == 0 && self.provider.retry_safety() == ProviderRetrySafety::Idempotent
+                    {
                         reason = AttemptReason::Retry;
                         continue;
+                    }
+                    if self.provider.retry_safety() == ProviderRetrySafety::Uncertain {
+                        self.transition(
+                            run_id,
+                            RunState::ModelRequested,
+                            RunState::ProviderOutcomeUnknown,
+                        )
+                        .await?;
+                        return Err(FamilyPipelineError::ProviderOutcomeUnknown);
                     }
                     self.fail(run_id).await?;
                     return Err(FamilyPipelineError::Timeout);
@@ -584,9 +640,23 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                             duration_ms,
                         )
                         .await?;
-                    if failure.is_transient() && call == 0 {
+                    if failure.is_transient()
+                        && call == 0
+                        && self.provider.retry_safety() == ProviderRetrySafety::Idempotent
+                    {
                         reason = AttemptReason::Retry;
                         continue;
+                    }
+                    if failure.is_transient()
+                        && self.provider.retry_safety() == ProviderRetrySafety::Uncertain
+                    {
+                        self.transition(
+                            run_id,
+                            RunState::ModelRequested,
+                            RunState::ProviderOutcomeUnknown,
+                        )
+                        .await?;
+                        return Err(FamilyPipelineError::ProviderOutcomeUnknown);
                     }
                     self.fail(run_id).await?;
                     return Err(FamilyPipelineError::Provider(failure.error));
@@ -672,17 +742,6 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         Err(FamilyPipelineError::Invalid)
     }
 
-    async fn resume(&self, run_id: Uuid) -> Result<Option<serde_json::Value>, FamilyPipelineError> {
-        let row: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-            "select r.state, o.result from knowledge.analysis_runs r left join knowledge.analysis_outputs o on o.run_id = r.run_id and o.accepted where r.run_id = $1",
-        ).bind(run_id).fetch_optional(self.database.pool()).await.map_err(PersistenceError::Query)?;
-        Ok(row.and_then(|(state, result)| {
-            matches!(state.as_str(), "persisted" | "completed")
-                .then_some(result)
-                .flatten()
-        }))
-    }
-
     async fn transition(
         &self,
         run_id: Uuid,
@@ -764,31 +823,4 @@ fn attempt_input(identity: &ProviderIdentity, reason: AttemptReason) -> AttemptI
         provider_request_id: None,
         outcome: AttemptOutcome::Requested,
     }
-}
-
-fn repository_digest(
-    request: &RepositoryAnalysisRequested,
-) -> Result<ContentDigest, FamilyPipelineError> {
-    let bytes = serde_json::to_vec(&(
-        request.source_revision.clone(),
-        request.repository_attributes.clone(),
-    ))?;
-    let hex = format!("{:x}", Sha256::digest(bytes));
-    Ok(ContentDigest {
-        algorithm: DigestAlgorithm::Sha256,
-        hex: DigestHex::parse(&hex).map_err(|_| FamilyPipelineError::Source)?,
-    })
-}
-
-fn verify_readme(reference: &BlobRef, bytes: &[u8]) -> Result<(), RepositoryReadmeError> {
-    if reference.owner_service.as_str() != "ratatoskr-github"
-        || reference.media_type.as_str() != "text/markdown"
-        || reference.length_bytes
-            != u64::try_from(bytes.len()).map_err(|_| RepositoryReadmeError::Integrity)?
-        || !matches!(reference.digest.algorithm, DigestAlgorithm::Sha256)
-        || format!("{:x}", Sha256::digest(bytes)) != reference.digest.hex.as_str()
-    {
-        return Err(RepositoryReadmeError::Integrity);
-    }
-    Ok(())
 }

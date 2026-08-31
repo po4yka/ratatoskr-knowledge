@@ -328,6 +328,7 @@ struct StaticReadme {
 impl RepositoryReadmeResolver for StaticReadme {
     fn read_readme<'a>(
         &'a self,
+        _request: &'a RepositoryAnalysisRequested,
         _reference: &'a BlobRef,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RepositoryReadmeError>> + Send + 'a>> {
         Box::pin(ready(Ok(self.bytes.clone())))

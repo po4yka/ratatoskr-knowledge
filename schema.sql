@@ -39,6 +39,8 @@ create table if not exists knowledge.analysis_runs (
     prompt_version text not null,
     context_builder_version text not null,
     model_policy text not null,
+    provider_replay_key text,
+    provider_replay_authorized boolean not null default false,
     state text not null default 'queued',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
@@ -46,6 +48,7 @@ create table if not exists knowledge.analysis_runs (
         'queued',
         'context_prepared',
         'model_requested',
+        'provider_outcome_unknown',
         'response_received',
         'schema_validated',
         'repaired',
@@ -54,6 +57,10 @@ create table if not exists knowledge.analysis_runs (
         'completed',
         'failed'
     )),
+    constraint analysis_runs_replay_check check (
+        (provider_replay_authorized and provider_replay_key is not null)
+        or (not provider_replay_authorized)
+    ),
     constraint analysis_runs_identity_key unique (
         source_ref_id,
         contract_version,
@@ -81,8 +88,11 @@ create table if not exists knowledge.analysis_attempts (
     error_class text,
     created_at timestamptz not null default now(),
     primary key (run_id, ordinal),
-    constraint analysis_attempts_ordinal_check check (ordinal between 1 and 2),
-    constraint analysis_attempts_reason_check check (reason in ('initial', 'retry', 'repair')),
+    constraint analysis_attempts_ordinal_check check (
+        ordinal between 1 and 2 or (ordinal = 3 and reason = 'operator_replay')
+    ),
+    constraint analysis_attempts_reason_check
+        check (reason in ('initial', 'retry', 'repair', 'operator_replay')),
     constraint analysis_attempts_outcome_check check (outcome in (
         'requested',
         'transient_failure',
@@ -199,6 +209,171 @@ create table if not exists knowledge.repository_analysis_requests (
         or (state = 'failed' and analysis_result_ref is null and failure_code is not null and retryable is not null and terminal_at is not null)
     )
 );
+
+-- The primary event adapter acknowledges a JetStream delivery only after this receipt and its
+-- work row commit together. The canonical envelope digest turns event-id reuse with another
+-- immutable fact into an observable collision instead of a harmless duplicate.
+create table if not exists knowledge.primary_event_receipts (
+    event_id uuid primary key,
+    subject text not null,
+    envelope_digest_hex text not null,
+    producer text not null,
+    tenant_ref text not null,
+    aggregate_id text not null,
+    family text not null,
+    accepted_at timestamptz not null default now(),
+    constraint primary_event_receipts_subject_check check (subject in (
+        'evt.content.document.extracted.v1',
+        'evt.social.source.captured.v1', 'evt.social.source.updated.v1',
+        'evt.social.source.removed.v1',
+        'evt.ai_archive.archive.imported.v1',
+        'evt.ai_archive.conversation.added.v1',
+        'evt.ai_archive.conversation.updated.v1',
+        'evt.ai_archive.project.added.v1', 'evt.ai_archive.project.updated.v1',
+        'evt.ai_archive.artifact.added.v1', 'evt.ai_archive.artifact.updated.v1',
+        'evt.ai_archive.subject.tombstoned.v1',
+        'evt.knowledge.repository_analysis.requested.v1'
+    )),
+    constraint primary_event_receipts_digest_check
+        check (envelope_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint primary_event_receipts_family_check
+        check (family in ('document', 'social', 'ai_archive', 'repository'))
+);
+
+-- Invalid transport input is retained without its user-controlled payload. A rejection digest is
+-- sufficient to count repeated poison deliveries without storing source content or diagnostics.
+create table if not exists knowledge.primary_event_rejections (
+    rejection_id uuid primary key,
+    delivery_digest_hex text not null,
+    transport_subject text not null,
+    rejection_code text not null,
+    first_seen_at timestamptz not null default now(),
+    last_seen_at timestamptz not null default now(),
+    occurrence_count integer not null default 1,
+    constraint primary_event_rejections_digest_check
+        check (delivery_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint primary_event_rejections_code_check check (rejection_code in (
+        'transport_subject', 'envelope', 'event_type', 'producer', 'tenant',
+        'aggregate', 'payload', 'event_id_collision'
+    )),
+    constraint primary_event_rejections_occurrence_check check (occurrence_count > 0),
+    constraint primary_event_rejections_identity_key unique (
+        delivery_digest_hex, transport_subject, rejection_code
+    )
+);
+
+-- Work is independent of the JetStream acknowledgement window. A worker can reclaim any
+-- non-terminal row after lease expiry and resumes from the explicit state. Provider uncertainty
+-- is deliberately non-claimable until an operator-authorized requeue changes the state.
+create table if not exists knowledge.analysis_work (
+    work_id uuid primary key,
+    event_id uuid not null unique references knowledge.primary_event_receipts(event_id),
+    family text not null,
+    tenant_ref text not null,
+    source_key text not null,
+    parent_source_key text not null,
+    source_revision text not null,
+    input_envelope jsonb not null,
+    state text not null default 'admitted',
+    attempt_count integer not null default 0,
+    max_attempts integer not null default 2,
+    next_eligible_at timestamptz not null default now(),
+    lease_owner text,
+    lease_expires_at timestamptz,
+    provider_request_key text,
+    analysis_run_id uuid references knowledge.analysis_runs(run_id),
+    terminal_code text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint analysis_work_family_check
+        check (family in ('document', 'social', 'ai_archive', 'repository')),
+    constraint analysis_work_input_object_check check (jsonb_typeof(input_envelope) = 'object'),
+    constraint analysis_work_state_check check (state in (
+        'admitted', 'preparing', 'provider_pending', 'provider_outcome_unknown',
+        'response_received', 'persisting', 'retry_wait', 'completed', 'failed', 'suppressed'
+    )),
+    constraint analysis_work_attempt_check
+        check (attempt_count between 0 and max_attempts and max_attempts between 1 and 8),
+    constraint analysis_work_lease_check check (
+        (lease_owner is null and lease_expires_at is null)
+        or (lease_owner is not null and lease_expires_at is not null)
+    ),
+    constraint analysis_work_terminal_check check (
+        (state in ('failed', 'suppressed') and terminal_code is not null)
+        or (state not in ('failed', 'suppressed') and terminal_code is null)
+    ),
+    constraint analysis_work_logical_revision_key unique (
+        tenant_ref, family, source_key, source_revision
+    )
+);
+
+create index if not exists analysis_work_claim_idx
+    on knowledge.analysis_work (next_eligible_at, created_at)
+    where state in (
+        'admitted', 'preparing', 'provider_pending', 'response_received',
+        'persisting', 'retry_wait'
+    );
+
+-- Authoritative source ordering is retained independently of analysis artifacts. A removed or
+-- tombstoned head remains after derived deletion, preventing stale replay from resurrecting data.
+create table if not exists knowledge.primary_source_heads (
+    family text not null,
+    tenant_ref text not null,
+    source_key text not null,
+    revision text not null,
+    observed_at timestamptz not null,
+    lifecycle text not null,
+    event_id uuid not null references knowledge.primary_event_receipts(event_id),
+    primary key (family, tenant_ref, source_key),
+    constraint primary_source_heads_family_check
+        check (family in ('document', 'social', 'ai_archive', 'repository')),
+    constraint primary_source_heads_lifecycle_check check (lifecycle in ('active', 'removed'))
+);
+
+-- Import, Artifact, and tombstone facts change Knowledge-owned source state without invoking a
+-- provider. Their typed envelope is retained here instead of being ACKed into a digest-only row.
+create table if not exists knowledge.primary_source_state (
+    family text not null,
+    tenant_ref text not null,
+    source_key text not null,
+    event_id uuid not null references knowledge.primary_event_receipts(event_id),
+    lifecycle text not null,
+    input_envelope jsonb not null,
+    updated_at timestamptz not null default now(),
+    primary key (family, tenant_ref, source_key),
+    constraint primary_source_state_lifecycle_check check (lifecycle in ('active', 'removed')),
+    constraint primary_source_state_envelope_check check (jsonb_typeof(input_envelope) = 'object')
+);
+
+-- Terminal state and its publication intent are inserted in the same transaction. The publisher
+-- uses message_id as Nats-Msg-Id and marks sent only after the JetStream publish acknowledgement.
+create table if not exists knowledge.knowledge_outbox (
+    outbox_id uuid primary key,
+    work_id uuid not null references knowledge.analysis_work(work_id),
+    event_type text not null,
+    subject text not null,
+    envelope jsonb not null,
+    message_id uuid not null unique,
+    created_at timestamptz not null default now(),
+    publish_attempts integer not null default 0,
+    next_attempt_at timestamptz not null default now(),
+    published_at timestamptz,
+    constraint knowledge_outbox_subject_check check (subject in (
+        'evt.knowledge.analysis.completed.v1',
+        'evt.knowledge.ai_archive_analysis.completed.v1',
+        'evt.knowledge.repository_analysis.completed.v1',
+        'evt.knowledge.repository_analysis.failed.v1',
+        'evt.knowledge.channel_digest_recap.completed.v1',
+        'evt.knowledge.channel_digest_recap.failed.v1'
+    )),
+    constraint knowledge_outbox_payload_check check (jsonb_typeof(envelope) = 'object'),
+    constraint knowledge_outbox_attempt_check check (publish_attempts >= 0),
+    constraint knowledge_outbox_logical_key unique (work_id, event_type)
+);
+
+create index if not exists knowledge_outbox_pending_idx
+    on knowledge.knowledge_outbox (next_attempt_at, created_at)
+    where published_at is null;
 
 -- At-least-once source deliveries are claimed before family-specific analysis starts. Snapshot
 -- payloads are state-carried contract values, never a producer-table dependency.

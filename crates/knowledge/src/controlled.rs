@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::{
     BudgetError, BudgetLedger, BudgetLimits, GenerationRequest, LlmProvider, ProviderError,
-    ProviderFailure, ProviderFailureClass, ProviderIdentity, RateLimiter, TokenPrices,
+    ProviderFailure, ProviderFailureClass, ProviderIdentity, ProviderRetrySafety, RateLimiter,
+    TokenPrices,
 };
 
 /// Conservative projection inputs applied before every inner call.
@@ -66,6 +67,10 @@ fn projected_input_tokens(request: &GenerationRequest) -> u64 {
 impl<P: LlmProvider> LlmProvider for ControlledProvider<P> {
     fn identity(&self) -> ProviderIdentity {
         self.inner.identity()
+    }
+
+    fn retry_safety(&self) -> ProviderRetrySafety {
+        self.inner.retry_safety()
     }
 
     async fn generate_json(

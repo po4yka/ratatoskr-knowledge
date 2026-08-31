@@ -17,7 +17,7 @@ use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 
 const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
-const CONTRACT_REVISION: &str = "f21a6db0b85da17229a3c042701a241514f4cdd2";
+const CONTRACT_REVISION: &str = "90fca0353e1725ef04c28d71f8de0bedbf0e6b8a";
 
 fn request_json() -> serde_json::Value {
     serde_json::json!({

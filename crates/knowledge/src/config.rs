@@ -6,6 +6,13 @@ use serde::Serialize;
 
 use crate::result_reader_secret::ResultReaderSecret;
 
+mod primary;
+mod secret;
+
+pub use primary::{PrimaryConfig, RuntimeRole};
+use primary::{apply_primary_entry, validate_primary};
+pub use secret::ProviderSecret;
+
 const ENV_PREFIX: &str = "RATATOSKR__";
 
 /// Vector dimensionality every stored embedding must carry.
@@ -15,42 +22,11 @@ const ENV_PREFIX: &str = "RATATOSKR__";
 /// loader rejects any configured embeddings model dimension other than this.
 pub(crate) const EMBEDDING_STORAGE_DIMENSIONS: i32 = 1536;
 
-/// Credential value that redacts itself in diagnostics and serialization.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ProviderSecret(String);
-
-impl ProviderSecret {
-    /// Wraps one credential value.
-    #[must_use]
-    pub fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    /// Exposes the credential only to the adapter's authorization path.
-    #[must_use]
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ProviderSecret {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("[redacted]")
-    }
-}
-
-impl Serialize for ProviderSecret {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str("[redacted]")
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 /// Process configuration with finite built-in limits.
 pub struct Config {
+    /// Explicit deployable role; primary cannot degrade to the admin-only role.
+    pub runtime_role: RuntimeRole,
     /// Operator listener configuration.
     pub admin: AdminConfig,
     /// Owned durable storage configuration.
@@ -61,6 +37,8 @@ pub struct Config {
     pub provider: ProviderConfig,
     /// Optional channel-digest recap worker and exact transport topology.
     pub channel_recap: ChannelRecapConfig,
+    /// Primary event-stream and owner-service boundary configuration.
+    pub primary: PrimaryConfig,
 }
 
 /// Provider selection for the recap worker.
@@ -282,6 +260,7 @@ impl Config {
         config.provider.openrouter = draft.finish()?;
         config.provider.embeddings = embeddings_draft.finish()?;
         validate_channel_recap(&config)?;
+        validate_primary(&config)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -326,7 +305,17 @@ fn apply_entry(
     if key.starts_with("RATATOSKR__CHANNEL_RECAP__") {
         return apply_channel_recap_entry(&mut config.channel_recap, key, value);
     }
+    if key.starts_with("RATATOSKR__PRIMARY__") {
+        return apply_primary_entry(&mut config.primary, key, value);
+    }
     match key {
+        "RATATOSKR__RUNTIME__ROLE" => {
+            config.runtime_role = match value {
+                "admin" => RuntimeRole::Admin,
+                "primary" => RuntimeRole::Primary,
+                _ => return Err(ConfigError::new(key, "must be admin or primary")),
+            };
+        }
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
             let address = value
                 .parse::<SocketAddr>()
@@ -786,6 +775,7 @@ fn parse_nonnegative(key: &str, value: &str) -> Result<u64, ConfigError> {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime_role: RuntimeRole::Admin,
             admin: AdminConfig {
                 listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9081),
             },
@@ -837,6 +827,19 @@ impl Default for Config {
                 bus_credentials_file: None,
                 fetch_batch: 32,
                 ack_wait_seconds: 30,
+            },
+            primary: PrimaryConfig {
+                bus_endpoint: "nats://127.0.0.1:4222".to_owned(),
+                bus_stream: "ratatoskr_events".to_owned(),
+                bus_durable: "ratatoskr_knowledge_main".to_owned(),
+                bus_credentials_file: None,
+                github_base_url: "http://127.0.0.1:9083/".to_owned(),
+                github_token_file: None,
+                fetch_batch: 32,
+                ack_wait_seconds: 30,
+                worker_count: 4,
+                lease_seconds: 120,
+                readme_response_bytes: 1_048_576,
             },
         }
     }
