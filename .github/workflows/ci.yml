@@ -44,7 +44,7 @@ jobs:
           docker run --detach --name knowledge-nats --publish 127.0.0.1:4222:4222
           nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da -js
       - run: cargo fetch --locked
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-deny
       - run: cargo deny --locked check
