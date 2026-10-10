@@ -14,7 +14,9 @@ use ratatoskr_knowledge_service::{
 };
 use tokio::sync::watch;
 
-use crate::ingest_support::{TestResult, config, eventually, provision};
+use crate::ingest_support::{
+    PLATFORM_ACK_WAIT, TestResult, config, eventually, provision_with_ack_wait,
+};
 
 /// One broker, one test at a time: the stream and the durables are shared by name.
 pub(crate) static BROKER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -29,12 +31,21 @@ pub(crate) struct Harness {
     _root: TemporaryBlobRoot,
     context: jetstream::Context,
     url: String,
+    ack_wait: Duration,
 }
 
 impl Harness {
     pub(crate) async fn start() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_ack_wait(PLATFORM_ACK_WAIT).await
+    }
+
+    /// Starts with every durable's ack wait set to `ack_wait`, and a worker configuration that
+    /// states the same value.
+    pub(crate) async fn start_with_ack_wait(
+        ack_wait: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let url = nats_url();
-        let context = provision(&url).await?;
+        let context = provision_with_ack_wait(&url, ack_wait).await?;
         let root = TemporaryBlobRoot::create().await?;
         Ok(Self {
             database: TestDatabase::create().await?,
@@ -42,12 +53,15 @@ impl Harness {
             _root: root,
             context,
             url,
+            ack_wait,
         })
     }
 
     /// The worker configuration for this broker, for a test that adjusts it before spawning.
     pub(crate) fn config(&self) -> Config {
-        config(&self.url)
+        let mut config = config(&self.url);
+        config.ingest.ack_wait_seconds = self.ack_wait.as_secs();
+        config
     }
 
     pub(crate) fn spawn<P: LlmProvider + 'static>(&self, provider: Arc<P>) -> Worker {
@@ -174,6 +188,13 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
+    /// Ends the worker the way a killed process ends: the in-flight handler is dropped where it
+    /// stands, nothing is acknowledged and nothing is drained.
+    pub(crate) async fn kill(self) {
+        self.handle.abort();
+        let _cancelled = self.handle.await;
+    }
+
     pub(crate) async fn stop(self) -> TestResult {
         let _ignored = self.drain.send(true);
         tokio::time::timeout(Duration::from_secs(10), self.handle).await??;

@@ -13,7 +13,7 @@ use ratatoskr_channel_digest_contracts::{
 use ratatoskr_identifiers::{BlobRef, WireTimestamp};
 use sha2::{Digest as _, Sha256};
 
-use crate::channel_digest_recap_lock::RunLock;
+use crate::run_lock::RunLock;
 
 const REPAIR_INSTRUCTION: &str = "\nRepair validation code: channel_recap_schema.";
 
@@ -120,7 +120,9 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
         manifest_digest_hex: &str,
         output_language: ChannelRecapOutputLanguage,
     ) -> Result<ChannelDigestRecap, ChannelRecapPipelineError> {
-        let lock = RunLock::acquire(self.database, recap_run_id).await?;
+        let lock = RunLock::acquire(self.database, recap_run_id)
+            .await?
+            .ok_or(ChannelRecapPipelineError::State)?;
         let outcome = self
             .execute_locked(
                 recap_run_id,

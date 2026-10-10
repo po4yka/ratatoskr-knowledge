@@ -11,8 +11,16 @@ use ratatoskr_knowledge_service::{EVENTS_STREAM, IngestFamily};
 
 pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// Recreates the events stream and the four durables exactly as the platform provisions them.
-pub(crate) async fn provision(url: &str) -> Result<jetstream::Context, Box<dyn std::error::Error>> {
+/// The ack wait the platform provisions on every ingest durable.
+pub(crate) const PLATFORM_ACK_WAIT: Duration = Duration::from_mins(2);
+
+/// Recreates the events stream and the four durables as the platform provisions them, with an
+/// ack wait of `ack_wait`: [`PLATFORM_ACK_WAIT`], or a shorter one so a delivery abandoned by a
+/// killed worker comes back within the test deadline.
+pub(crate) async fn provision_with_ack_wait(
+    url: &str,
+    ack_wait: Duration,
+) -> Result<jetstream::Context, Box<dyn std::error::Error>> {
     let context = jetstream::new(async_nats::connect(url).await?);
     let _absent_is_fine = context.delete_stream(EVENTS_STREAM).await;
     let stream = context
@@ -31,7 +39,7 @@ pub(crate) async fn provision(url: &str) -> Result<jetstream::Context, Box<dyn s
                 durable_name: Some(family.durable().to_owned()),
                 filter_subject: family.filter().to_owned(),
                 ack_policy: AckPolicy::Explicit,
-                ack_wait: Duration::from_mins(2),
+                ack_wait,
                 deliver_policy: DeliverPolicy::All,
                 max_deliver: -1,
                 ..pull::Config::default()

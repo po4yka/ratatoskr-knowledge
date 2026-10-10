@@ -12,4 +12,5 @@ mod fixtures;
 mod harness;
 mod lifecycle;
 mod repository;
+mod resume;
 mod tenant;

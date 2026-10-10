@@ -12,8 +12,11 @@ use ratatoskr_knowledge::{
     build_generation_request, prepare_context,
 };
 
+#[path = "support/controlled.rs"]
+mod controlled;
 mod support;
 
+use controlled::controlled_openrouter;
 use support::*;
 
 #[tokio::test]

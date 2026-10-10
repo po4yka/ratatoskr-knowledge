@@ -10,8 +10,11 @@ use ratatoskr_knowledge::{
     build_generation_request,
 };
 
+#[path = "support/controlled.rs"]
+mod controlled;
 mod support;
 
+use controlled::controlled_openrouter;
 use support::*;
 
 static TELEMETRY: Mutex<Vec<u8>> = Mutex::new(Vec::new());

@@ -1,16 +1,15 @@
 use ratatoskr_document_contracts::Document;
+use ratatoskr_identifiers::BlobRef;
 use uuid::Uuid;
 
-use crate::runs::AttemptUpdate;
+use crate::run_driver::{DriveFailure, Rejected, RunDriver};
 use crate::search::{
     SearchDocumentProjection, extract_search_text, record_search_document,
     record_search_projection_input,
 };
 use crate::{
-    ArticleAnalysis, ArticleValidationError, AttemptInput, AttemptOutcome, AttemptReason,
-    BlobError, BlobStore, Database, GenerationRequest, LlmProvider, PersistenceError,
-    PreparedContext, ProviderError, ProviderFailureClass, ProviderIdentity, RunState,
-    ValidationClass, record_validation_failure,
+    ArticleAnalysis, ArticleValidationError, BlobError, BlobStore, Database, GenerationRequest,
+    LlmProvider, PersistenceError, PreparedContext, ProviderError, ValidationClass,
 };
 
 /// First-slice article pipeline failure with no source or response content.
@@ -32,6 +31,22 @@ pub enum PipelineError {
     /// Provider execution exceeded its finite deadline.
     #[error("the provider request timed out")]
     Timeout,
+    /// Another executor holds the run or advanced it; a later delivery may succeed.
+    #[error("the analysis run is held by another executor")]
+    Conflict,
+}
+
+impl From<DriveFailure> for PipelineError {
+    fn from(failure: DriveFailure) -> Self {
+        match failure {
+            DriveFailure::Persistence(error) => Self::Persistence(error),
+            DriveFailure::Blob(error) => Self::Blob(error),
+            DriveFailure::Provider(error) => Self::Provider(error),
+            DriveFailure::Invalid => Self::Invalid,
+            DriveFailure::Timeout => Self::Timeout,
+            DriveFailure::Conflict => Self::Conflict,
+        }
+    }
 }
 
 /// Durable fake-provider article pipeline.
@@ -41,17 +56,6 @@ pub struct ArticlePipeline<'a, P> {
     provider: &'a P,
     blobs: &'a BlobStore,
     provider_timeout: std::time::Duration,
-}
-
-enum ResponseOutcome {
-    Accepted(ArticleAnalysis),
-    Invalid(&'static str),
-}
-
-enum AttemptFlow {
-    Accepted(ArticleAnalysis),
-    Retry,
-    Repair(&'static str),
 }
 
 impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
@@ -71,7 +75,10 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         }
     }
 
-    /// Executes one article analysis identity.
+    /// Executes one article analysis identity, resuming the run from its durable state.
+    ///
+    /// A run that failed transiently, was left mid-call by a stopped executor, or stored a
+    /// response it never validated continues instead of failing (see `run_driver`).
     ///
     /// # Errors
     ///
@@ -79,312 +86,35 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
     pub async fn execute(
         &self,
         run_id: Uuid,
-        mut request: GenerationRequest,
-        context: &PreparedContext,
-        document: &Document,
-    ) -> Result<ArticleAnalysis, PipelineError> {
-        if let Some(article) = self.resume_output(run_id).await? {
-            return Ok(article);
-        }
-        self.database
-            .transition_run(run_id, RunState::Queued, RunState::ContextPrepared)
-            .await?;
-        self.database
-            .transition_run(run_id, RunState::ContextPrepared, RunState::ModelRequested)
-            .await?;
-        let mut reason = AttemptReason::Initial;
-        for call in 0..2 {
-            let flow = self
-                .execute_attempt(run_id, call, request.clone(), context, document, reason)
-                .await?;
-            match flow {
-                AttemptFlow::Accepted(article) => return Ok(article),
-                AttemptFlow::Retry => reason = AttemptReason::Retry,
-                AttemptFlow::Repair(code) => {
-                    self.database
-                        .transition_run(run_id, RunState::ResponseReceived, RunState::Repaired)
-                        .await?;
-                    self.database
-                        .transition_run(run_id, RunState::Repaired, RunState::ModelRequested)
-                        .await?;
-                    request = repair_request(&request, code);
-                    reason = AttemptReason::Repair;
-                }
-            }
-        }
-        self.fail_requested_run(run_id).await?;
-        Err(PersistenceError::AttemptBudgetExhausted.into())
-    }
-
-    /// Runs one recorded provider attempt and reports how the loop continues.
-    async fn execute_attempt(
-        &self,
-        run_id: Uuid,
-        call: u8,
         request: GenerationRequest,
         context: &PreparedContext,
         document: &Document,
-        reason: AttemptReason,
-    ) -> Result<AttemptFlow, PipelineError> {
-        let identity = self.provider.identity();
-        let attempt = match self
-            .database
-            .record_attempt(run_id, &attempt_input(&identity, reason))
-            .await
-        {
-            Ok(attempt) => attempt,
-            Err(PersistenceError::AttemptBudgetExhausted) => {
-                self.fail_requested_run(run_id).await?;
-                return Err(PersistenceError::AttemptBudgetExhausted.into());
-            }
-            Err(error) => return Err(error.into()),
+    ) -> Result<ArticleAnalysis, PipelineError> {
+        let driver = RunDriver {
+            database: self.database,
+            provider: self.provider,
+            blobs: self.blobs,
+            provider_timeout: self.provider_timeout,
+            model_policy: "fake_default_v1",
         };
-        let started = std::time::Instant::now();
-        let generated =
-            tokio::time::timeout(self.provider_timeout, self.provider.generate_json(request)).await;
-        let duration_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
-        let Ok(generated) = generated else {
-            self.database
-                .update_attempt_failure(
-                    run_id,
-                    attempt.ordinal,
-                    AttemptOutcome::TransientFailure,
-                    Some(ProviderFailureClass::Timeout.as_str()),
-                    None,
-                    duration_ms,
-                )
-                .await?;
-            if call == 0 {
-                return Ok(AttemptFlow::Retry);
-            }
-            self.fail_requested_run(run_id).await?;
-            return Err(PipelineError::Timeout);
-        };
-        let response = match generated {
-            Ok(response) => response,
-            Err(failure) => {
-                let outcome = if failure.is_transient() {
-                    AttemptOutcome::TransientFailure
-                } else {
-                    AttemptOutcome::PermanentFailure
-                };
-                self.database
-                    .update_attempt_failure(
-                        run_id,
-                        attempt.ordinal,
-                        outcome,
-                        Some(failure.class.as_str()),
-                        failure
-                            .http_status
-                            .and_then(|status| i16::try_from(status).ok()),
-                        duration_ms,
-                    )
-                    .await?;
-                if failure.is_transient() && call == 0 {
-                    return Ok(AttemptFlow::Retry);
-                }
-                self.fail_requested_run(run_id).await?;
-                return Err(PipelineError::Provider(failure.error));
-            }
-        };
-        match self
-            .process_or_fail(
+        let value = driver
+            .drive(
                 run_id,
-                attempt.ordinal,
-                &response,
-                context,
-                document,
-                duration_ms,
-            )
-            .await?
-        {
-            ResponseOutcome::Accepted(article) => Ok(AttemptFlow::Accepted(article)),
-            ResponseOutcome::Invalid(code) if call == 0 => Ok(AttemptFlow::Repair(code)),
-            ResponseOutcome::Invalid(_) => {
-                self.database
-                    .transition_run(run_id, RunState::ResponseReceived, RunState::Failed)
-                    .await?;
-                Err(PipelineError::Invalid)
-            }
-        }
-    }
-
-    async fn resume_output(&self, run_id: Uuid) -> Result<Option<ArticleAnalysis>, PipelineError> {
-        let stored: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-            "select runs.state, outputs.result
-             from knowledge.analysis_runs runs
-             left join knowledge.analysis_outputs outputs
-                on outputs.run_id = runs.run_id and outputs.accepted
-             where runs.run_id = $1",
-        )
-        .bind(run_id)
-        .fetch_optional(self.database.pool())
-        .await
-        .map_err(PersistenceError::Query)?;
-        let Some((state, result)) = stored else {
-            return Ok(None);
-        };
-        if !matches!(state.as_str(), "persisted" | "completed") {
-            return Ok(None);
-        }
-        let article =
-            serde_json::from_value(result.ok_or(PersistenceError::InvalidAnalysisIdentity)?)
-                .map_err(PersistenceError::Encode)?;
-        // Both resting states resolve the same accepted output; neither
-        // replay mutates run state.
-        Ok(Some(article))
-    }
-
-    async fn process_or_fail(
-        &self,
-        run_id: Uuid,
-        ordinal: i16,
-        response: &crate::ProviderResponse,
-        context: &PreparedContext,
-        document: &Document,
-        duration_ms: i32,
-    ) -> Result<ResponseOutcome, PipelineError> {
-        match self
-            .process_response(run_id, ordinal, response, context, document, duration_ms)
-            .await
-        {
-            Ok(outcome) => Ok(outcome),
-            Err(PipelineError::Blob(error)) => {
-                self.database
-                    .update_attempt_failure(
-                        run_id,
-                        ordinal,
-                        AttemptOutcome::PermanentFailure,
-                        Some(ProviderFailureClass::SizeLimit.as_str()),
-                        None,
-                        duration_ms,
-                    )
-                    .await?;
-                self.fail_requested_run(run_id).await?;
-                Err(error.into())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn process_response(
-        &self,
-        run_id: Uuid,
-        ordinal: i16,
-        response: &crate::ProviderResponse,
-        context: &PreparedContext,
-        document: &Document,
-        duration_ms: i32,
-    ) -> Result<ResponseOutcome, PipelineError> {
-        let reference = self.blobs.store_raw(&response.bytes).await?;
-        self.database
-            .update_attempt(
-                run_id,
-                ordinal,
-                &AttemptUpdate {
-                    raw_response: &reference,
-                    request_id: response.request_id.as_deref(),
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    outcome: AttemptOutcome::ResponseReceived,
-                    validation_code: None,
-                    duration_ms,
-                },
+                request,
+                |bytes| validate_article(bytes, context),
+                |value, raw| self.persist(run_id, value, raw, document),
             )
             .await?;
-        self.database
-            .transition_run(run_id, RunState::ModelRequested, RunState::ResponseReceived)
-            .await?;
-
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&response.bytes) else {
-            self.mark_invalid(
-                run_id,
-                ordinal,
-                &reference,
-                response,
-                "json_syntax",
-                duration_ms,
-            )
-            .await?;
-            record_validation_failure(ValidationClass::JsonSyntax, "", "");
-            return Ok(ResponseOutcome::Invalid("json_syntax"));
-        };
-        let article = match crate::validate_article_json(&value).and_then(|article| {
-            crate::validate_article_citations(&article, context)?;
-            Ok(article)
-        }) {
-            Ok(article) => article,
-            Err(error) => {
-                let code = validation_code(error);
-                self.mark_invalid(run_id, ordinal, &reference, response, code, duration_ms)
-                    .await?;
-                record_validation_failure(validation_class(error), "", "");
-                return Ok(ResponseOutcome::Invalid(code));
-            }
-        };
-        self.database
-            .update_attempt(
-                run_id,
-                ordinal,
-                &AttemptUpdate {
-                    raw_response: &reference,
-                    request_id: response.request_id.as_deref(),
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    outcome: AttemptOutcome::Accepted,
-                    validation_code: None,
-                    duration_ms,
-                },
-            )
-            .await?;
-        self.database
-            .transition_run(
-                run_id,
-                RunState::ResponseReceived,
-                RunState::SchemaValidated,
-            )
-            .await?;
-        self.persist(run_id, &article, &reference, document).await?;
-        // The run rests at `persisted`: the background indexer owns the
-        // only `persisted -> indexed` transition.
-        Ok(ResponseOutcome::Accepted(article))
-    }
-
-    async fn mark_invalid(
-        &self,
-        run_id: Uuid,
-        ordinal: i16,
-        reference: &ratatoskr_identifiers::BlobRef,
-        response: &crate::ProviderResponse,
-        code: &'static str,
-        duration_ms: i32,
-    ) -> Result<(), PipelineError> {
-        self.database
-            .update_attempt(
-                run_id,
-                ordinal,
-                &AttemptUpdate {
-                    raw_response: reference,
-                    request_id: response.request_id.as_deref(),
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    outcome: AttemptOutcome::Invalid,
-                    validation_code: Some(code),
-                    duration_ms,
-                },
-            )
-            .await?;
-        Ok(())
+        Ok(serde_json::from_value(value).map_err(PersistenceError::Encode)?)
     }
 
     async fn persist(
         &self,
         run_id: Uuid,
-        article: &ArticleAnalysis,
-        reference: &ratatoskr_identifiers::BlobRef,
+        result: serde_json::Value,
+        reference: BlobRef,
         document: &Document,
-    ) -> Result<(), PipelineError> {
-        let result = serde_json::to_value(article).map_err(PersistenceError::Encode)?;
+    ) -> Result<(), DriveFailure> {
         let raw_response = serde_json::to_value(reference).map_err(PersistenceError::Encode)?;
         let mut transaction = self
             .database
@@ -414,7 +144,7 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         .await
         .map_err(PersistenceError::Query)?;
         if changed.rows_affected() != 1 {
-            return Err(PersistenceError::InvalidAnalysisIdentity.into());
+            return Err(DriveFailure::Conflict);
         }
         let (source_ref_id, tenant_ref, owner_context): (Uuid, String, String) = sqlx::query_as(
             "select r.source_ref_id, s.tenant_ref, s.owner_context
@@ -449,34 +179,30 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
             .map_err(PersistenceError::Query)?;
         Ok(())
     }
-
-    async fn fail_requested_run(&self, run_id: Uuid) -> Result<(), PipelineError> {
-        self.database
-            .transition_run(run_id, RunState::ModelRequested, RunState::Failed)
-            .await?;
-        Ok(())
-    }
 }
 
-fn attempt_input(identity: &ProviderIdentity, reason: AttemptReason) -> AttemptInput {
-    AttemptInput {
-        reason,
-        provider: identity.provider.clone(),
-        model: identity.model.clone(),
-        model_policy: "fake_default_v1".to_owned(),
-        provider_request_id: None,
-        outcome: AttemptOutcome::Requested,
-    }
-}
-
-fn repair_request(request: &GenerationRequest, code: &str) -> GenerationRequest {
-    let mut repaired = request.clone();
-    repaired
-        .task_instruction
-        .push_str("\nRepair validation code: ");
-    repaired.task_instruction.push_str(code);
-    repaired.task_instruction.push('.');
-    repaired
+/// Parses and validates one provider response against the prepared context.
+fn validate_article(
+    bytes: &[u8],
+    context: &PreparedContext,
+) -> Result<serde_json::Value, Rejected> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| Rejected {
+        code: "json_syntax",
+        class: Some(ValidationClass::JsonSyntax),
+    })?;
+    let article = crate::validate_article_json(&value)
+        .and_then(|article| {
+            crate::validate_article_citations(&article, context)?;
+            Ok(article)
+        })
+        .map_err(|error| Rejected {
+            code: validation_code(error),
+            class: Some(validation_class(error)),
+        })?;
+    serde_json::to_value(article).map_err(|_| Rejected {
+        code: "decode",
+        class: Some(ValidationClass::Schema),
+    })
 }
 
 const fn validation_code(error: ArticleValidationError) -> &'static str {

@@ -26,7 +26,7 @@ pub enum PersistenceError {
     /// Analysis identity contains an invalid bounded version.
     #[error("an analysis identity is invalid")]
     InvalidAnalysisIdentity,
-    /// The shared two-call budget is exhausted.
+    /// The run has no provider call left, or its calls kept ending without an outcome.
     #[error("the provider call budget is exhausted")]
     AttemptBudgetExhausted,
     /// A numeric value cannot fit its database representation.

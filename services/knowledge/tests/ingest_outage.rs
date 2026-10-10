@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ingest_support::{TestResult, config, eventually, provision};
+use ingest_support::{PLATFORM_ACK_WAIT, TestResult, config, eventually, provision_with_ack_wait};
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{BlobStore, ScriptedProvider};
 use ratatoskr_knowledge_service::{
@@ -66,7 +66,7 @@ async fn broker_outage_flips_readiness_false_and_recovers() -> TestResult {
     let store = TemporaryBlobRoot::create().await?;
     let mut broker = spawn_broker(port, store.path())?;
     wait_for_broker(&url).await?;
-    let context = provision(&url).await?;
+    let context = provision_with_ack_wait(&url, PLATFORM_ACK_WAIT).await?;
     drop(context);
 
     let database = TestDatabase::create().await?;

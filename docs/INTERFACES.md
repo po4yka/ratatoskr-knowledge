@@ -52,6 +52,12 @@ read-through boundary for the channel-digest service, not a public analysis API.
   rate and budget controls.
 - `ArticlePipeline` records attempts with adapter identity, model, latency, HTTP status, and failure
   class; stores raw bytes before parsing; validates the result; and persists one accepted output.
+  `FamilyPipeline` (social, archive and repository analyses) shares its attempt loop. Both resume a
+  run from its durable state under a per-run advisory lock: a persisted run returns its output, a
+  run whose last call failed transiently is reopened, a run left mid-call continues with the next
+  call (a call killed twice fails the run), and a stored response is validated again without a
+  provider call. A delivery makes at most two provider calls and a run records at most ten, so five
+  deliveries stay bounded.
 - `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
 - `ChannelRecapInbox` admits only `knowledge.channel_digest_recap.requested.v1`; the transport
   adapter separately verifies the `cmd.` subject and `ratatoskr-channel-digests` producer.

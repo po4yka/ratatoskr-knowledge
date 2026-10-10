@@ -81,7 +81,7 @@ create table if not exists knowledge.analysis_attempts (
     error_class text,
     created_at timestamptz not null default now(),
     primary key (run_id, ordinal),
-    constraint analysis_attempts_ordinal_check check (ordinal between 1 and 2),
+    constraint analysis_attempts_ordinal_check check (ordinal between 1 and 10),
     constraint analysis_attempts_reason_check check (reason in ('initial', 'retry', 'repair')),
     constraint analysis_attempts_outcome_check check (outcome in (
         'requested',
@@ -89,7 +89,8 @@ create table if not exists knowledge.analysis_attempts (
         'permanent_failure',
         'response_received',
         'invalid',
-        'accepted'
+        'accepted',
+        'interrupted'
     )),
     constraint analysis_attempts_usage_check check (
         (input_tokens is null or input_tokens >= 0)

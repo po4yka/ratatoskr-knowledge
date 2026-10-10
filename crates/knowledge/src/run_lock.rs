@@ -1,13 +1,13 @@
-//! Per-run session advisory lock that keeps one executor on a recap run.
+//! Per-run session advisory lock that keeps one executor on an analysis or recap run.
 
 use sqlx::{Connection as _, PgConnection};
 
-use crate::{ChannelRecapPipelineError, Database, PersistenceError};
+use crate::{Database, PersistenceError};
 
 const LOCK: &str = "select pg_try_advisory_lock(hashtextextended($1::text, 0))";
 const UNLOCK: &str = "select pg_advisory_unlock(hashtextextended($1::text, 0))";
 
-/// A session advisory lock on one recap run, held on a connection dedicated to it.
+/// A session advisory lock on one run, held on a connection dedicated to it.
 ///
 /// The connection is detached from the pool, so a lock can never be handed to another borrower.
 /// Dropping the guard without [`RunLock::release`] (for instance when the executing future is
@@ -19,33 +19,28 @@ pub(crate) struct RunLock {
 }
 
 impl RunLock {
-    /// Takes the lock for `recap_run_id`.
+    /// Takes the lock for `run_id`, or returns `None` when another executor holds the run.
     ///
     /// # Errors
     ///
-    /// [`ChannelRecapPipelineError::State`] when another executor holds the run, and a
-    /// persistence error when the database cannot be reached.
+    /// A persistence error when the database cannot be reached.
     pub(crate) async fn acquire(
         database: &Database,
-        recap_run_id: uuid::Uuid,
-    ) -> Result<Self, ChannelRecapPipelineError> {
+        run_id: uuid::Uuid,
+    ) -> Result<Option<Self>, PersistenceError> {
         let mut connection = database
             .pool()
             .acquire()
             .await
             .map_err(PersistenceError::Query)?
             .detach();
-        let key = recap_run_id.to_string();
+        let key = run_id.to_string();
         let acquired: bool = sqlx::query_scalar(LOCK)
             .bind(&key)
             .fetch_one(&mut connection)
             .await
             .map_err(PersistenceError::Query)?;
-        if acquired {
-            Ok(Self { connection, key })
-        } else {
-            Err(ChannelRecapPipelineError::State)
-        }
+        Ok(acquired.then_some(Self { connection, key }))
     }
 
     /// Unlocks the run and closes the dedicated connection.

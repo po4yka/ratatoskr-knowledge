@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 use crate::{Database, PersistenceError};
 
+/// Provider calls one run may record over all of its deliveries.
+///
+/// A delivery makes at most two calls (one retry or one repair), and the bus gives a request five
+/// deliveries, so a run that failed transiently can be tried again without an unbounded budget.
+/// `schema.sql` states the same number in `analysis_attempts_ordinal_check`.
+pub(crate) const MAX_RUN_ATTEMPTS: i16 = 10;
+
 pub(crate) struct AttemptUpdate<'a> {
     pub raw_response: &'a BlobRef,
     pub request_id: Option<&'a str>,
@@ -112,6 +119,8 @@ pub enum AttemptOutcome {
     Invalid,
     /// Stored response was accepted.
     Accepted,
+    /// The call was in flight when its executor stopped, so its outcome is unknown.
+    Interrupted,
 }
 
 /// Safe metadata persisted for one provider call.
@@ -176,6 +185,7 @@ impl AttemptOutcome {
             Self::ResponseReceived => "response_received",
             Self::Invalid => "invalid",
             Self::Accepted => "accepted",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -298,7 +308,7 @@ impl Database {
         let ordinal = previous
             .checked_add(1)
             .ok_or(PersistenceError::AttemptBudgetExhausted)?;
-        if ordinal > 2 {
+        if ordinal > MAX_RUN_ATTEMPTS {
             return Err(PersistenceError::AttemptBudgetExhausted);
         }
         sqlx::query(
@@ -347,6 +357,65 @@ impl Database {
         .bind(run_id)
         .bind(expected.as_str())
         .bind(next.as_str())
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Records that every call still marked `requested` lost its executor before it finished.
+    pub(crate) async fn mark_requested_attempts_interrupted(
+        &self,
+        run_id: Uuid,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query(
+            "update knowledge.analysis_attempts set outcome = 'interrupted'
+             where run_id = $1 and outcome = 'requested'",
+        )
+        .bind(run_id)
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(())
+    }
+
+    /// Settles the outcome of an attempt whose stored response was validated after a restart.
+    pub(crate) async fn set_attempt_outcome(
+        &self,
+        run_id: Uuid,
+        ordinal: i16,
+        outcome: AttemptOutcome,
+        validation_code: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let result = sqlx::query(
+            "update knowledge.analysis_attempts set outcome = $3, validation_code = $4
+             where run_id = $1 and ordinal = $2",
+        )
+        .bind(run_id)
+        .bind(ordinal)
+        .bind(outcome.as_str())
+        .bind(validation_code)
+        .execute(self.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(PersistenceError::InvalidAnalysisIdentity)
+        }
+    }
+
+    /// Puts a failed run back to `queued` so a later delivery can call the provider again.
+    ///
+    /// This is the one transition out of `failed`. Only the run driver calls it, and only when the
+    /// last call failed for a cause that a later delivery may not meet again; the attempt rows stay
+    /// as the record of what happened.
+    pub(crate) async fn reopen_failed_run(&self, run_id: Uuid) -> Result<bool, PersistenceError> {
+        let result = sqlx::query(
+            "update knowledge.analysis_runs set state = 'queued', updated_at = now()
+             where run_id = $1 and state = 'failed'",
+        )
+        .bind(run_id)
         .execute(self.pool())
         .await
         .map_err(PersistenceError::Query)?;

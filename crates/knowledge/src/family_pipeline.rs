@@ -17,19 +17,18 @@ use ratatoskr_social_contracts::SocialSourceSnapshot;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::runs::AttemptUpdate;
+use crate::run_driver::{DriveFailure, Rejected, RunDriver};
 use crate::search::{
     SearchDocumentProjection, record_search_document, record_search_projection_input,
 };
 use crate::{
-    AnalysisIdentity, AttemptInput, AttemptOutcome, AttemptReason, BlobError, BlobStore, Database,
-    EventCause, EventOutboxError, FamilyValidationError, GenerationRequest, LlmProvider,
-    PersistenceError, ProviderError, ProviderFailureClass, ProviderIdentity, RepositoryAnalysis,
-    RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RepositoryAnalysisError, RunState,
-    SocialAnalysis, SourceInbox, SourceInboxError, SourceReference, archive_generation_request,
-    archive_project_generation_request, repository_generation_request, social_generation_request,
-    validate_archive_analysis, validate_archive_project_analysis, validate_repository_analysis,
-    validate_social_analysis,
+    AnalysisIdentity, BlobError, BlobStore, Database, EventCause, EventOutboxError,
+    FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError, ProviderError,
+    RepositoryAnalysis, RepositoryAnalysisAdmission, RepositoryAnalysisConsumer,
+    RepositoryAnalysisError, SocialAnalysis, SourceInbox, SourceInboxError, SourceReference,
+    archive_generation_request, archive_project_generation_request, repository_generation_request,
+    social_generation_request, validate_archive_analysis, validate_archive_project_analysis,
+    validate_repository_analysis, validate_social_analysis,
 };
 
 /// Authorized byte resolver for a GitHub-owned README reference.
@@ -87,6 +86,22 @@ pub enum FamilyPipelineError {
     /// The immutable family source identity is invalid.
     #[error("the family analysis source identity is invalid")]
     Source,
+    /// Another executor holds the analysis run or advanced it; a later delivery may succeed.
+    #[error("the family analysis run is held by another executor")]
+    Conflict,
+}
+
+impl From<DriveFailure> for FamilyPipelineError {
+    fn from(failure: DriveFailure) -> Self {
+        match failure {
+            DriveFailure::Persistence(error) => Self::Persistence(error),
+            DriveFailure::Blob(error) => Self::Blob(error),
+            DriveFailure::Provider(error) => Self::Provider(error),
+            DriveFailure::Invalid => Self::Invalid,
+            DriveFailure::Timeout => Self::Timeout,
+            DriveFailure::Conflict => Self::Conflict,
+        }
+    }
 }
 
 impl From<RepositoryAnalysisError> for FamilyPipelineError {
@@ -525,192 +540,41 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             .id)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one place owns every explicit durable state transition for a provider attempt"
-    )]
+    /// Drives the run to an accepted output, resuming it from its durable state.
     async fn execute_value<F>(
         &self,
         run_id: Uuid,
-        mut request: GenerationRequest,
+        request: GenerationRequest,
         fields: SearchFields,
         validate: F,
     ) -> Result<serde_json::Value, FamilyPipelineError>
     where
         F: Fn(&serde_json::Value) -> Result<serde_json::Value, FamilyValidationError>,
     {
-        if let Some(result) = self.resume(run_id).await? {
-            return Ok(result);
-        }
-        self.transition(run_id, RunState::Queued, RunState::ContextPrepared)
-            .await?;
-        self.transition(run_id, RunState::ContextPrepared, RunState::ModelRequested)
-            .await?;
-        let mut reason = AttemptReason::Initial;
-        for call in 0..2 {
-            let attempt = self
-                .database
-                .record_attempt(run_id, &attempt_input(&self.provider.identity(), reason))
-                .await?;
-            let started = std::time::Instant::now();
-            let result = tokio::time::timeout(
-                self.provider_timeout,
-                self.provider.generate_json(request.clone()),
-            )
-            .await;
-            let duration_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
-            let response = match result {
-                Err(_) => {
-                    self.database
-                        .update_attempt_failure(
-                            run_id,
-                            attempt.ordinal,
-                            AttemptOutcome::TransientFailure,
-                            Some(ProviderFailureClass::Timeout.as_str()),
-                            None,
-                            duration_ms,
-                        )
-                        .await?;
-                    if call == 0 {
-                        reason = AttemptReason::Retry;
-                        continue;
-                    }
-                    self.fail(run_id).await?;
-                    return Err(FamilyPipelineError::Timeout);
-                }
-                Ok(Err(failure)) => {
-                    let outcome = if failure.is_transient() {
-                        AttemptOutcome::TransientFailure
-                    } else {
-                        AttemptOutcome::PermanentFailure
-                    };
-                    self.database
-                        .update_attempt_failure(
-                            run_id,
-                            attempt.ordinal,
-                            outcome,
-                            Some(failure.class.as_str()),
-                            failure
-                                .http_status
-                                .and_then(|status| i16::try_from(status).ok()),
-                            duration_ms,
-                        )
-                        .await?;
-                    if failure.is_transient() && call == 0 {
-                        reason = AttemptReason::Retry;
-                        continue;
-                    }
-                    self.fail(run_id).await?;
-                    return Err(FamilyPipelineError::Provider(failure.error));
-                }
-                Ok(Ok(response)) => response,
-            };
-            let raw = self.blobs.store_raw(&response.bytes).await?;
-            self.database
-                .update_attempt(
-                    run_id,
-                    attempt.ordinal,
-                    &AttemptUpdate {
-                        raw_response: &raw,
-                        request_id: response.request_id.as_deref(),
-                        input_tokens: response.usage.input_tokens,
-                        output_tokens: response.usage.output_tokens,
-                        outcome: AttemptOutcome::ResponseReceived,
-                        validation_code: None,
-                        duration_ms,
-                    },
-                )
-                .await?;
-            self.transition(run_id, RunState::ModelRequested, RunState::ResponseReceived)
-                .await?;
-            let value = serde_json::from_slice::<serde_json::Value>(&response.bytes)
-                .ok()
-                .and_then(|value| validate(&value).ok());
-            let Some(value) = value else {
-                self.database
-                    .update_attempt(
-                        run_id,
-                        attempt.ordinal,
-                        &AttemptUpdate {
-                            raw_response: &raw,
-                            request_id: response.request_id.as_deref(),
-                            input_tokens: response.usage.input_tokens,
-                            output_tokens: response.usage.output_tokens,
-                            outcome: AttemptOutcome::Invalid,
-                            validation_code: Some("family_schema"),
-                            duration_ms,
-                        },
-                    )
-                    .await?;
-                if call == 0 {
-                    self.transition(run_id, RunState::ResponseReceived, RunState::Repaired)
-                        .await?;
-                    self.transition(run_id, RunState::Repaired, RunState::ModelRequested)
-                        .await?;
-                    request
-                        .task_instruction
-                        .push_str("\nRepair validation code: family_schema.");
-                    reason = AttemptReason::Repair;
-                    continue;
-                }
-                self.transition(run_id, RunState::ResponseReceived, RunState::Failed)
-                    .await?;
-                return Err(FamilyPipelineError::Invalid);
-            };
-            self.database
-                .update_attempt(
-                    run_id,
-                    attempt.ordinal,
-                    &AttemptUpdate {
-                        raw_response: &raw,
-                        request_id: response.request_id.as_deref(),
-                        input_tokens: response.usage.input_tokens,
-                        output_tokens: response.usage.output_tokens,
-                        outcome: AttemptOutcome::Accepted,
-                        validation_code: None,
-                        duration_ms,
-                    },
-                )
-                .await?;
-            self.transition(
+        let driver = RunDriver {
+            database: self.database,
+            provider: self.provider,
+            blobs: self.blobs,
+            provider_timeout: self.provider_timeout,
+            model_policy: "family_default_v1",
+        };
+        let fields = &fields;
+        Ok(driver
+            .drive(
                 run_id,
-                RunState::ResponseReceived,
-                RunState::SchemaValidated,
+                request,
+                |bytes| {
+                    serde_json::from_slice::<serde_json::Value>(bytes)
+                        .ok()
+                        .and_then(|value| validate(&value).ok())
+                        .ok_or(Rejected {
+                            code: "family_schema",
+                            class: None,
+                        })
+                },
+                |value, raw| self.persist(run_id, value, raw, fields),
             )
-            .await?;
-            self.persist(run_id, value.clone(), raw, fields).await?;
-            return Ok(value);
-        }
-        Err(FamilyPipelineError::Invalid)
-    }
-
-    async fn resume(&self, run_id: Uuid) -> Result<Option<serde_json::Value>, FamilyPipelineError> {
-        let row: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
-            "select r.state, o.result from knowledge.analysis_runs r left join knowledge.analysis_outputs o on o.run_id = r.run_id and o.accepted where r.run_id = $1",
-        ).bind(run_id).fetch_optional(self.database.pool()).await.map_err(PersistenceError::Query)?;
-        Ok(row.and_then(|(state, result)| {
-            matches!(state.as_str(), "persisted" | "completed")
-                .then_some(result)
-                .flatten()
-        }))
-    }
-
-    async fn transition(
-        &self,
-        run_id: Uuid,
-        expected: RunState,
-        next: RunState,
-    ) -> Result<(), FamilyPipelineError> {
-        if self.database.transition_run(run_id, expected, next).await? {
-            Ok(())
-        } else {
-            Err(FamilyPipelineError::Source)
-        }
-    }
-
-    async fn fail(&self, run_id: Uuid) -> Result<(), FamilyPipelineError> {
-        self.transition(run_id, RunState::ModelRequested, RunState::Failed)
-            .await
+            .await?)
     }
 
     async fn persist(
@@ -718,9 +582,9 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         run_id: Uuid,
         result: serde_json::Value,
         raw: BlobRef,
-        fields: SearchFields,
-    ) -> Result<(), FamilyPipelineError> {
-        let raw = serde_json::to_value(raw)?;
+        fields: &SearchFields,
+    ) -> Result<(), DriveFailure> {
+        let raw = serde_json::to_value(raw).map_err(PersistenceError::Encode)?;
         let mut tx = self
             .database
             .pool()
@@ -733,21 +597,22 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         let changed = sqlx::query("update knowledge.analysis_runs set state = 'persisted', updated_at = now() where run_id = $1 and state = 'schema_validated'")
             .bind(run_id).execute(&mut *tx).await.map_err(PersistenceError::Query)?;
         if changed.rows_affected() != 1 {
-            return Err(FamilyPipelineError::Source);
+            return Err(DriveFailure::Conflict);
         }
         let (source_ref_id, tenant_ref, owner_context, document_id): (Uuid, String, String, String) = sqlx::query_as(
             "select s.source_ref_id, s.tenant_ref, s.owner_context, s.source_document_id from knowledge.analysis_runs r join knowledge.source_refs s on s.source_ref_id = r.source_ref_id where r.run_id = $1",
         ).bind(run_id).fetch_one(&mut *tx).await.map_err(PersistenceError::Query)?;
-        let document_id = Uuid::parse_str(&document_id).map_err(|_| FamilyPipelineError::Source)?;
+        let document_id =
+            Uuid::parse_str(&document_id).map_err(|_| PersistenceError::InvalidSource)?;
         let projection = SearchDocumentProjection {
             source_ref_id,
             latest_output_id: output_id,
             tenant_ref,
             owner_context,
             document_id,
-            title: fields.title,
-            lead: fields.lead,
-            body: fields.body,
+            title: fields.title.clone(),
+            lead: fields.lead.clone(),
+            body: fields.body.clone(),
         };
         record_search_projection_input(&mut *tx, &projection)
             .await
@@ -765,17 +630,6 @@ struct SearchFields {
     title: String,
     lead: String,
     body: String,
-}
-
-fn attempt_input(identity: &ProviderIdentity, reason: AttemptReason) -> AttemptInput {
-    AttemptInput {
-        reason,
-        provider: identity.provider.clone(),
-        model: identity.model.clone(),
-        model_policy: "family_default_v1".to_owned(),
-        provider_request_id: None,
-        outcome: AttemptOutcome::Requested,
-    }
 }
 
 fn repository_digest(

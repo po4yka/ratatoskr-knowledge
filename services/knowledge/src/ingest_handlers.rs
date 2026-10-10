@@ -420,3 +420,34 @@ fn archive_owner(envelope: &EventEnvelope) -> Result<TenantRef, Outcome> {
     }
     .map_err(|_| payload)
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatoskr_github_contracts::AnalysisFailureCode;
+    use ratatoskr_knowledge::{FamilyPipelineError, ProviderError};
+
+    use super::classify_repository_failure;
+
+    /// A run another executor holds, a provider that failed and a response that was invalid are
+    /// all things a later delivery may not meet again; only a source that can never be analysed is
+    /// a permanent contract failure.
+    #[test]
+    fn only_a_source_error_is_a_permanent_contract_failure() {
+        for transient in [
+            FamilyPipelineError::Conflict,
+            FamilyPipelineError::Provider(ProviderError::Transient),
+            FamilyPipelineError::Timeout,
+            FamilyPipelineError::Invalid,
+        ] {
+            assert_eq!(
+                classify_repository_failure(&transient),
+                (AnalysisFailureCode::DependencyUnavailable, true, true),
+                "{transient:?}"
+            );
+        }
+        assert_eq!(
+            classify_repository_failure(&FamilyPipelineError::Source),
+            (AnalysisFailureCode::ContractInvalid, false, false)
+        );
+    }
+}
