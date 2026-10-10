@@ -347,14 +347,11 @@ async fn insert_outbox_row(
     .await
 }
 
-/// XR-021 CONTRACTS.md S09 and S12: the ingestion tables, their closed vocabularies and the
-/// `interrupted` recap-attempt outcome exist in the one current schema definition.
+/// XR-021 CONTRACTS.md S09 and S12: the outbox and the social tombstones exist in the one current
+/// schema definition with their closed vocabularies.
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one scenario inspects each new table's constraints in turn"
-)]
-async fn ingest_tables_exist_with_their_constraints() -> Result<(), Box<dyn std::error::Error>> {
+async fn outbox_and_social_tombstone_tables_exist_with_their_constraints()
+-> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let pool = database.database.pool();
 
@@ -411,6 +408,18 @@ async fn ingest_tables_exist_with_their_constraints() -> Result<(), Box<dyn std:
         Some("23505")
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S09 and S12: the ingest failure record and the blob erasure queue exist
+/// with their closed vocabularies.
+#[tokio::test]
+async fn ingest_failure_and_erasure_queue_tables_exist_with_their_constraints()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let pool = database.database.pool();
+
     for family in ["documents", "social", "ai_archive", "repository"] {
         sqlx::query(
             "insert into knowledge.ingest_failures
@@ -449,6 +458,18 @@ async fn ingest_tables_exist_with_their_constraints() -> Result<(), Box<dyn std:
     .await
     .expect_err("a malformed digest is refused");
     assert_eq!(database_error_code(&bad_digest).as_deref(), Some("23514"));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S08 and S12: a recap attempt may end `interrupted`, and the deletion
+/// record carries a count column per new content-bearing table.
+#[tokio::test]
+async fn interrupted_recap_attempts_and_deletion_counts_exist()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let pool = database.database.pool();
 
     let command_id = uuid::Uuid::now_v7();
     let recap_run_id = uuid::Uuid::now_v7();
