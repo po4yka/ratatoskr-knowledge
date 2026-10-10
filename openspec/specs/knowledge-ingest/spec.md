@@ -40,3 +40,22 @@ Each ingest consumer SHALL verify its Edge-provisioned durable, terminate perman
 
 - **WHEN** a message with a producer that is not allowed for the family is delivered
 - **THEN** it is terminated, never redelivered, and no analysis state is written
+
+### Requirement: A redelivered analysis run resumes from its durable state
+
+Knowledge SHALL drive every analysis run of the document, social, AI-archive and repository lanes from the state the database holds, under a per-run lock, so that a redelivery after a transient provider failure or after the worker stopped mid-call finishes the same run. A response that is already stored SHALL be validated again without a provider call, and a run SHALL stop at a ceiling of ten attempts.
+
+#### Scenario: A transient provider failure is finished by the next delivery
+
+- **WHEN** the provider fails transiently on both calls of a delivery and answers on the next delivery
+- **THEN** the same run is reopened and persisted once, with one accepted output and one search document, and no terminal failure is recorded
+
+#### Scenario: A worker killed mid-call is replaced without losing the run
+
+- **WHEN** a worker stops while a provider call is in flight and the message is redelivered to a new worker
+- **THEN** the abandoned call is recorded as interrupted and the run continues to one persisted output
+
+#### Scenario: A stored response is not requested again
+
+- **WHEN** a run is found with a raw response already stored, whether its state is `response_received`, `schema_validated`, or still `model_requested` with the response recorded on its newest attempt
+- **THEN** the stored bytes are validated again, one output is persisted, and the provider is called zero times, or once to repair a stored response that is invalid
