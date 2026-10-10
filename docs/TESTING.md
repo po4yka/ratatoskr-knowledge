@@ -25,17 +25,33 @@ reads, exact digest/schema revalidation, uniform missing/wrong authorization, sc
 finite no-store responses, safe `502`/`503` failures, disabled/enabled process startup, restart, and
 bounded drain. All identifiers, secrets, and recap text are synthetic.
 
-The ingest worker is proven against a real `JetStream`: a document, a social capture and its removal,
-an AI-archive conversation and its tombstone become searchable and disappear; wrong-producer and
-undecodable deliveries are terminated and never looped; a failing analysis is redelivered and
-becomes terminal on the fifth delivery; a redelivery after a crash between the inbox commit and the
-analysis resumes it; the completion facts reach the stream once, even across a restart; and
-readiness follows the broker. A second suite boots a broker that enforces exactly the Knowledge
-stanza of `deploy/nats/identity.conf` and runs the recap and ingest workers under that identity,
-including the refusals. The recap pipeline is killed in every durable state and resumed, and a second
-executor on a held run is refused without touching it. Privacy deletion is proven not to touch
-another tenant's recap or snapshot bytes, to heal a crash between the row commit and the byte
-collection, and to remove every content-bearing inbox, tombstone, request and outbox row of its scope.
+The ingest worker is proven against a real `JetStream` in one test binary, `services/knowledge/tests/ingest_bus/`.
+`lifecycle.rs`: a document, a social capture and its removal, an AI-archive conversation and its
+tombstone become searchable and disappear; wrong-producer and undecodable deliveries are terminated
+and never looped; a failing analysis is redelivered and becomes terminal on the fifth delivery; a
+redelivery after a crash between the inbox commit and the analysis resumes it; the completion facts
+reach the stream once, even across a restart. `repository.rs`: a repository request reads its README
+over the authenticated loopback route and publishes one completed fact; an unavailable README source
+is redelivered and the fifth delivery settles the request as a retryable failed fact; bytes that fail
+the digest settle it as a non-retryable failure on the first delivery. `tenant.rs`: a social
+capture, a social removal, an archive conversation, an archive tombstone and a repository request
+whose payload owner differs from the envelope `tenant_id` are terminated and leave no row in any
+table. `ingest_outage.rs` proves that readiness follows the broker.
+
+`authorized.rs` boots a broker that enforces exactly the Knowledge stanza of
+`deploy/nats/identity.conf` and runs the real recap and ingest workers under that identity. It feeds
+each of the five durables (the recap command and the document, social, AI-archive and repository
+events) one valid message and requires every durable to show one delivery and nothing pending or
+unacknowledged, the process to report ready, and the five completion facts to reach the stream once;
+a second test observes the identity's refusals. Removing any one durable's grants, its acknowledgement
+grant, its pull grant or a completion subject from the stanza turns the first test red. The test
+proves the workers run under the stanza, not that the stanza equals Platform's copy; the workspace
+compares the two.
+
+The recap pipeline is killed in every durable state and resumed, and a second executor on a held run
+is refused without touching it. Privacy deletion is proven not to touch another tenant's recap or
+snapshot bytes, to heal a crash between the row commit and the byte collection, and to remove every
+content-bearing inbox, tombstone, request and outbox row of its scope.
 
 Default tests use the scripted provider, recorded fixtures, and the loopback fake transport; none of
 them makes an external inference request. Database tests create disposable databases from the
@@ -59,7 +75,8 @@ then scores article structural validity, citation grounding, summary bound, key-
 and required evidence coverage. It renders byte-deterministic, side-by-side label reports without
 credentials, clocks, transports, or network access. Deletion tests enumerate source references,
 runs, attempts, outputs, projection-input snapshots, lexical rows, chunks, failure rows, and owned
-blob bytes; they also prove tenant isolation, reference-safe blob sweep, and one-transaction audit
+blob bytes; they also prove tenant isolation, that bytes are collected only from the erasure queue the
+deleting transaction filled (nothing sweeps unreferenced bytes), and one-transaction audit
 visibility. Process tests cover the operator deletion/reindex receipts, deterministic progress, and
 the missing-embeddings fail-fast path.
 

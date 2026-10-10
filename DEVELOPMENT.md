@@ -144,11 +144,11 @@ export KNOWLEDGE_TEST_NATS_URL=nats://127.0.0.1:14223
 The test provisions only its fixed command stream and durable on this disposable broker. Production
 topology remains an operator-owned precondition; Knowledge never creates or widens it.
 
-The ingest tests (`services/knowledge/tests/ingest_bus.rs`) recreate the `ratatoskr_events` stream and
+The ingest tests (`services/knowledge/tests/ingest_bus/`) recreate the `ratatoskr_events` stream and
 the four ingest durables on that same broker before every test, because the names are compiled
-constants of the service; they run one at a time. Two tests start their own broker process: the
-outage test (port 57062) and the authorized-broker test (port 57063), which boots an
-authorization-enabled server with exactly the stanza in `deploy/nats/identity.conf` and runs the
+constants of the service; they run one at a time. Two kinds of test start their own broker process on
+a port the kernel picks: the outage test, and the authorized-broker tests, which boot an
+authorization-enabled server with exactly the stanza in `deploy/nats/identity.conf` and run the
 recap and ingest workers under the Knowledge nkey. They need a `nats-server` binary on `PATH`, or
 `KNOWLEDGE_TEST_NATS_SERVER=/absolute/path/to/nats-server`. CI extracts the binary from the same
 digest-pinned image as the fixture above, so the test broker and the gate broker are one version.
@@ -167,6 +167,15 @@ RATATOSKR__INGEST__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
 RATATOSKR__INGEST__ACK_WAIT_SECONDS=120
 RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET=<the GitHub internal reader secret>
 ```
+
+`RATATOSKR__INGEST__FETCH_BATCH` defaults to 1. A worker handles one delivery at a time while the broker
+starts each message's ack-wait clock when it delivers it, so a batch above 1 prefetches messages whose
+120 s can run out behind a slow analysis; the expired deliveries come back with a higher delivery count
+and can reach the fifth-delivery terminal path early. Raise it only when the batch size times the
+worst-case handler time (provider timeout times attempts) stays below the ack wait.
+
+`RATATOSKR__LIMITS__PROVIDER_REQUESTS_PER_MINUTE` bounds the process: the recap and ingest workers
+share one limiter that `main` builds, and the spend ledger is shared through the database.
 
 The ack waits must equal the durables Edge provisions (30 s for the recap command, 120 s for the four
 ingest durables); a worker verifies its durable at startup and stays not ready on any difference.
