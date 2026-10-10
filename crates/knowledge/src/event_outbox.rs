@@ -205,7 +205,9 @@ impl<'a> EventOutbox<'a> {
     /// Reads up to `limit` unpublished facts, oldest first.
     ///
     /// Publishing is idempotent on the broker by message id, so concurrent publishers need no
-    /// row claim.
+    /// row claim. There is no per-row failure state: [`Self::enqueue_in`] is the only writer and
+    /// the table constrains the rest, so every stored row decodes and a batch fails only when
+    /// the database or the broker does, which holds back every row alike.
     ///
     /// # Errors
     ///

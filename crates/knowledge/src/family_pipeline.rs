@@ -23,10 +23,10 @@ use crate::search::{
 };
 use crate::{
     AnalysisIdentity, AttemptInput, AttemptOutcome, AttemptReason, BlobError, BlobStore, Database,
-    EventCause, FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError,
-    ProviderError, ProviderFailureClass, ProviderIdentity, RepositoryAnalysis,
-    RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RunState, SocialAnalysis, SourceInbox,
-    SourceInboxError, SourceReference, archive_generation_request,
+    EventCause, EventOutboxError, FamilyValidationError, GenerationRequest, LlmProvider,
+    PersistenceError, ProviderError, ProviderFailureClass, ProviderIdentity, RepositoryAnalysis,
+    RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RepositoryAnalysisError, RunState,
+    SocialAnalysis, SourceInbox, SourceInboxError, SourceReference, archive_generation_request,
     archive_project_generation_request, repository_generation_request, social_generation_request,
     validate_archive_analysis, validate_archive_project_analysis, validate_repository_analysis,
     validate_social_analysis,
@@ -87,6 +87,22 @@ pub enum FamilyPipelineError {
     /// The immutable family source identity is invalid.
     #[error("the family analysis source identity is invalid")]
     Source,
+}
+
+impl From<RepositoryAnalysisError> for FamilyPipelineError {
+    /// A request that can never be stored is a source error; the database or the outbox failing
+    /// stays a persistence error so the delivery is redelivered instead of settled.
+    fn from(error: RepositoryAnalysisError) -> Self {
+        match error {
+            RepositoryAnalysisError::Persistence(error)
+            | RepositoryAnalysisError::Outbox(EventOutboxError::Persistence(error))
+                if !error.is_permanent() =>
+            {
+                Self::Persistence(error)
+            }
+            _ => Self::Source,
+        }
+    }
 }
 
 /// Result of executing a repository request, including at-most-once terminal fact creation.
@@ -354,10 +370,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         resolver: &R,
     ) -> Result<RepositoryAnalysisExecution, FamilyPipelineError> {
         let consumer = RepositoryAnalysisConsumer::new(self.database);
-        let _admission: RepositoryAnalysisAdmission = consumer
-            .accept(request, cause)
-            .await
-            .map_err(|_| FamilyPipelineError::Source)?;
+        let _admission: RepositoryAnalysisAdmission = consumer.accept(request, cause).await?;
         let (readme, source) = match &request.source_revision.readme {
             ReadmeRevision::Present { content_ref } => {
                 let bytes = resolver.read_readme(content_ref).await?;
@@ -428,10 +441,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             serde_json::from_value(value).map_err(FamilyPipelineError::Contract)?;
         let result_ref = EntityRef::parse(&format!("analysis:{run}"))
             .map_err(|_| FamilyPipelineError::Source)?;
-        let completion = consumer
-            .complete(request, result_ref)
-            .await
-            .map_err(|_| FamilyPipelineError::Source)?;
+        let completion = consumer.complete(request, result_ref).await?;
         Ok(RepositoryAnalysisExecution {
             analysis,
             completion,

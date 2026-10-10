@@ -20,6 +20,10 @@ The cross-repository decisions are fixed in XR-021 CONTRACTS.md (S01 to S04, S08
 
 `EventOutbox::enqueue_in` runs inside the caller's transaction and is idempotent on `dedupe_key`. The publisher claims unpublished rows, publishes with `Nats-Msg-Id` equal to the outbox id and sets `published_at` only after the PubAck, so a crash between publish and mark re-publishes the same message id and the broker deduplicates.
 
+### The outbox has no per-row failure state, because a stored row cannot be a poison row
+
+A publish batch stops at its first failing row, so a row that failed for ever would hold back every later fact. The outbox keeps no attempt count or backoff because such a row cannot be written: `enqueue_in` is the only writer, it takes typed refs and a serialised contract fact, rejects a payload that is not an object, and the table checks the subject against the four known values, so `decode_row` and the envelope construction in `ingest_publish.rs` see only values that round-trip. The bus tests publish a fact of every subject and read it back as an envelope. The failures a batch can meet are the broker and the database, which are transient and affect every row alike, so ordering is kept and the whole batch is retried. If a fifth subject or a hand-written row ever makes this false, per-row bookkeeping with backoff is the answer, not skipping rows.
+
 ### Blob collection is queue driven
 
 Deleting rows enqueues the Knowledge-owned digests of the scope in the same transaction. A drain removes a digest only when no BlobRef-bearing column still references it, so content-addressed dedupe between tenants stays safe, and a blob stored before its row is registered is never visible to deletion at all because nothing enumerates the blob root.

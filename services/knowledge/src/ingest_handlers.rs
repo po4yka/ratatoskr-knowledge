@@ -351,15 +351,23 @@ impl<P: LlmProvider> IngestContext<P> {
                 event_id: envelope.event_id.0,
             };
         }
-        match RepositoryAnalysisConsumer::new(&self.database)
-            .fail(&request, code, retryable)
-            .await
-        {
+        let settlement_retry = Outcome::Retry {
+            class: "repository_settlement",
+            event_id: envelope.event_id.0,
+        };
+        let consumer = RepositoryAnalysisConsumer::new(&self.database);
+        // The pipeline can fail before it stored the request, and a request that is not stored
+        // cannot be settled: record it first (a no-op when it exists) so the terminal fact always
+        // has a row to hang on. A request that can never be recorded has no fact to carry.
+        match consumer.accept(&request, &cause).await {
+            Ok(_) => {}
+            Err(error) if error.is_permanent() => return Outcome::Reject("repository_request"),
+            Err(_) => return settlement_retry,
+        }
+        match consumer.fail(&request, code, retryable).await {
+            // `None` is a request that already reached a terminal state: its fact exists.
             Ok(_) => Outcome::Done,
-            Err(_) => Outcome::Retry {
-                class: "repository_settlement",
-                event_id: envelope.event_id.0,
-            },
+            Err(_) => settlement_retry,
         }
     }
 }

@@ -37,6 +37,23 @@ pub enum PersistenceError {
     Encode(#[source] serde_json::Error),
 }
 
+impl PersistenceError {
+    /// Whether the same input can never be stored, however often it is retried.
+    ///
+    /// An identity, source reference, number or value the schema cannot represent is a property of
+    /// the input. A connection, query or schema failure is the database and may recover.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidSource
+                | Self::InvalidAnalysisIdentity
+                | Self::ValueOverflow
+                | Self::Encode(_)
+        )
+    }
+}
+
 /// One finite database pool owned by Knowledge.
 #[derive(Debug, Clone)]
 pub struct Database {

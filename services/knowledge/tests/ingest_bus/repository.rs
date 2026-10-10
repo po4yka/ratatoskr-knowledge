@@ -1,6 +1,7 @@
 //! The repository-request lane of the ingest worker through a real `JetStream` and a loopback
 //! README source: success, a transient source failure that becomes terminal on the fifth
-//! delivery, and a permanent integrity failure (XR-021 CONTRACTS.md S09).
+//! delivery, a permanent integrity failure, and transient database failures in the intake and
+//! in the settlement (XR-021 CONTRACTS.md S02 rule 7 and S09).
 
 use std::time::Duration;
 
@@ -167,6 +168,143 @@ async fn a_readme_that_fails_its_digest_fails_permanently_on_the_first_delivery(
     assert_eq!(stub.hits(&readme_path()), 1);
     assert_eq!(request_state(&harness).await?, "failed");
     assert_eq!(harness.search_documents().await?, 0);
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// Makes the first `failures` writes of `event` against the request table fail inside the
+/// database, then lets later ones through.
+///
+/// `event` is `insert`, or `update` with `when_state` naming the state the update writes. The
+/// sequence counts every attempt, including the failed ones, because a sequence is not rolled back.
+async fn fail_first_writes(
+    harness: &Harness,
+    event: &str,
+    when_state: &str,
+    failures: i64,
+) -> Result<(), sqlx::Error> {
+    let pool = harness.database.database.pool();
+    for statement in [
+        "create sequence knowledge.test_write_attempts".to_owned(),
+        "create function knowledge.test_fail_first() returns trigger language plpgsql as $$
+         begin
+           if nextval('knowledge.test_write_attempts') <= tg_argv[0]::bigint then
+             raise exception 'injected transient write failure';
+           end if;
+           return new;
+         end $$"
+            .to_owned(),
+        format!(
+            "create trigger test_fail_first before {event} on knowledge.repository_analysis_requests
+             for each row when ({when_state}) execute function knowledge.test_fail_first({failures})"
+        ),
+    ] {
+        sqlx::query(&statement).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn write_attempts(harness: &Harness) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("select last_value from knowledge.test_write_attempts")
+        .fetch_one(harness.database.database.pool())
+        .await
+}
+
+/// A database failure while accepting the request is transient: the first delivery is naked, not
+/// acknowledged and not settled, so the second delivery completes the request.
+#[tokio::test]
+async fn a_transient_intake_failure_is_retried_and_then_completes() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start().await?;
+    fail_first_writes(&harness, "insert", "true", 1).await?;
+    let stub = HttpStub::start(vec![(readme_path(), 200, README.to_vec())]).await?;
+    let config = publish_request(&harness, &stub).await?;
+    let worker = harness.spawn_with(
+        config,
+        routed(&[("repository_prompt_v1", REPOSITORY_ANALYSIS_PRESENT)]),
+    );
+
+    eventually("the completed fact is published", || async {
+        Ok(harness.facts_on(COMPLETED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    harness.settled(IngestFamily::Repository, 2).await?;
+    assert_eq!(request_state(&harness).await?, "completed");
+    assert!(
+        write_attempts(&harness).await? >= 2,
+        "the first insert failed and the second delivery inserted"
+    );
+    assert!(
+        harness.facts_on(FAILED_SUBJECT).await?.is_empty(),
+        "a transient database failure must not produce a terminal failure"
+    );
+    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// A database failure while settling a request that was analysed successfully is transient: the
+/// request is not settled as failed, and the redelivery completes it.
+#[tokio::test]
+async fn a_transient_settlement_failure_does_not_fail_an_analysed_request() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start().await?;
+    fail_first_writes(&harness, "update", "new.state = 'completed'", 1).await?;
+    let stub = HttpStub::start(vec![(readme_path(), 200, README.to_vec())]).await?;
+    let config = publish_request(&harness, &stub).await?;
+    let worker = harness.spawn_with(
+        config,
+        routed(&[("repository_prompt_v1", REPOSITORY_ANALYSIS_PRESENT)]),
+    );
+
+    eventually("the completed fact is published", || async {
+        Ok(harness.facts_on(COMPLETED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    harness.settled(IngestFamily::Repository, 2).await?;
+    assert_eq!(request_state(&harness).await?, "completed");
+    assert!(
+        harness.facts_on(FAILED_SUBJECT).await?.is_empty(),
+        "an analysed request must not be settled as a permanent contract failure"
+    );
+    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// When the intake keeps failing until the delivery budget runs out, the last delivery still
+/// leaves a terminal failed fact: the handler records the request before it settles it, so a
+/// request that was never stored is not acknowledged without a fact.
+#[tokio::test]
+async fn an_intake_that_never_succeeded_still_ends_in_one_retryable_failed_fact() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start().await?;
+    fail_first_writes(&harness, "insert", "true", 5).await?;
+    let stub = HttpStub::start(vec![(readme_path(), 200, README.to_vec())]).await?;
+    let config = publish_request(&harness, &stub).await?;
+    let worker = harness.spawn_with(
+        config,
+        routed(&[("repository_prompt_v1", REPOSITORY_ANALYSIS_PRESENT)]),
+    );
+
+    eventually("the terminal failure is published", || async {
+        Ok(harness.facts_on(FAILED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    let failed = only_fact(&harness, FAILED_SUBJECT).await?;
+    let payload = failed.payload_as::<RepositoryAnalysisFailed>()?;
+    assert_eq!(
+        payload.failure_code,
+        AnalysisFailureCode::DependencyUnavailable
+    );
+    assert!(payload.retryable);
+    harness.settled(IngestFamily::Repository, 5).await?;
+    assert_eq!(request_state(&harness).await?, "failed");
+    assert!(harness.facts_on(COMPLETED_SUBJECT).await?.is_empty());
+    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

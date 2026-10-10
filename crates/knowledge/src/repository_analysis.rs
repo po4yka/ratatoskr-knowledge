@@ -38,6 +38,25 @@ pub enum RepositoryAnalysisError {
     Outbox(#[from] EventOutboxError),
 }
 
+impl RepositoryAnalysisError {
+    /// Whether the same request can never be stored or settled, however often it is retried.
+    ///
+    /// A permanent error is a property of the request: a conflicting idempotency digest, an
+    /// identity or number the schema cannot represent, or a value that cannot be encoded. Every
+    /// other error is the database or the outbox failing and is worth another delivery.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::IdempotencyConflict
+            | Self::Encode(_)
+            | Self::Outbox(EventOutboxError::InvalidRow) => true,
+            Self::Persistence(error) | Self::Outbox(EventOutboxError::Persistence(error)) => {
+                error.is_permanent()
+            }
+        }
+    }
+}
+
 /// Consumer and terminal-fact constructor over Knowledge's owned durable state.
 #[derive(Debug)]
 pub struct RepositoryAnalysisConsumer<'a> {
