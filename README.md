@@ -9,8 +9,9 @@ analysis, and persists the evidence and result.
 > budget controls, alongside a tenant-scoped full-text projection and operator-plane retrieval.
 > Versioned pgvector embeddings and hybrid ranking are implemented behind an optional embeddings
 > credential; lexical search remains the offline default. The optional channel-recap role consumes
-> one exact pre-provisioned JetStream durable and publishes terminal recap facts; there is no public
-> analysis endpoint.
+> one exact pre-provisioned JetStream durable and publishes terminal recap facts, and the optional
+> ingest role consumes four more (documents, social sources, AI archives, repository requests) and
+> publishes the completion facts of what it analysed; there is no public analysis endpoint.
 
 > [!IMPORTANT]
 > Ratatoskr is in development. The API, database, and contracts keep their first version. The
@@ -49,8 +50,22 @@ analysis, and persists the evidence and result.
 - a dormant `knowledge.channel_digest_recap.requested.v1` consumer with owner-scoped inbox
   convergence, authenticated immutable-manifest retrieval, complete-revision context selection,
   strict grounded recap validation, terminal outbox publication, and synthetic evaluations;
+- a dormant ingest worker (`RATATOSKR__INGEST__ENABLED`) with one supervised consumer per durable:
+  `content.document.extracted.v1` becomes a registered source, an article analysis and a searchable
+  document; `social.source.captured|updated|removed.v1` and the eight `ai_archive.*` facts go
+  through the durable source inbox, are analysed when they are the head of their source, and a
+  removal or tombstone deletes the derived state; `knowledge.repository_analysis.requested.v1` is
+  analysed with the README bytes resolved from GitHub's internal reader route. Completion and
+  failure facts are committed to `knowledge.event_outbox` in the transaction that produced them and
+  published once to `evt.knowledge.*`;
+- a channel-recap chain that conforms to the channel-digests manifest contract (the path and the
+  three headers come from the contract crate, the bytes are verified by the contract type), asks
+  the model only for what a model knows (headline, overview, topics, notable items, warnings), and
+  composes the language, manifest digest and coverage itself, and that resumes a run from its
+  durable state under a per-run advisory lock after a kill;
 - atomic, audited `delete-source` and `delete-tenant` operator jobs that remove all owned derived
-  data and only reference-safe Knowledge blob bytes;
+  data, the inbox, tombstone, request and outbox state of the scope, and only reference-safe
+  Knowledge blob bytes through a durable erasure queue;
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
   regeneration after a model, chunking, or lexical-projection change;
 - an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and a loopback-only
@@ -73,6 +88,14 @@ analysis_attempts
 analysis_outputs
 provider_usage
 repository_analysis_requests
+event_outbox
+social_tombstones
+ingest_failures
+blob_erasure_queue
+source_analysis_inbox
+source_analysis_heads
+ai_archive_object_inbox
+ai_archive_tombstones
 search_projection_inputs
 search_documents
 embedding_chunks
@@ -154,6 +177,14 @@ RATATOSKR__CHANNEL_RECAP__BUS_SUBJECT
 RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE
 RATATOSKR__CHANNEL_RECAP__FETCH_BATCH
 RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS
+RATATOSKR__INGEST__ENABLED
+RATATOSKR__INGEST__PROVIDER_MODE
+RATATOSKR__INGEST__BUS_ENDPOINT
+RATATOSKR__INGEST__BUS_CREDENTIALS_FILE
+RATATOSKR__INGEST__FETCH_BATCH
+RATATOSKR__INGEST__ACK_WAIT_SECONDS
+RATATOSKR__INGEST__GITHUB_README_BASE_URL
+RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET
 ```
 
 Unknown or invalid `RATATOSKR__` keys stop startup without printing their values. Without
@@ -184,6 +215,39 @@ an authenticated `GET /ready` from the loopback digest source. `SIGINT` or `SIGT
 fail, drains the consumer, and joins it within the configured shutdown bound. Scripted recap mode
 requires no inference credential; `openrouter` mode requires the existing controlled provider
 configuration and spend limits.
+
+## Ingest worker
+
+The ingest worker is dormant unless `RATATOSKR__INGEST__ENABLED=true`. Stream and durable names are
+compiled constants, provisioned by the platform and verified, never created, by the worker:
+
+```text
+ratatoskr_events / ratatoskr_knowledge_documents           evt.content.document.extracted.v1
+ratatoskr_events / ratatoskr_knowledge_social_sources      evt.social.source.>
+ratatoskr_events / ratatoskr_knowledge_ai_archive          evt.ai_archive.>
+ratatoskr_events / ratatoskr_knowledge_repository_requests evt.knowledge.repository_analysis.requested.v1
+```
+
+Each durable is explicit-ack, deliver-all, unlimited redelivery, with an ack wait equal to
+`RATATOSKR__INGEST__ACK_WAIT_SECONDS` (120). A delivery from the wrong producer, without a tenant,
+undecodable, or whose tenant differs from the payload owner is terminated on first delivery. A failed
+analysis is redelivered after 2 seconds; the fifth delivery is terminal and leaves a content-free row
+in `knowledge.ingest_failures`, except for repository requests, which settle as a
+`knowledge.repository_analysis.failed.v1` fact so the requester is told. A redelivery whose inbox
+row was committed before the analysis ran resumes the analysis when that delivery is still the head
+of its source; a delayed older delivery is kept as a receipt and never regresses the head.
+
+`knowledge.analysis.completed.v1`, `knowledge.ai_archive_analysis.completed.v1` and the two
+repository facts are rows of `knowledge.event_outbox`, committed with the state change that produced
+them and published to `evt.<subject>` with `Nats-Msg-Id` equal to the outbox id, so a crash between
+the broker's acknowledgement and the `published_at` update republishes a message the broker drops.
+`/ready` additionally requires the four consumers to be verified and connected and the publisher not
+to have failed for more than 30 seconds. If a worker task ends for any reason before shutdown, the
+process begins drain and exits non-zero.
+
+`RATATOSKR__INGEST__PROVIDER_MODE=fixture` is accepted only with a loopback broker. It answers the
+article analysis with the document's first paragraph so a captured URL is searchable without an
+inference credential, and it answers no other family.
 
 ## Internal channel-recap result surface
 

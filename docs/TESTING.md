@@ -25,6 +25,18 @@ reads, exact digest/schema revalidation, uniform missing/wrong authorization, sc
 finite no-store responses, safe `502`/`503` failures, disabled/enabled process startup, restart, and
 bounded drain. All identifiers, secrets, and recap text are synthetic.
 
+The ingest worker is proven against a real `JetStream`: a document, a social capture and its removal,
+an AI-archive conversation and its tombstone become searchable and disappear; wrong-producer and
+undecodable deliveries are terminated and never looped; a failing analysis is redelivered and
+becomes terminal on the fifth delivery; a redelivery after a crash between the inbox commit and the
+analysis resumes it; the completion facts reach the stream once, even across a restart; and
+readiness follows the broker. A second suite boots a broker that enforces exactly the Knowledge
+stanza of `deploy/nats/identity.conf` and runs the recap and ingest workers under that identity,
+including the refusals. The recap pipeline is killed in every durable state and resumed, and a second
+executor on a held run is refused without touching it. Privacy deletion is proven not to touch
+another tenant's recap or snapshot bytes, to heal a crash between the row commit and the byte
+collection, and to remove every content-bearing inbox, tombstone, request and outbox row of its scope.
+
 Default tests use the scripted provider, recorded fixtures, and the loopback fake transport; none of
 them makes an external inference request. Database tests create disposable databases from the
 current [`../schema.sql`](../schema.sql); this repository has no database migrations. The live

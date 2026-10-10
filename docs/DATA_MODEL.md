@@ -23,6 +23,21 @@ only `knowledge.*` objects:
 - `channel_recap_attempts` records at most two raw-response-first provider attempts;
 - `channel_recap_results` stores one grounded typed recap and exact coverage;
 - `channel_recap_outbox` stores one completion or failure until JetStream acknowledges publication.
+  A recap attempt may end `interrupted` when the process stopped while its provider call was in
+  flight.
+- `source_analysis_inbox` and `source_analysis_heads` claim social and AI-archive deliveries and keep
+  the head of each source; `ai_archive_object_inbox` keeps import, project and artifact receipts;
+  `ai_archive_tombstones` and `social_tombstones` are the ordering guards that stop a delayed older
+  delivery from resurrecting a deleted source;
+- `repository_analysis_requests` keeps one pending request per idempotency digest together with the
+  inbound event it came from, so its terminal fact carries the right correlation and causation;
+- `event_outbox` holds the completion facts (`knowledge.analysis.completed.v1`,
+  `knowledge.ai_archive_analysis.completed.v1` and the two repository facts) committed with the
+  state change that produced them, unique by a natural dedupe key, until JetStream acknowledges
+  publication;
+- `ingest_failures` records, without content, a delivery that used its five redeliveries;
+- `blob_erasure_queue` holds the Knowledge-owned digests of deleted rows until no row references
+  them and the bytes are removed. Deletion never enumerates the blob root.
 
 ## Constraints
 

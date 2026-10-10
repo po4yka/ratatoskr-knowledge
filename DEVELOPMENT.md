@@ -144,6 +144,36 @@ export KNOWLEDGE_TEST_NATS_URL=nats://127.0.0.1:14223
 The test provisions only its fixed command stream and durable on this disposable broker. Production
 topology remains an operator-owned precondition; Knowledge never creates or widens it.
 
+The ingest tests (`services/knowledge/tests/ingest_bus.rs`) recreate the `ratatoskr_events` stream and
+the four ingest durables on that same broker before every test, because the names are compiled
+constants of the service; they run one at a time. Two tests start their own broker process: the
+outage test (port 57062) and the authorized-broker test (port 57063), which boots an
+authorization-enabled server with exactly the stanza in `deploy/nats/identity.conf` and runs the
+recap and ingest workers under the Knowledge nkey. They need a `nats-server` binary on `PATH`, or
+`KNOWLEDGE_TEST_NATS_SERVER=/absolute/path/to/nats-server`. CI extracts the binary from the same
+digest-pinned image as the fixture above, so the test broker and the gate broker are one version.
+
+## Bus credentials and durables
+
+One nkey seed, `/etc/ratatoskr/knowledge.nkey`, serves both workers. The seed is a file read at
+runtime and never logged; the public key belongs in `ratatoskr-platform/deploy/nats/ratatoskr.conf`,
+where `deploy/nats/identity.conf` is the reviewed copy of this service's stanza.
+
+```bash
+RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS=30
+RATATOSKR__INGEST__ENABLED=true
+RATATOSKR__INGEST__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+RATATOSKR__INGEST__ACK_WAIT_SECONDS=120
+RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET=<the GitHub internal reader secret>
+```
+
+The ack waits must equal the durables Edge provisions (30 s for the recap command, 120 s for the four
+ingest durables); a worker verifies its durable at startup and stays not ready on any difference.
+`RATATOSKR__INGEST__PROVIDER_MODE=fixture` builds a deterministic first-paragraph provider for the
+article family only and is accepted only on a loopback broker; it exists so a captured URL becomes
+searchable without an inference credential.
+
 ## The Rust skills in this repository
 
 `.agents/skills/` holds eighteen Rust skills vendored from `po4yka/rust-skills`, and

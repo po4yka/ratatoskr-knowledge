@@ -517,30 +517,49 @@ knowledge.repository_analysis.requested.v1
 
 ### 16.2. Source events consumed
 
+Live: consumed by the ingest worker through four Edge-provisioned durables on `ratatoskr_events`
+(`ratatoskr_knowledge_documents`, `_social_sources`, `_ai_archive`, `_repository_requests`), and by
+the channel-recap worker through `ratatoskr_knowledge_channel_recap` on `ratatoskr_commands`.
+
 ```text
-content.document.extracted.v1
-github.repository.observed.v1
-social.source.captured.v1
-social.source.updated.v1
-social.source.removed.v1
-chatgpt.conversation.upserted.v1
-chatgpt.project.upserted.v1
-claude.conversation.upserted.v1
-claude.project.upserted.v1
+cmd.knowledge.channel_digest_recap.requested.v1
+evt.content.document.extracted.v1
+evt.social.source.captured.v1
+evt.social.source.updated.v1
+evt.social.source.removed.v1
+evt.ai_archive.archive.imported.v1
+evt.ai_archive.conversation.added.v1
+evt.ai_archive.conversation.updated.v1
+evt.ai_archive.project.added.v1
+evt.ai_archive.project.updated.v1
+evt.ai_archive.artifact.added.v1
+evt.ai_archive.artifact.updated.v1
+evt.ai_archive.subject.tombstoned.v1
+evt.knowledge.repository_analysis.requested.v1
 ```
 
-The social-source facts follow the published `social-source-contracts` capability, and the producer/analyser boundary behaviour for them — fact-as-request semantics, `(social_source_id, content_digest)` result linkage, and removal propagation — is owned by the `ratatoskr-workspace` store spec `social-analysis-intake`, which is cited here rather than restated. The social analysis family itself lands through separate changesets (implementation plan item 9).
+Not consumed, and not planned under these names: `github.repository.observed.v1`,
+`chatgpt.conversation.upserted.v1`, `chatgpt.project.upserted.v1`, `claude.conversation.upserted.v1`
+and `claude.project.upserted.v1`. Artifact and project-file facts are recorded as receipts and are
+not analysed.
+
+The social-source facts follow the published `social-source-contracts` capability, and the producer/analyser boundary behaviour for them — fact-as-request semantics, `(social_source_id, content_digest)` result linkage, and removal propagation — is owned by the `ratatoskr-workspace` store spec `social-analysis-intake`, which is cited here rather than restated. Cross-repository subjects, producers, tenants and dispositions are defined by XR-021 CONTRACTS.md S01, S02, S04 and S09.
 
 ### 16.3. Events emitted
 
+Live, published by the worker's outbox publishers with `Nats-Msg-Id` equal to the event id:
+
 ```text
-knowledge.analysis.completed.v1
-knowledge.analysis.failed.v1
-knowledge.search_document.indexed.v1
-knowledge.search_document.removed.v1
-knowledge.repository_analysis.completed.v1
-knowledge.repository_analysis.failed.v1
+evt.knowledge.analysis.completed.v1
+evt.knowledge.ai_archive_analysis.completed.v1
+evt.knowledge.repository_analysis.completed.v1
+evt.knowledge.repository_analysis.failed.v1
+evt.knowledge.channel_digest_recap.completed.v1
+evt.knowledge.channel_digest_recap.failed.v1
 ```
+
+`knowledge.analysis.failed.v1`, `knowledge.search_document.indexed.v1` and
+`knowledge.search_document.removed.v1` are not emitted.
 
 Events contain references and bounded results, not full private source content.
 

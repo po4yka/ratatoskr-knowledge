@@ -22,12 +22,15 @@ Knowledge must remain reproducible, inspectable, and replaceable. It is not a ge
 
 ## Current phase
 
-The first article-analysis slice is implemented. It includes the Rust workspace and CI gate,
-`schema.sql`, immutable source and analysis-run persistence, a versioned article contract and
-prompt, a scripted provider, and an `OpenRouter` adapter with finite timeout, rate, cancellation,
-and budget controls. Search indices, embeddings, event consumers, additional analysis families, and
-evaluation datasets remain absent. Do not assume anything beyond the implemented slice exists unless
-it is present in the checkout.
+The article-analysis slice and its successors are implemented: the Rust workspace and CI gate,
+`schema.sql`, immutable source and analysis-run persistence, versioned article, repository, social,
+AI-archive and channel-recap contracts and prompts, a scripted provider and an `OpenRouter` adapter
+with finite timeout, rate, cancellation and budget controls, PostgreSQL full-text search with
+optional pgvector hybrid ranking, offline evaluation datasets, audited deletion, and two optional
+bus roles: the channel-recap consumer and the ingest worker (four durable consumers and a
+completion-fact publisher, dormant unless `RATATOSKR__INGEST__ENABLED`). Do not assume anything
+beyond what is present in the checkout exists; the planned analysis of AI-archive artifacts and
+project knowledge files in particular does not.
 
 When creating initial implementation:
 

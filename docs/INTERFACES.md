@@ -55,10 +55,33 @@ read-through boundary for the channel-digest service, not a public analysis API.
 - `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
 - `ChannelRecapInbox` admits only `knowledge.channel_digest_recap.requested.v1`; the transport
   adapter separately verifies the `cmd.` subject and `ratatoskr-channel-digests` producer.
-- `DigestSourceClient` accepts only a loopback origin, sends the service secret plus owner/run/
-  manifest authority headers, refuses redirects, and verifies readiness before the consumer is ready.
+- `DigestSourceClient` accepts only a loopback origin and reads `GET /v1/manifests/<bare uuid>` with the
+  service bearer and the three contract headers (`x-ratatoskr-owner-id`, `x-ratatoskr-digest-run-id`,
+  `x-ratatoskr-manifest-digest`), all named by `ratatoskr-channel-digest-contracts`; it refuses
+  redirects and probes `GET /ready` with the bearer only before the consumer is ready.
+  `verify_digest_manifest` hashes the bytes, decodes them with `ChannelDigestManifest::from_canonical_bytes`
+  (which refuses anything but the canonical rendering) and checks owner, run, reference, window and
+  counts against the request.
 - `ChannelRecapPipeline` uses the shared provider seam and two-call budget, stores raw bytes before
-  validation, and commits exactly one typed completion or safe failure through the recap outbox.
+  validation, and commits exactly one typed completion or safe failure through the recap outbox. The
+  model returns `ChannelRecapModelOutput` (headline, overview, topics, notable items, warnings);
+  the pipeline composes the contract versions, language, manifest digest and coverage, adds the
+  `context_omitted_sources` warning when sources were omitted, and validates the composed recap.
+  `execute` holds a per-run session advisory lock on a dedicated connection and resumes a run from
+  its durable state; a run held by another executor is a `State` conflict.
+- `SourceInbox` claims social and AI-archive deliveries; `accept_social_removed` records a tombstone,
+  drops the source head and snapshots and deletes the derived rows in one transaction, and
+  `is_current_head` tells a redelivery whether its analysis is still owed.
+- `DocumentIntake` registers an extracted document under the extractor's context with the
+  extractor-owned Document IR blob as provenance, creates the run once and analyses it with the
+  article pipeline.
+- `EventOutbox` is the transactional outbox of completion facts; `RepositoryAnalysisConsumer`
+  settles a request and queues its terminal fact in the same transaction.
+- `GithubReadmeClient` resolves a GitHub README reference over loopback with a bearer, refuses
+  redirects and any bytes that are not the referenced digest and length.
+- `delete_source`, `delete_tenant` and `execute_deletion` queue the Knowledge-owned digests of the
+  deleted rows in `knowledge.blob_erasure_queue` in the deleting transaction and `collect_pending_blobs`
+  removes the ones no row references; deletion never enumerates the blob root.
 - `ChannelRecapRunStore::read_completed_result` joins a terminal recap run to its owned result by
   opaque result identity, revalidates digest and type, and returns only the typed projection.
 
