@@ -38,7 +38,9 @@ pub struct IngestConfig {
     /// Optional absolute `NKey` seed file; loopback fixture profiles may use anonymous NATS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bus_credentials_file: Option<PathBuf>,
-    /// Maximum messages pulled per batch.
+    /// Maximum messages pulled per batch. Messages are handled one at a time and the broker starts
+    /// each message's ack-wait clock when it is delivered, so keep this times the worst-case handler
+    /// time below `ack_wait_seconds`; the default of one never prefetches.
     pub fetch_batch: u32,
     /// Exact durable acknowledgement deadline.
     pub ack_wait_seconds: u64,
@@ -56,7 +58,7 @@ impl Default for IngestConfig {
             provider_mode: IngestProviderMode::OpenRouter,
             bus_endpoint: "nats://127.0.0.1:4222".to_owned(),
             bus_credentials_file: None,
-            fetch_batch: 16,
+            fetch_batch: 1,
             ack_wait_seconds: 120,
             github_readme_base_url: "http://127.0.0.1:8092/".to_owned(),
             github_readme_service_secret: None,

@@ -313,29 +313,23 @@ fn embeddings_configuration_rejects_invalid_settings() {
     assert!(dimensions_diagnostic.contains("RATATOSKR__PROVIDER__EMBEDDINGS__DIMENSIONS"));
 }
 
-/// XR-021 CONTRACTS.md S09: the ingest section is dormant by default and validated as a whole
-/// before the process may consume.
+/// XR-021 CONTRACTS.md S09: the ingest section is dormant by default and accepted when complete.
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one scenario walks every accepted and rejected ingest configuration"
-)]
-fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
+fn ingest_section_defaults_and_accepts_a_complete_configuration()
+-> Result<(), Box<dyn std::error::Error>> {
     let defaults = Config::default();
     assert!(!defaults.ingest.enabled);
-    assert_eq!(defaults.ingest.fetch_batch, 16);
+    assert_eq!(defaults.ingest.fetch_batch, 1);
     assert_eq!(defaults.ingest.ack_wait_seconds, 120);
 
-    let seed_file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-    let fixture = [
+    let accepted = Config::from_environment([
         ("RATATOSKR__INGEST__ENABLED", "true"),
         ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
         (
             "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET",
             "readme-LEAKME",
         ),
-    ];
-    let accepted = Config::from_environment(fixture)?;
+    ])?;
     assert!(accepted.ingest.enabled);
     assert_eq!(
         accepted.ingest.provider_mode,
@@ -344,25 +338,45 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!serde_json::to_string(&accepted)?.contains("readme-LEAKME"));
     assert!(!format!("{accepted:?}").contains("readme-LEAKME"));
 
-    let rejected = |entries: &[(&str, &str)], key: &str| {
-        let mut all = vec![
-            ("RATATOSKR__INGEST__ENABLED", "true"),
-            (
-                "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET",
-                "readme-LEAKME",
-            ),
-        ];
-        all.extend_from_slice(entries);
-        let diagnostic = Config::from_environment(all)
-            .expect_err("the configuration must be refused")
-            .to_string();
-        assert!(diagnostic.contains(key), "{diagnostic} should name {key}");
-        assert!(
-            !diagnostic.contains("LEAKME"),
-            "{diagnostic} leaked a value"
-        );
+    // The whole section is inert while disabled, so a half-configured ingest does not block boot.
+    let dormant = Config::from_environment([("RATATOSKR__INGEST__PROVIDER_MODE", "fixture")])?;
+    assert!(!dormant.ingest.enabled);
+    Ok(())
+}
+
+/// An enabled ingest configuration with `entries` added must be refused with a diagnostic that
+/// names `key` and leaks no value.
+fn assert_ingest_rejected(
+    entries: &[(&str, &str)],
+    key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut all = vec![
+        ("RATATOSKR__INGEST__ENABLED", "true"),
+        (
+            "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET",
+            "readme-LEAKME",
+        ),
+    ];
+    all.extend_from_slice(entries);
+    let diagnostic = match Config::from_environment(all) {
+        Ok(_) => return Err(format!("the configuration naming {key} was accepted").into()),
+        Err(error) => error.to_string(),
     };
-    rejected(
+    assert!(diagnostic.contains(key), "{diagnostic} should name {key}");
+    assert!(
+        !diagnostic.contains("LEAKME"),
+        "{diagnostic} leaked a value"
+    );
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S09: the bus and provider settings are validated as a whole before the
+/// process may consume.
+#[test]
+fn ingest_section_refuses_unsafe_bus_and_provider_settings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let seed_file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    assert_ingest_rejected(
         &[
             ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
             (
@@ -372,8 +386,8 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
             ("RATATOSKR__INGEST__BUS_CREDENTIALS_FILE", seed_file),
         ],
         "RATATOSKR__INGEST__PROVIDER_MODE",
-    );
-    rejected(
+    )?;
+    assert_ingest_rejected(
         &[
             ("RATATOSKR__PROVIDER__OPENROUTER__API_KEY", "sk-or-LEAKME"),
             (
@@ -386,8 +400,23 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ],
         "RATATOSKR__INGEST__BUS_CREDENTIALS_FILE",
-    );
-    rejected(
+    )?;
+    assert_ingest_rejected(
+        &[("RATATOSKR__INGEST__PROVIDER_MODE", "openrouter")],
+        "RATATOSKR__PROVIDER__OPENROUTER__API_KEY",
+    )?;
+    assert_ingest_rejected(
+        &[("RATATOSKR__INGEST__PROVIDER_MODE", "mystery")],
+        "RATATOSKR__INGEST__PROVIDER_MODE",
+    )?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S09: the README source is loopback-only and the worker limits are finite.
+#[test]
+fn ingest_section_refuses_unsafe_readme_source_and_limits() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_ingest_rejected(
         &[
             ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
             (
@@ -396,8 +425,8 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ],
         "RATATOSKR__INGEST__GITHUB_README_BASE_URL",
-    );
-    rejected(
+    )?;
+    assert_ingest_rejected(
         &[
             ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
             (
@@ -406,22 +435,14 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ],
         "RATATOSKR__INGEST__GITHUB_README_BASE_URL",
-    );
-    rejected(
+    )?;
+    assert_ingest_rejected(
         &[
             ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
             ("RATATOSKR__INGEST__ACK_WAIT_SECONDS", "0"),
         ],
         "RATATOSKR__INGEST__ACK_WAIT_SECONDS",
-    );
-    rejected(
-        &[("RATATOSKR__INGEST__PROVIDER_MODE", "openrouter")],
-        "RATATOSKR__PROVIDER__OPENROUTER__API_KEY",
-    );
-    rejected(
-        &[("RATATOSKR__INGEST__PROVIDER_MODE", "mystery")],
-        "RATATOSKR__INGEST__PROVIDER_MODE",
-    );
+    )?;
 
     let without_secret = Config::from_environment([
         ("RATATOSKR__INGEST__ENABLED", "true"),
@@ -436,10 +457,6 @@ fn ingest_section_is_validated() -> Result<(), Box<dyn std::error::Error>> {
         .to_string();
     assert!(unknown.contains("RATATOSKR__INGEST__MYSTERY"));
     assert!(!unknown.contains("LEAKME"));
-
-    // The whole section is inert while disabled, so a half-configured ingest does not block boot.
-    let dormant = Config::from_environment([("RATATOSKR__INGEST__PROVIDER_MODE", "fixture")])?;
-    assert!(!dormant.ingest.enabled);
     Ok(())
 }
 
