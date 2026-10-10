@@ -443,7 +443,7 @@ impl<P: LlmProvider> IngestContext<P> {
                 tracing::warn!(family = family.label(), class, "ingest delivery gave up");
                 jetstream::AckKind::Term
             }
-            Outcome::Retry { class, .. } => {
+            Outcome::Retry { class, .. } | Outcome::Redeliver(class) => {
                 tracing::warn!(family = family.label(), class, "ingest delivery will retry");
                 jetstream::AckKind::Nak(Some(NAK_DELAY))
             }

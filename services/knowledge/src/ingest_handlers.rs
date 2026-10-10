@@ -44,6 +44,10 @@ pub(crate) enum Outcome {
     /// The delivery failed in a way a later delivery may not; redeliver after a delay, and give
     /// up after the delivery budget.
     Retry { class: &'static str, event_id: Uuid },
+    /// The delivery cannot be settled yet because the settlement itself failed; redeliver
+    /// without a delivery budget, because the terminal delivery is the one that must end in a
+    /// fact and the durable has no delivery limit.
+    Redeliver(&'static str),
 }
 
 fn decode(bytes: &[u8], producers: &[&str]) -> Result<(EventEnvelope, TenantRef), Outcome> {
@@ -351,10 +355,7 @@ impl<P: LlmProvider> IngestContext<P> {
                 event_id: envelope.event_id.0,
             };
         }
-        let settlement_retry = Outcome::Retry {
-            class: "repository_settlement",
-            event_id: envelope.event_id.0,
-        };
+        let settlement_retry = Outcome::Redeliver("repository_settlement");
         let consumer = RepositoryAnalysisConsumer::new(&self.database);
         // The pipeline can fail before it stored the request, and a request that is not stored
         // cannot be settled: record it first (a no-op when it exists) so the terminal fact always

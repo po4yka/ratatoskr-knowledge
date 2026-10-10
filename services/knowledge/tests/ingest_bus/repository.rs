@@ -309,3 +309,39 @@ async fn an_intake_that_never_succeeded_still_ends_in_one_retryable_failed_fact(
     harness.database.cleanup().await?;
     Ok(())
 }
+
+/// A database failure while settling the request on the terminal delivery must not end the
+/// delivery without a fact: the settlement is redelivered past the delivery budget until the
+/// failed fact is committed, and no `ingest_failures` row replaces it.
+#[tokio::test]
+async fn a_settlement_failure_on_the_fifth_delivery_is_redelivered_until_the_failed_fact()
+-> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start().await?;
+    fail_first_writes(&harness, "update", "new.state = 'failed'", 1).await?;
+    let stub = HttpStub::start(vec![(readme_path(), 503, Vec::new())]).await?;
+    let config = publish_request(&harness, &stub).await?;
+    let worker = harness.spawn_with(
+        config,
+        routed(&[("repository_prompt_v1", REPOSITORY_ANALYSIS_PRESENT)]),
+    );
+
+    eventually("the terminal failure is published", || async {
+        Ok(harness.facts_on(FAILED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    let failed = only_fact(&harness, FAILED_SUBJECT).await?;
+    let payload = failed.payload_as::<RepositoryAnalysisFailed>()?;
+    assert_eq!(payload.failure_code, AnalysisFailureCode::SourceUnavailable);
+    assert!(payload.retryable);
+    harness.settled(IngestFamily::Repository, 6).await?;
+    assert_eq!(request_state(&harness).await?, "failed");
+    assert_eq!(
+        harness.rows_in(&["ingest_failures"]).await?,
+        0,
+        "the request settled through its own terminal fact"
+    );
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
