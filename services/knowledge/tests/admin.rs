@@ -68,6 +68,48 @@ async fn channel_recap_readiness_requires_consumer_and_source_and_fails_on_drain
     Ok(())
 }
 
+#[tokio::test]
+async fn ready_requires_ingest_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let lifecycle = Lifecycle::starting_with_ingest();
+    let app = admin_router(
+        lifecycle.clone(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+        None,
+    );
+
+    lifecycle.mark_ready();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.set_ingest_ready(true);
+    assert_response(&app, "/ready", StatusCode::OK).await?;
+    lifecycle.set_ingest_ready(false);
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.set_ingest_ready(true);
+    lifecycle.begin_drain();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+
+    // Recap and ingest are both required when both are configured.
+    let both = Lifecycle::starting_with_channel_recap();
+    both.require_ingest();
+    let both_app = admin_router(
+        both.clone(),
+        database.database.clone(),
+        Arc::new(Metrics::new()),
+        None,
+        None,
+    );
+    both.mark_ready();
+    both.set_channel_recap_ready(true);
+    assert_response(&both_app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    both.set_ingest_ready(true);
+    assert_response(&both_app, "/ready", StatusCode::OK).await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn assert_response(
     app: &axum::Router,
     path: &str,

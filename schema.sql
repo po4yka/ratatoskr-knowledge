@@ -136,6 +136,13 @@ create table if not exists knowledge.deletion_records (
     analysis_user_states_deleted integer not null default 0,
     highlights_deleted integer not null default 0,
     analysis_feedback_deleted integer not null default 0,
+    source_analysis_inbox_deleted integer not null default 0,
+    source_analysis_heads_deleted integer not null default 0,
+    ai_archive_object_inbox_deleted integer not null default 0,
+    repository_analysis_requests_deleted integer not null default 0,
+    ai_archive_tombstones_deleted integer not null default 0,
+    social_tombstones_deleted integer not null default 0,
+    event_outbox_deleted integer not null default 0,
     blob_digests_removed integer not null,
     completed_at timestamptz not null default now(),
     constraint deletion_records_scope_check check (scope in ('tenant', 'source', 'archive'))
@@ -182,6 +189,8 @@ create table if not exists knowledge.repository_analysis_requests (
     repository_attributes jsonb not null,
     requested_contract text not null,
     idempotency_digest_hex text not null unique,
+    cause_event_id uuid not null,
+    cause_correlation_id text not null,
     state text not null default 'pending',
     analysis_result_ref text,
     failure_code text,
@@ -366,7 +375,7 @@ create table if not exists knowledge.channel_recap_attempts (
     constraint channel_recap_attempts_reason_check check (reason in ('initial', 'retry', 'repair')),
     constraint channel_recap_attempts_outcome_check check (outcome in (
         'requested', 'response_received', 'accepted', 'invalid',
-        'transient_failure', 'permanent_failure'
+        'transient_failure', 'permanent_failure', 'interrupted'
     )),
     constraint channel_recap_attempts_digest_check check (
         raw_response_digest_hex is null or raw_response_digest_hex ~ '^[0-9a-f]{64}$'
@@ -702,4 +711,69 @@ create table if not exists knowledge.embedding_failures (
         model,
         prompt_version
     )
+);
+
+-- Completion facts are committed with the state change that produced them and published from here
+-- (XR-021 CONTRACTS.md S09). The unique dedupe key makes enqueueing a redelivery idempotent; the
+-- channel recap keeps its own outbox.
+create table if not exists knowledge.event_outbox (
+    outbox_id uuid primary key,
+    subject text not null,
+    tenant_ref text not null,
+    aggregate_id text not null,
+    correlation_id text not null,
+    causation_id text,
+    payload jsonb not null,
+    dedupe_key text not null,
+    created_at timestamptz not null default now(),
+    published_at timestamptz,
+    constraint event_outbox_subject_check check (subject in (
+        'knowledge.analysis.completed.v1',
+        'knowledge.ai_archive_analysis.completed.v1',
+        'knowledge.repository_analysis.completed.v1',
+        'knowledge.repository_analysis.failed.v1'
+    )),
+    constraint event_outbox_payload_object_check check (jsonb_typeof(payload) = 'object'),
+    constraint event_outbox_dedupe_key unique (dedupe_key)
+);
+
+create index if not exists event_outbox_unpublished_idx
+    on knowledge.event_outbox (created_at, outbox_id)
+    where published_at is null;
+
+-- A removed social source is claimed once and kept as the ordering guard: an older capture that is
+-- delivered after the removal must not bring the source back.
+create table if not exists knowledge.social_tombstones (
+    event_id uuid primary key,
+    tenant_ref text not null,
+    source_id text not null,
+    reason text not null,
+    removed_at timestamptz not null
+);
+
+create index if not exists social_tombstones_lookup_idx
+    on knowledge.social_tombstones (tenant_ref, source_id, removed_at desc);
+
+-- Content-free record of a delivery that exhausted its redeliveries without an outcome.
+create table if not exists knowledge.ingest_failures (
+    family text not null,
+    event_id uuid not null,
+    failure_class text not null,
+    delivered_count integer not null,
+    recorded_at timestamptz not null default now(),
+    primary key (family, event_id),
+    constraint ingest_failures_family_check
+        check (family in ('documents', 'social', 'ai_archive', 'repository')),
+    constraint ingest_failures_class_check check (char_length(failure_class) between 1 and 64),
+    constraint ingest_failures_delivered_check check (delivered_count >= 1)
+);
+
+-- Knowledge-owned blobs whose last reference was deleted. The queue row is written in the same
+-- transaction as the row deletions, so a crash before the bytes are removed is healed by the next
+-- drain (XR-021 CONTRACTS.md S12).
+create table if not exists knowledge.blob_erasure_queue (
+    digest_hex text primary key,
+    deletion_id uuid not null,
+    enqueued_at timestamptz not null default now(),
+    constraint blob_erasure_queue_digest_check check (digest_hex ~ '^[0-9a-f]{64}$')
 );

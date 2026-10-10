@@ -4,14 +4,49 @@ use crate::{
     BlobStore, ChannelDigestRecap, ChannelRecapOutputLanguage, ChannelRecapProviderRequest,
     ChannelRecapResultError, ChannelRecapRunState, ChannelRecapRunStore, Database,
     GenerationRequest, LlmProvider, PersistenceError, PreparedChannelRecapContext,
-    ProviderFailureClass, validate_channel_digest_recap,
+    ProviderFailureClass, validate_channel_recap_model_output,
 };
 use ratatoskr_channel_digest_contracts::{
     ChannelDigestRecapFailureCode, KnowledgeChannelDigestRecapCompleted,
     KnowledgeChannelDigestRecapFailed, KnowledgeChannelDigestRecapRequested,
 };
-use ratatoskr_identifiers::WireTimestamp;
+use ratatoskr_identifiers::{BlobRef, WireTimestamp};
 use sha2::{Digest as _, Sha256};
+
+use crate::channel_digest_recap_lock::RunLock;
+
+const REPAIR_INSTRUCTION: &str = "\nRepair validation code: channel_recap_schema.";
+
+/// What a provider response is validated against: the prepared evidence and requested language.
+#[derive(Debug, Clone, Copy)]
+struct ValidationContext<'a> {
+    context: &'a PreparedChannelRecapContext,
+    manifest_digest_hex: &'a str,
+    output_language: ChannelRecapOutputLanguage,
+}
+
+impl ValidationContext<'_> {
+    fn validate(&self, bytes: &[u8]) -> Result<ChannelDigestRecap, &'static str> {
+        let value =
+            serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| "json_syntax")?;
+        validate_channel_recap_model_output(
+            &value,
+            self.context,
+            self.manifest_digest_hex,
+            self.output_language,
+        )
+        .map_err(validation_code)
+    }
+}
+
+/// Where a run continues after its durable state was inspected.
+#[derive(Debug)]
+enum Recovery {
+    /// The run reached its terminal fact without another provider call.
+    Completed(ChannelDigestRecap),
+    /// The next provider call is attempt `ordinal` with the stated reason.
+    Call { ordinal: i16, reason: &'static str },
+}
 
 /// Safe channel-recap provider pipeline failure.
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +103,12 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
 
     /// Executes or resumes one durable recap run.
     ///
+    /// A session advisory lock on a dedicated connection keeps a second executor from touching a
+    /// run another one holds; the held case is a [`ChannelRecapPipelineError::State`], which the
+    /// worker answers with a delayed redelivery. Holding the lock, the run is resumed from its
+    /// durable state (XR-021 CONTRACTS.md S08), so a redelivery after a kill converges instead of
+    /// failing on an already-advanced state.
+    ///
     /// # Errors
     ///
     /// Returns a safe durable, provider, timeout, blob, validation, or state failure.
@@ -79,14 +120,42 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
         manifest_digest_hex: &str,
         output_language: ChannelRecapOutputLanguage,
     ) -> Result<ChannelDigestRecap, ChannelRecapPipelineError> {
+        let lock = RunLock::acquire(self.database, recap_run_id).await?;
+        let outcome = self
+            .execute_locked(
+                recap_run_id,
+                request,
+                context,
+                manifest_digest_hex,
+                output_language,
+            )
+            .await;
+        lock.release().await;
+        outcome
+    }
+
+    async fn execute_locked(
+        &self,
+        recap_run_id: uuid::Uuid,
+        mut request: ChannelRecapProviderRequest,
+        context: &PreparedChannelRecapContext,
+        manifest_digest_hex: &str,
+        output_language: ChannelRecapOutputLanguage,
+    ) -> Result<ChannelDigestRecap, ChannelRecapPipelineError> {
         if let Some(result) = self.resume_result(recap_run_id).await? {
             return Ok(result);
         }
-        self.transition(recap_run_id, "context_prepared", "model_requested")
-            .await?;
-        let mut reason = "initial";
-        let mut request = request;
-        for ordinal in 1_i16..=2 {
+        let check = ValidationContext {
+            context,
+            manifest_digest_hex,
+            output_language,
+        };
+        let (first_ordinal, mut reason) =
+            match self.recover(recap_run_id, &mut request, &check).await? {
+                Recovery::Completed(result) => return Ok(result),
+                Recovery::Call { ordinal, reason } => (ordinal, reason),
+            };
+        for ordinal in first_ordinal..=2 {
             self.insert_attempt(recap_run_id, ordinal, reason).await?;
             let started = std::time::Instant::now();
             let generated = tokio::time::timeout(
@@ -144,12 +213,7 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
             };
             self.record_raw_response(recap_run_id, ordinal, &response, duration_ms)
                 .await?;
-            let result = match validate_response(
-                &response.bytes,
-                context,
-                manifest_digest_hex,
-                output_language,
-            ) {
+            let result = match check.validate(&response.bytes) {
                 Ok(result) => result,
                 Err(validation_code) => {
                     if self
@@ -167,14 +231,195 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
                     return Err(ChannelRecapPipelineError::Invalid);
                 }
             };
-            self.transition(recap_run_id, "response_received", "schema_validated")
+            self.accept_validated(recap_run_id, ordinal, &result)
                 .await?;
-            self.persist_result(recap_run_id, ordinal, &result).await?;
-            self.settle_completion(recap_run_id).await?;
             crate::telemetry::record_channel_recap_pipeline("completed", "accepted", duration_ms);
             return Ok(result);
         }
         Err(ChannelRecapPipelineError::Invalid)
+    }
+
+    async fn accept_validated(
+        &self,
+        recap_run_id: uuid::Uuid,
+        ordinal: i16,
+        result: &ChannelDigestRecap,
+    ) -> Result<(), ChannelRecapPipelineError> {
+        self.transition(recap_run_id, "response_received", "schema_validated")
+            .await?;
+        self.persist_result(recap_run_id, ordinal, result).await?;
+        self.settle_completion(recap_run_id).await
+    }
+
+    /// Decides where a run that may have been interrupted continues, from durable state alone.
+    async fn recover(
+        &self,
+        recap_run_id: uuid::Uuid,
+        request: &mut ChannelRecapProviderRequest,
+        check: &ValidationContext<'_>,
+    ) -> Result<Recovery, ChannelRecapPipelineError> {
+        let (state, attempt_count): (String, i16) = sqlx::query_as(
+            "select state, attempt_count from knowledge.channel_recap_runs where recap_run_id = $1",
+        )
+        .bind(recap_run_id)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?
+        .ok_or(ChannelRecapPipelineError::State)?;
+        match state.as_str() {
+            "context_prepared" => {
+                self.transition(recap_run_id, "context_prepared", "model_requested")
+                    .await?;
+                Ok(Recovery::Call {
+                    ordinal: 1,
+                    reason: "initial",
+                })
+            }
+            "repaired" => {
+                self.transition(recap_run_id, "repaired", "model_requested")
+                    .await?;
+                self.recover_model_requested(recap_run_id, attempt_count, request)
+                    .await
+            }
+            "model_requested" => {
+                self.recover_model_requested(recap_run_id, attempt_count, request)
+                    .await
+            }
+            "response_received" | "schema_validated" => {
+                self.recover_stored_response(recap_run_id, attempt_count, &state, request, check)
+                    .await
+            }
+            _ => Err(ChannelRecapPipelineError::State),
+        }
+    }
+
+    /// A call was in flight, or between attempts, when the process stopped.
+    async fn recover_model_requested(
+        &self,
+        recap_run_id: uuid::Uuid,
+        attempt_count: i16,
+        request: &mut ChannelRecapProviderRequest,
+    ) -> Result<Recovery, ChannelRecapPipelineError> {
+        let newest: Option<(i16, String)> = sqlx::query_as(
+            "select ordinal, outcome from knowledge.channel_recap_attempts
+             where recap_run_id = $1 order by ordinal desc limit 1",
+        )
+        .bind(recap_run_id)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        let newest_outcome = newest.as_ref().map(|(_, outcome)| outcome.as_str());
+        if let Some((ordinal, _)) = newest
+            .as_ref()
+            .filter(|_| newest_outcome == Some("requested"))
+        {
+            sqlx::query(
+                "update knowledge.channel_recap_attempts set outcome = 'interrupted'
+                 where recap_run_id = $1 and ordinal = $2 and outcome = 'requested'",
+            )
+            .bind(recap_run_id)
+            .bind(ordinal)
+            .execute(self.database.pool())
+            .await
+            .map_err(PersistenceError::Query)?;
+        }
+        if attempt_count >= 2 || newest_outcome == Some("permanent_failure") {
+            self.settle_failure(
+                recap_run_id,
+                ChannelRecapRunState::ModelRequested,
+                ChannelDigestRecapFailureCode::ProviderUnavailable,
+            )
+            .await?;
+            return Err(ChannelRecapPipelineError::Provider(
+                if newest_outcome == Some("permanent_failure") {
+                    crate::ProviderError::Permanent
+                } else {
+                    crate::ProviderError::Transient
+                },
+            ));
+        }
+        let repair = newest_outcome == Some("invalid");
+        if repair {
+            request.task_instruction.push_str(REPAIR_INSTRUCTION);
+        }
+        Ok(Recovery::Call {
+            ordinal: attempt_count + 1,
+            reason: match (attempt_count, repair) {
+                (0, _) => "initial",
+                (_, true) => "repair",
+                (_, false) => "retry",
+            },
+        })
+    }
+
+    /// The raw response is durable: validate the stored bytes and never call the provider for it.
+    async fn recover_stored_response(
+        &self,
+        recap_run_id: uuid::Uuid,
+        ordinal: i16,
+        state: &str,
+        request: &mut ChannelRecapProviderRequest,
+        check: &ValidationContext<'_>,
+    ) -> Result<Recovery, ChannelRecapPipelineError> {
+        let stored: (Option<serde_json::Value>, String, Option<String>) = sqlx::query_as(
+            "select raw_response, outcome, validation_code
+             from knowledge.channel_recap_attempts
+             where recap_run_id = $1 and ordinal = $2
+               and outcome in ('response_received', 'invalid', 'accepted')",
+        )
+        .bind(recap_run_id)
+        .bind(ordinal)
+        .fetch_optional(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?
+        .ok_or(ChannelRecapPipelineError::State)?;
+        let (raw, outcome, recorded_code) = stored;
+        let verdict = if outcome == "invalid" {
+            Err(match recorded_code.as_deref() {
+                Some("json_syntax") => "json_syntax",
+                Some("grounding") => "grounding",
+                _ => "schema",
+            })
+        } else {
+            let reference: BlobRef =
+                serde_json::from_value(raw.ok_or(ChannelRecapPipelineError::State)?)?;
+            let bytes = self.blobs.read(&reference).await?;
+            check.validate(&bytes)
+        };
+        match (verdict, state) {
+            (Ok(result), "response_received") => {
+                self.accept_validated(recap_run_id, ordinal, &result)
+                    .await?;
+                Ok(Recovery::Completed(result))
+            }
+            (Ok(result), _) => {
+                self.persist_result(recap_run_id, ordinal, &result).await?;
+                self.settle_completion(recap_run_id).await?;
+                Ok(Recovery::Completed(result))
+            }
+            (Err(validation_code), "response_received") => {
+                if self
+                    .handle_invalid_attempt(recap_run_id, ordinal, validation_code, request)
+                    .await?
+                {
+                    Ok(Recovery::Call {
+                        ordinal: ordinal + 1,
+                        reason: "repair",
+                    })
+                } else {
+                    Err(ChannelRecapPipelineError::Invalid)
+                }
+            }
+            (Err(_), _) => {
+                self.settle_failure(
+                    recap_run_id,
+                    ChannelRecapRunState::SchemaValidated,
+                    ChannelDigestRecapFailureCode::InvalidOutput,
+                )
+                .await?;
+                Err(ChannelRecapPipelineError::Invalid)
+            }
+        }
     }
 
     async fn resume_result(
@@ -352,9 +597,7 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
                 .await?;
             self.transition(recap_run_id, "repaired", "model_requested")
                 .await?;
-            request
-                .task_instruction
-                .push_str("\nRepair validation code: channel_recap_schema.");
+            request.task_instruction.push_str(REPAIR_INSTRUCTION);
             return Ok(true);
         }
         self.settle_failure(
@@ -551,23 +794,14 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
     }
 }
 
-fn validate_response(
-    bytes: &[u8],
-    context: &PreparedChannelRecapContext,
-    manifest_digest_hex: &str,
-    output_language: ChannelRecapOutputLanguage,
-) -> Result<ChannelDigestRecap, &'static str> {
-    let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| "json_syntax")?;
-    validate_channel_digest_recap(&value, context, manifest_digest_hex, output_language)
-        .map_err(validation_code)
-}
-
 fn generation_request(
     request: ChannelRecapProviderRequest,
 ) -> Result<GenerationRequest, ChannelRecapPipelineError> {
     let source_content = serde_json::to_string(&serde_json::json!({
         "source_labels": request.source_labels,
         "untrusted_sources": request.untrusted_sources,
+        "output_language": request.output_language,
+        "included_source_count": request.untrusted_sources.len(),
         "allow_external_fetch": request.allow_external_fetch,
         "max_output_tokens": request.max_output_tokens,
     }))?;

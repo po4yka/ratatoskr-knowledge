@@ -1,6 +1,6 @@
 //! Versioned prompt boundary for adversarial public-channel source evidence.
 
-use crate::PreparedChannelRecapContext;
+use crate::{ChannelRecapOutputLanguage, PreparedChannelRecapContext};
 
 const SYSTEM_POLICY: &str = include_str!("../../../prompts/channel-digest-recap.v1/system.txt");
 const TASK_INSTRUCTION: &str = include_str!("../../../prompts/channel-digest-recap.v1/task.txt");
@@ -41,7 +41,9 @@ pub struct ChannelRecapProviderRequest {
     pub system_policy: String,
     /// Fixed recap task source content cannot replace.
     pub task_instruction: String,
-    /// Closed generated structured-result schema.
+    /// Language the recap text must be written in.
+    pub output_language: ChannelRecapOutputLanguage,
+    /// Closed generated schema of what the provider is asked to return.
     pub output_schema: serde_json::Value,
     /// Trusted labels and citation identities only.
     pub source_labels: Vec<ChannelRecapSourceLabel>,
@@ -72,6 +74,7 @@ pub enum ChannelRecapGenerationError {
 /// Returns a safe encoding or output-budget failure.
 pub fn build_channel_recap_provider_request(
     context: &PreparedChannelRecapContext,
+    output_language: ChannelRecapOutputLanguage,
     max_output_tokens: u32,
 ) -> Result<ChannelRecapProviderRequest, ChannelRecapGenerationError> {
     if !(1..=4_096).contains(&max_output_tokens) {
@@ -100,7 +103,8 @@ pub fn build_channel_recap_provider_request(
         prompt_version: CHANNEL_RECAP_PROMPT_VERSION,
         system_policy: SYSTEM_POLICY.to_owned(),
         task_instruction: TASK_INSTRUCTION.to_owned(),
-        output_schema: crate::channel_digest_recap_result::channel_digest_recap_schema()
+        output_language,
+        output_schema: crate::channel_digest_recap_result::channel_recap_model_output_schema()
             .map_err(|_| ChannelRecapGenerationError::Encode)?,
         source_labels,
         untrusted_sources,

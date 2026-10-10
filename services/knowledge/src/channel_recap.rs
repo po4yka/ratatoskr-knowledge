@@ -11,18 +11,18 @@ use ratatoskr_channel_digest_contracts::{
 use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_identifiers::WireTimestamp;
 use ratatoskr_knowledge::{
-    BlobStore, BudgetLedger, BudgetLimits, ChannelRecapConfig, ChannelRecapContextError,
-    ChannelRecapContextPolicy, ChannelRecapInbox, ChannelRecapOutputLanguage, ChannelRecapPipeline,
-    ChannelRecapProviderMode, ChannelRecapRunState, ChannelRecapRunStore, Config,
-    ControlledProvider, Database, DigestManifestAttemptOutcome, DigestSourceClient,
-    DigestSourceClientSettings, LlmProvider, OpenRouterProvider, OpenRouterSettings,
-    PreparedChannelRecapContext, ProviderResponse, ProviderUsage, RateLimiter, RetryPolicy,
-    ScriptedProvider, SpendControls, TokenPrices, VerifiedDigestManifest, attempt_digest_manifest,
-    build_channel_recap_provider_request, prepare_channel_recap_context,
+    BlobStore, ChannelRecapConfig, ChannelRecapContextError, ChannelRecapContextPolicy,
+    ChannelRecapInbox, ChannelRecapOutputLanguage, ChannelRecapPipeline, ChannelRecapProviderMode,
+    ChannelRecapRunState, ChannelRecapRunStore, Config, Database, DigestManifestAttemptOutcome,
+    DigestSourceClient, DigestSourceClientSettings, LlmProvider, PreparedChannelRecapContext,
+    ProviderResponse, ProviderUsage, ScriptedProvider, VerifiedDigestManifest,
+    attempt_digest_manifest, build_channel_recap_provider_request, prepare_channel_recap_context,
 };
 use tokio::sync::watch;
 
 use crate::Lifecycle;
+use crate::bus::{self, DurableSpec};
+use crate::provider_runtime::{ControlledOpenRouter, openrouter_provider};
 
 const PRODUCER: &str = "ratatoskr-channel-digests";
 
@@ -180,36 +180,25 @@ async fn consume_once(
 async fn connect_bus(
     config: &ChannelRecapConfig,
 ) -> Result<async_nats::Client, ChannelRecapWorkerError> {
-    if let Some(path) = &config.bus_credentials_file {
-        let seed = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|_| ChannelRecapWorkerError::Bus)?;
-        async_nats::ConnectOptions::with_nkey(seed.trim().to_owned())
-            .connect(&config.bus_endpoint)
-            .await
-            .map_err(|_| ChannelRecapWorkerError::Bus)
-    } else {
-        async_nats::connect(&config.bus_endpoint)
-            .await
-            .map_err(|_| ChannelRecapWorkerError::Bus)
-    }
+    bus::connect(&config.bus_endpoint, config.bus_credentials_file.as_deref())
+        .await
+        .map_err(|_| ChannelRecapWorkerError::Bus)
 }
 
 fn verify_consumer(
     consumer: &jetstream::consumer::PullConsumer,
     config: &ChannelRecapConfig,
 ) -> Result<(), ChannelRecapWorkerError> {
-    let actual = &consumer.cached_info().config;
-    if actual.durable_name.as_deref() != Some(config.bus_durable.as_str())
-        || actual.filter_subject != config.bus_subject
-        || actual.ack_policy != jetstream::consumer::AckPolicy::Explicit
-        || actual.ack_wait != Duration::from_secs(config.ack_wait_seconds)
-        || actual.deliver_subject.is_some()
-        || actual.deliver_policy != jetstream::consumer::DeliverPolicy::All
-    {
-        return Err(ChannelRecapWorkerError::Durable);
-    }
-    Ok(())
+    bus::verify_consumer(
+        consumer,
+        &DurableSpec {
+            name: &config.bus_durable,
+            filter: &config.bus_subject,
+            ack_wait: Duration::from_secs(config.ack_wait_seconds),
+            max_deliver: None,
+        },
+    )
+    .map_err(|_| ChannelRecapWorkerError::Durable)
 }
 
 fn source_client(
@@ -303,13 +292,15 @@ async fn process_message(
         }
         Err(_) => return Disposition::Nak,
     };
-    let Ok(provider_request) = build_channel_recap_provider_request(&context, max_output_tokens)
+    let language = output_language(request.output_language);
+    let Ok(provider_request) =
+        build_channel_recap_provider_request(&context, language, max_output_tokens)
     else {
         return Disposition::Nak;
     };
     let outcome = match provider {
         RuntimeProvider::Scripted => {
-            let provider = scripted_provider(&request, &context, &verified.digest_hex);
+            let provider = scripted_provider(&context);
             execute_pipeline(
                 database,
                 blobs,
@@ -319,7 +310,7 @@ async fn process_message(
                 provider_request,
                 &context,
                 &verified.digest_hex,
-                output_language(request.output_language),
+                language,
             )
             .await
         }
@@ -333,7 +324,7 @@ async fn process_message(
                 provider_request,
                 &context,
                 &verified.digest_hex,
-                output_language(request.output_language),
+                language,
             )
             .await
         }
@@ -343,8 +334,6 @@ async fn process_message(
         Err(_) => Disposition::Nak,
     }
 }
-
-type ControlledOpenRouter = ControlledProvider<OpenRouterProvider>;
 
 #[derive(Debug)]
 enum RuntimeProvider {
@@ -359,46 +348,9 @@ fn runtime_provider(
     if config.channel_recap.provider_mode == ChannelRecapProviderMode::Scripted {
         return Ok(RuntimeProvider::Scripted);
     }
-    let configured = config
-        .provider
-        .openrouter
-        .as_ref()
-        .ok_or(ChannelRecapWorkerError::Work)?;
-    let inner = OpenRouterProvider::new(OpenRouterSettings {
-        base_url: configured.base_url.clone(),
-        model: configured.model.clone(),
-        credential: configured.api_key.clone(),
-        max_output_tokens: config.limits.provider_max_output_tokens,
-        response_byte_cap: config.limits.raw_response_bytes,
-        call_deadline: Duration::from_millis(config.limits.provider_timeout_ms),
-        connect_timeout: Duration::from_millis(config.limits.provider_timeout_ms)
-            .min(Duration::from_secs(5)),
-        retry: RetryPolicy::new(3, 200, 2_000),
-    })
-    .map_err(|_| ChannelRecapWorkerError::Work)?;
-    let spacing =
-        Duration::try_from_secs_f64(60.0 / f64::from(config.limits.provider_requests_per_minute))
-            .map_err(|_| ChannelRecapWorkerError::Work)?;
-    Ok(RuntimeProvider::OpenRouter(Box::new(
-        ControlledProvider::new(
-            inner,
-            std::sync::Arc::new(RateLimiter::new(spacing)),
-            BudgetLedger::new(database.pool().clone()),
-            SpendControls {
-                limits: BudgetLimits {
-                    daily_tokens: config.limits.provider_daily_token_budget,
-                    monthly_tokens: config.limits.provider_monthly_token_budget,
-                    daily_cost_micro_usd: config.limits.provider_daily_cost_micro_usd,
-                    monthly_cost_micro_usd: config.limits.provider_monthly_cost_micro_usd,
-                },
-                prices: TokenPrices {
-                    input_micro_usd_per_mtoken: configured.input_micro_usd_per_mtoken,
-                    output_micro_usd_per_mtoken: configured.output_micro_usd_per_mtoken,
-                },
-                max_output_tokens: config.limits.provider_max_output_tokens,
-            },
-        ),
-    )))
+    openrouter_provider(config, database)
+        .map(RuntimeProvider::OpenRouter)
+        .map_err(|_| ChannelRecapWorkerError::Work)
 }
 
 #[allow(clippy::too_many_arguments, reason = "typed pipeline boundary")]
@@ -491,27 +443,15 @@ fn output_language(language: OutputLanguage) -> ChannelRecapOutputLanguage {
     }
 }
 
-fn scripted_provider(
-    request: &KnowledgeChannelDigestRecapRequested,
-    context: &PreparedChannelRecapContext,
-    manifest_digest: &str,
-) -> ScriptedProvider {
+fn scripted_provider(context: &PreparedChannelRecapContext) -> ScriptedProvider {
     let citation = context
         .sources
         .first()
         .map(|source| source.revision_ref.clone())
         .unwrap_or_default();
-    let warnings = if context.omitted_count > 0 {
-        vec!["context_omitted_sources"]
-    } else {
-        Vec::new()
-    };
+    // What a model returns: the text and warnings only. Language, digest and coverage are
+    // composed by the pipeline from the run.
     let result = serde_json::json!({
-        "contract_version": "channel_digest_recap.v1",
-        "prompt_version": "channel_digest_recap_prompt.v1",
-        "context_version": "channel_digest_recap_context.v1",
-        "output_language": match request.output_language { OutputLanguage::Ru => "ru", OutputLanguage::En => "en" },
-        "manifest_digest": {"algorithm": "sha256", "hex": manifest_digest},
         "headline": "Synthetic channel recap",
         "overview": "The selected synthetic channel evidence contains a bounded update.",
         "topics": [{
@@ -520,13 +460,7 @@ fn scripted_provider(
             "citations": [citation]
         }],
         "notable_items": [],
-        "coverage": {
-            "selected_count": context.selected_count,
-            "included_count": context.included_count,
-            "omitted_count": context.omitted_count,
-            "channel_count": context.channel_count
-        },
-        "warnings": warnings
+        "warnings": []
     });
     let response = serde_json::to_vec(&result).map(|bytes| ProviderResponse {
         bytes,

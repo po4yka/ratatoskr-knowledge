@@ -665,39 +665,6 @@ async fn row_deletion_is_atomic_with_its_audit_record() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn orphan_sweep_reclaims_unreferenced_blobs_on_any_deletion()
--> Result<(), Box<dyn std::error::Error>> {
-    let database = TestDatabase::create().await?;
-    let root = TemporaryBlobRoot::create().await?;
-    let blobs = BlobStore::new(root.path(), 4_096);
-
-    let orphan_hex = digest_hex_of("orphan-leftover-bytes");
-    let orphan_path = blob_path(root.path(), &orphan_hex);
-    tokio::fs::create_dir_all(orphan_path.parent().expect("orphan parent")).await?;
-    tokio::fs::write(&orphan_path, b"orphan bytes").await?;
-    assert!(tokio::fs::try_exists(&orphan_path).await?);
-
-    let receipt =
-        ratatoskr_knowledge::delete_tenant(&database.database, &blobs, "user:no-such-tenant")
-            .await?;
-
-    assert!(
-        !tokio::fs::try_exists(&orphan_path).await?,
-        "the sweep phase must reclaim the unreferenced file"
-    );
-    assert_eq!(
-        receipt.orphan_digests_removed,
-        vec![orphan_hex],
-        "orphans must be reported separately from scope removals"
-    );
-    assert_eq!(receipt.counts, DeletionCounts::default());
-    assert!(receipt.blob_digests_removed.is_empty());
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn deleting_a_tenant_leaves_the_survivor_and_ledger_intact()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;

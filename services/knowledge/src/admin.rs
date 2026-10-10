@@ -22,6 +22,8 @@ const STORAGE_READY: u8 = 1;
 const CHANNEL_RECAP_REQUIRED: u8 = 2;
 const CHANNEL_RECAP_READY: u8 = 4;
 const DRAINING: u8 = 8;
+const INGEST_REQUIRED: u8 = 16;
+const INGEST_READY: u8 = 32;
 const CHANNEL_DIGEST_RESULT_RESPONSE_BYTES: usize = 65_536;
 
 /// Fixed loopback route for one completed Knowledge-owned channel recap.
@@ -50,6 +52,28 @@ impl Lifecycle {
         }
     }
 
+    /// Creates a starting lifecycle that will require the ingest consumers.
+    #[must_use]
+    pub fn starting_with_ingest() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(INGEST_REQUIRED)),
+        }
+    }
+
+    /// Makes readiness depend on the ingest consumers as well.
+    pub fn require_ingest(&self) {
+        self.state.fetch_or(INGEST_REQUIRED, Ordering::AcqRel);
+    }
+
+    /// Records whether every ingest consumer is verified and the completion publisher is healthy.
+    pub fn set_ingest_ready(&self, ready: bool) {
+        if ready {
+            self.state.fetch_or(INGEST_READY, Ordering::AcqRel);
+        } else {
+            self.state.fetch_and(!INGEST_READY, Ordering::AcqRel);
+        }
+    }
+
     /// Records whether both recap transport and source dependencies are usable.
     pub fn set_channel_recap_ready(&self, ready: bool) {
         if ready {
@@ -74,6 +98,7 @@ impl Lifecycle {
         state & STORAGE_READY != 0
             && state & DRAINING == 0
             && (state & CHANNEL_RECAP_REQUIRED == 0 || state & CHANNEL_RECAP_READY != 0)
+            && (state & INGEST_REQUIRED == 0 || state & INGEST_READY != 0)
     }
 }
 

@@ -1,7 +1,7 @@
 //! Closed grounded structured result for channel-digest recap analysis.
 
 use crate::PreparedChannelRecapContext;
-use ratatoskr_identifiers::ContentDigest;
+use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, DigestHex};
 
 /// Fixed stored recap result contract.
 #[derive(
@@ -172,6 +172,34 @@ pub struct ChannelDigestRecap {
     pub warnings: Vec<ChannelRecapWarning>,
 }
 
+/// What the provider authors: the text and warnings only.
+///
+/// The contract versions, language, manifest digest and coverage are facts the system already
+/// holds, so the model is neither asked for them nor allowed to state them. Knowledge composes the
+/// stored [`ChannelDigestRecap`] from this value and the prepared context.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct ChannelRecapModelOutput {
+    /// Bounded recap headline.
+    #[schemars(length(min = 1, max = 160))]
+    pub headline: String,
+    /// Bounded recap overview.
+    #[schemars(length(min = 1, max = 1_600))]
+    pub overview: String,
+    /// One through five grounded topic groups.
+    #[schemars(length(min = 1, max = 5))]
+    pub topics: Vec<ChannelRecapTopic>,
+    /// Zero through five grounded notable items.
+    #[schemars(length(max = 5))]
+    pub notable_items: Vec<ChannelRecapNotableItem>,
+    /// Up to ten distinct closed safe warnings.
+    #[schemars(length(max = 10))]
+    pub warnings: Vec<ChannelRecapWarning>,
+}
+
 /// Safe structured-result validation failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -204,6 +232,90 @@ pub enum ChannelRecapResultError {
 pub fn channel_digest_recap_schema() -> Result<serde_json::Value, ChannelRecapResultError> {
     serde_json::to_value(schemars::schema_for!(ChannelDigestRecap))
         .map_err(|_| ChannelRecapResultError::SchemaDefinition)
+}
+
+/// Generates the closed JSON Schema of what the provider is asked to return.
+///
+/// # Errors
+///
+/// Returns a safe schema-definition failure when serialization is impossible.
+pub fn channel_recap_model_output_schema() -> Result<serde_json::Value, ChannelRecapResultError> {
+    serde_json::to_value(schemars::schema_for!(ChannelRecapModelOutput))
+        .map_err(|_| ChannelRecapResultError::SchemaDefinition)
+}
+
+/// Composes the stored recap from the model-authored text and the facts the system holds.
+///
+/// The contract versions are the fixed enums, the language is the requested one, the manifest
+/// digest is the verified one and the coverage is copied from the prepared context. When the
+/// context omitted verified sources the `context_omitted_sources` warning is added if the model
+/// did not already say so.
+///
+/// # Errors
+///
+/// Returns [`ChannelRecapResultError::Linkage`] when a count or the digest cannot be represented.
+pub fn compose_channel_digest_recap(
+    model: ChannelRecapModelOutput,
+    context: &PreparedChannelRecapContext,
+    manifest_digest_hex: &str,
+    output_language: ChannelRecapOutputLanguage,
+) -> Result<serde_json::Value, ChannelRecapResultError> {
+    let count = |value: usize| u16::try_from(value).map_err(|_| ChannelRecapResultError::Linkage);
+    let mut warnings = model.warnings;
+    if context.omitted_count > 0 && !warnings.contains(&ChannelRecapWarning::ContextOmittedSources)
+    {
+        warnings.push(ChannelRecapWarning::ContextOmittedSources);
+    }
+    let recap = ChannelDigestRecap {
+        contract_version: ChannelRecapContractVersion::ChannelDigestRecapV1,
+        prompt_version: ChannelRecapPromptVersion::ChannelDigestRecapPromptV1,
+        context_version: ChannelRecapContextVersion::ChannelDigestRecapContextV1,
+        output_language,
+        manifest_digest: ContentDigest {
+            algorithm: DigestAlgorithm::Sha256,
+            hex: DigestHex::parse(manifest_digest_hex)
+                .map_err(|_| ChannelRecapResultError::Linkage)?,
+        },
+        headline: model.headline,
+        overview: model.overview,
+        topics: model.topics,
+        notable_items: model.notable_items,
+        coverage: ChannelRecapCoverage {
+            selected_count: count(context.selected_count)?,
+            included_count: count(context.included_count)?,
+            omitted_count: count(context.omitted_count)?,
+            channel_count: count(context.channel_count)?,
+        },
+        warnings,
+    };
+    serde_json::to_value(recap).map_err(|_| ChannelRecapResultError::Decode)
+}
+
+/// Validates provider JSON against the model-output schema, composes the stored recap and runs the
+/// full recap validation over the composed value.
+///
+/// # Errors
+///
+/// Returns the safe structural, decoding, citation, linkage or link failure.
+pub fn validate_channel_recap_model_output(
+    value: &serde_json::Value,
+    context: &PreparedChannelRecapContext,
+    manifest_digest_hex: &str,
+    output_language: ChannelRecapOutputLanguage,
+) -> Result<ChannelDigestRecap, ChannelRecapResultError> {
+    let schema = channel_recap_model_output_schema()?;
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .map_err(|_| ChannelRecapResultError::SchemaDefinition)?;
+    validator
+        .validate(value)
+        .map_err(|_| ChannelRecapResultError::Structural)?;
+    let model: ChannelRecapModelOutput =
+        serde_json::from_value(value.clone()).map_err(|_| ChannelRecapResultError::Decode)?;
+    let composed =
+        compose_channel_digest_recap(model, context, manifest_digest_hex, output_language)?;
+    validate_channel_digest_recap(&composed, context, manifest_digest_hex, output_language)
 }
 
 /// Decodes a provider result before semantic grounding is implemented.

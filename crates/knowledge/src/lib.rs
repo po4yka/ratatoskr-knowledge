@@ -10,24 +10,33 @@ mod budget;
 mod channel_digest_recap;
 mod channel_digest_recap_context;
 mod channel_digest_recap_evaluation;
+mod channel_digest_recap_lock;
 mod channel_digest_recap_pipeline;
 mod channel_digest_recap_prompt;
 mod channel_digest_recap_result;
 mod channel_digest_recap_store;
 mod chunking;
 mod config;
+mod config_ingest;
 mod context;
 mod controlled;
 mod database;
 mod deletion;
+mod deletion_blobs;
+mod deletion_state;
+mod deterministic_provider;
+mod document_intake;
 mod embeddings;
 mod evaluation;
+mod event_outbox;
 mod family_analysis;
 mod family_pipeline;
+mod github_readme;
 mod indexer;
 mod openrouter;
 mod pipeline;
 mod provider;
+mod provider_secret;
 mod rate_limit;
 mod reindex;
 mod repository_analysis;
@@ -49,10 +58,9 @@ pub use article::{
 pub use blob_store::{BlobError, BlobStore};
 pub use budget::{BudgetError, BudgetLedger, BudgetLimits, BudgetWindow, TokenPrices};
 pub use channel_digest_recap::{
-    DigestManifest, DigestManifestAttemptError, DigestManifestAttemptOutcome, DigestManifestError,
-    DigestManifestRequest, DigestManifestSchema, DigestManifestSource, DigestSourceClient,
-    DigestSourceClientError, DigestSourceClientSettings, DigestSourceSecret,
-    VerifiedDigestManifest, attempt_digest_manifest, verify_digest_manifest,
+    DigestManifestAttemptError, DigestManifestAttemptOutcome, DigestManifestError,
+    DigestManifestRequest, DigestSourceClient, DigestSourceClientError, DigestSourceClientSettings,
+    DigestSourceSecret, VerifiedDigestManifest, attempt_digest_manifest, verify_digest_manifest,
 };
 pub use channel_digest_recap_context::{
     CHANNEL_RECAP_CONTEXT_VERSION, ChannelRecapContextError, ChannelRecapContextPolicy,
@@ -70,10 +78,11 @@ pub use channel_digest_recap_prompt::{
 };
 pub use channel_digest_recap_result::{
     ChannelDigestRecap, ChannelRecapCitation, ChannelRecapContextVersion,
-    ChannelRecapContractVersion, ChannelRecapCoverage, ChannelRecapNotableItem,
-    ChannelRecapOutputLanguage, ChannelRecapPromptVersion, ChannelRecapResultError,
-    ChannelRecapTopic, ChannelRecapWarning, channel_digest_recap_schema,
-    validate_channel_digest_recap,
+    ChannelRecapContractVersion, ChannelRecapCoverage, ChannelRecapModelOutput,
+    ChannelRecapNotableItem, ChannelRecapOutputLanguage, ChannelRecapPromptVersion,
+    ChannelRecapResultError, ChannelRecapTopic, ChannelRecapWarning, channel_digest_recap_schema,
+    channel_recap_model_output_schema, compose_channel_digest_recap, validate_channel_digest_recap,
+    validate_channel_recap_model_output,
 };
 pub use channel_digest_recap_store::{
     ChannelRecapAdmissionError, ChannelRecapInbox, ChannelRecapInboxAdmission,
@@ -83,8 +92,9 @@ pub use channel_digest_recap_store::{
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
 pub use config::{
     AdminConfig, ChannelRecapConfig, ChannelRecapProviderMode, Config, ConfigError, Limits,
-    ProviderSecret, StorageConfig,
+    StorageConfig,
 };
+pub use config_ingest::{IngestConfig, IngestProviderMode};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
@@ -92,8 +102,11 @@ pub use controlled::{ControlledProvider, SpendControls};
 pub use database::{Database, PersistenceError};
 pub use deletion::{
     DeletionCounts, DeletionError, DeletionReceipt, DeletionScope, delete_source, delete_tenant,
-    execute_deletion,
+    execute_deletion, verify_scope_empty,
 };
+pub use deletion_blobs::collect_pending_blobs;
+pub use deterministic_provider::ExtractiveArticleProvider;
+pub use document_intake::{DocumentIntake, DocumentIntakeError, DocumentIntakeOutcome};
 pub use embeddings::{
     ControlledEmbeddings, EmbeddingIdentity, EmbeddingProvider, EmbeddingResponse,
     EmbeddingsSettings, EmbeddingsWireError, OpenAiCompatibleEmbeddings, ScriptedEmbeddingProvider,
@@ -103,6 +116,9 @@ pub use evaluation::{
     CaseScore, CheckOutcome, EvalCase, EvalExpectations, EvalSource, EvaluationError,
     EvaluationReport, ResponseSet, SetScore, load_case_bytes, load_cases, render_report,
     run_committed_evaluation, run_offline, score_case, score_response_sets,
+};
+pub use event_outbox::{
+    EventCause, EventOutbox, EventOutboxError, OutboxFact, OutboxRow, OutboxSubject,
 };
 pub use family_analysis::{
     ArchiveAnalysis, ArchiveDecision, ArchiveProjectAnalysis, FamilyValidationError,
@@ -117,6 +133,7 @@ pub use family_pipeline::{
     ArchiveAnalysisExecution, FamilyPipeline, FamilyPipelineError, RepositoryAnalysisExecution,
     RepositoryReadmeError, RepositoryReadmeResolver,
 };
+pub use github_readme::{GithubReadmeClient, GithubReadmeClientError, GithubReadmeClientSettings};
 pub use indexer::{
     EMBEDDING_STORAGE_DIMENSIONS, EmbeddingWrite, Indexer, IndexerLimits, IndexingIdentity,
     IndexingOutcome, IndexingTarget, PendingSource, failure_attempt_count, pending_indexing_batch,
@@ -131,6 +148,7 @@ pub use provider::{
     LlmProvider, ProviderError, ProviderFailure, ProviderFailureClass, ProviderIdentity,
     ProviderResponse, ProviderUsage, ScriptedProvider,
 };
+pub use provider_secret::ProviderSecret;
 pub use rate_limit::RateLimiter;
 pub use reindex::{
     ReindexScope, ReindexSourceOutcome, ReindexSummary, execute_reindex, plan_reindex,

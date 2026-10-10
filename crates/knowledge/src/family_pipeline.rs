@@ -23,12 +23,13 @@ use crate::search::{
 };
 use crate::{
     AnalysisIdentity, AttemptInput, AttemptOutcome, AttemptReason, BlobError, BlobStore, Database,
-    FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError, ProviderError,
-    ProviderFailureClass, ProviderIdentity, RepositoryAnalysis, RepositoryAnalysisAdmission,
-    RepositoryAnalysisConsumer, RunState, SocialAnalysis, SourceInbox, SourceInboxError,
-    SourceReference, archive_generation_request, archive_project_generation_request,
-    repository_generation_request, social_generation_request, validate_archive_analysis,
-    validate_archive_project_analysis, validate_repository_analysis, validate_social_analysis,
+    EventCause, FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError,
+    ProviderError, ProviderFailureClass, ProviderIdentity, RepositoryAnalysis,
+    RepositoryAnalysisAdmission, RepositoryAnalysisConsumer, RunState, SocialAnalysis, SourceInbox,
+    SourceInboxError, SourceReference, archive_generation_request,
+    archive_project_generation_request, repository_generation_request, social_generation_request,
+    validate_archive_analysis, validate_archive_project_analysis, validate_repository_analysis,
+    validate_social_analysis,
 };
 
 /// Authorized byte resolver for a GitHub-owned README reference.
@@ -349,11 +350,12 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
     pub async fn execute_repository<R: RepositoryReadmeResolver>(
         &self,
         request: &RepositoryAnalysisRequested,
+        cause: &EventCause,
         resolver: &R,
     ) -> Result<RepositoryAnalysisExecution, FamilyPipelineError> {
         let consumer = RepositoryAnalysisConsumer::new(self.database);
         let _admission: RepositoryAnalysisAdmission = consumer
-            .accept(request)
+            .accept(request, cause)
             .await
             .map_err(|_| FamilyPipelineError::Source)?;
         let (readme, source) = match &request.source_revision.readme {

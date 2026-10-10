@@ -13,6 +13,9 @@ use uuid::Uuid;
 
 use crate::{Database, PersistenceError};
 
+pub mod archive;
+pub mod recap;
+
 /// One scripted HTTP reply served by [`FakeTransport`].
 #[derive(Debug, Clone)]
 pub struct FakeReply {
@@ -344,7 +347,7 @@ impl TestDatabase {
             .map_err(PersistenceError::Connect)?
             .database(&name);
         let pool = PgPoolOptions::new()
-            .max_connections(2)
+            .max_connections(4)
             .connect_with(options)
             .await
             .map_err(PersistenceError::Connect)?;

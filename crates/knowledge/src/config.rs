@@ -4,6 +4,8 @@ use std::{error, fmt};
 
 use serde::Serialize;
 
+use crate::ProviderSecret;
+use crate::config_ingest::{IngestConfig, apply_ingest_entry, validate_ingest};
 use crate::result_reader_secret::ResultReaderSecret;
 
 const ENV_PREFIX: &str = "RATATOSKR__";
@@ -14,39 +16,6 @@ const ENV_PREFIX: &str = "RATATOSKR__";
 /// vector(1536)`): a similarity index requires a fixed dimensionality, so the
 /// loader rejects any configured embeddings model dimension other than this.
 pub(crate) const EMBEDDING_STORAGE_DIMENSIONS: i32 = 1536;
-
-/// Credential value that redacts itself in diagnostics and serialization.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ProviderSecret(String);
-
-impl ProviderSecret {
-    /// Wraps one credential value.
-    #[must_use]
-    pub fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    /// Exposes the credential only to the adapter's authorization path.
-    #[must_use]
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ProviderSecret {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("[redacted]")
-    }
-}
-
-impl Serialize for ProviderSecret {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str("[redacted]")
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 /// Process configuration with finite built-in limits.
@@ -61,6 +30,8 @@ pub struct Config {
     pub provider: ProviderConfig,
     /// Optional channel-digest recap worker and exact transport topology.
     pub channel_recap: ChannelRecapConfig,
+    /// Optional ingest consumers and the repository README source.
+    pub ingest: IngestConfig,
 }
 
 /// Provider selection for the recap worker.
@@ -282,6 +253,7 @@ impl Config {
         config.provider.openrouter = draft.finish()?;
         config.provider.embeddings = embeddings_draft.finish()?;
         validate_channel_recap(&config)?;
+        validate_ingest(&config)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -294,7 +266,7 @@ impl Config {
 }
 
 impl ConfigError {
-    fn new(key: &str, rule: &'static str) -> Self {
+    pub(crate) fn new(key: &str, rule: &'static str) -> Self {
         Self {
             key: key.to_owned(),
             rule,
@@ -325,6 +297,9 @@ fn apply_entry(
     }
     if key.starts_with("RATATOSKR__CHANNEL_RECAP__") {
         return apply_channel_recap_entry(&mut config.channel_recap, key, value);
+    }
+    if key.starts_with("RATATOSKR__INGEST__") {
+        return apply_ingest_entry(&mut config.ingest, key, value);
     }
     match key {
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
@@ -532,7 +507,7 @@ fn validate_channel_recap(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn url_is_loopback(url: &reqwest::Url) -> bool {
+pub(crate) fn url_is_loopback(url: &reqwest::Url) -> bool {
     url.host_str()
         .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1"))
 }
@@ -764,7 +739,7 @@ fn validate_model_id(key: &str, value: &str) -> Result<(), ConfigError> {
     }
 }
 
-fn parse_positive<T>(key: &str, value: &str) -> Result<T, ConfigError>
+pub(crate) fn parse_positive<T>(key: &str, value: &str) -> Result<T, ConfigError>
 where
     T: std::str::FromStr + Default + PartialOrd,
 {
@@ -838,6 +813,7 @@ impl Default for Config {
                 fetch_batch: 32,
                 ack_wait_seconds: 30,
             },
+            ingest: IngestConfig::default(),
         }
     }
 }

@@ -2,17 +2,18 @@
 //!
 //! Deletion removes every derived trace of one tenant or one logical
 //! source - analyses, attempts, outputs, search documents, embedding
-//! chunks, failure records, and owned raw-response bytes - child-first in
-//! one transaction with its audit row, then collects blob files by
-//! reference. Externally owned provenance bytes are never removed.
+//! chunks, failure records, inbox and tombstone state, and owned
+//! raw-response bytes - child-first in one transaction with its audit row.
+//! The Knowledge-owned digests of the deleted rows are queued in that same
+//! transaction and collected afterwards by reference. Externally owned
+//! provenance bytes are never removed.
 
-use std::collections::HashSet;
-
-use ratatoskr_identifiers::BlobRef;
 use uuid::Uuid;
 
-use crate::blob_store::{BlobError, BlobStore};
+use crate::blob_store::BlobStore;
 use crate::database::Database;
+use crate::deletion_blobs::{drain_queue, queue_scope_blobs};
+use crate::deletion_state::{delete_inbox_state, inbox_state_survivors};
 
 /// Scope selector for one deletion operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,20 @@ pub struct DeletionCounts {
     pub embedding_chunks: u64,
     /// Deleted `knowledge.embedding_failures` rows.
     pub embedding_failures: u64,
+    /// Deleted `knowledge.source_analysis_inbox` rows.
+    pub source_analysis_inbox: u64,
+    /// Deleted `knowledge.source_analysis_heads` rows.
+    pub source_analysis_heads: u64,
+    /// Deleted `knowledge.ai_archive_object_inbox` rows.
+    pub ai_archive_object_inbox: u64,
+    /// Deleted `knowledge.repository_analysis_requests` rows.
+    pub repository_analysis_requests: u64,
+    /// Deleted `knowledge.ai_archive_tombstones` rows.
+    pub ai_archive_tombstones: u64,
+    /// Deleted `knowledge.social_tombstones` rows.
+    pub social_tombstones: u64,
+    /// Deleted `knowledge.event_outbox` rows.
+    pub event_outbox: u64,
 }
 
 /// Machine-readable confirmation returned by one deletion.
@@ -106,9 +121,9 @@ pub struct DeletionReceipt {
     pub counts: DeletionCounts,
     /// Owned digests removed because no remaining row references them.
     pub blob_digests_removed: Vec<String>,
-    /// Unreferenced digests reclaimed by the sweep phase; accounted
-    /// separately from the operation's own scope removals.
-    pub orphan_digests_removed: Vec<String>,
+    /// Digests queued by earlier deletions whose collection had not finished, reclaimed by
+    /// this operation's drain and accounted separately from its own scope removals.
+    pub recovered_digests_removed: Vec<String>,
     /// Externally owned provenance digests reported out of scope.
     pub external_source_blob_digests: Vec<String>,
 }
@@ -120,9 +135,6 @@ pub enum DeletionError {
     /// A deletion query failed.
     #[error("a deletion database query failed")]
     Query(#[source] sqlx::Error),
-    /// A stored blob reference could not be parsed.
-    #[error("a stored blob reference is invalid")]
-    InvalidBlobReference,
     /// The owned blob store refused an operation.
     #[error("the owned blob collection failed")]
     Blob(#[from] crate::blob_store::BlobError),
@@ -150,7 +162,7 @@ pub async fn execute_deletion(
 ) -> Result<DeletionCounts, DeletionError> {
     run_child_first_deletion(transaction, scope)
         .await
-        .map(|(counts, _)| counts)
+        .map(|committed| committed.counts)
 }
 
 /// Deletes every revision of every document owned by one tenant.
@@ -197,9 +209,9 @@ pub async fn delete_source(
 
 /// Executes one deletion for an explicit scope.
 ///
-/// The row deletions and the audit row commit together; owned response
-/// bytes are collected afterwards by reference so surviving rows keep
-/// their evidence.
+/// The row deletions, the queued blob digests and the audit row commit together; the queue is
+/// drained afterwards, so a crash in between leaves queue rows that the next drain finishes
+/// instead of a file nothing accounts for.
 ///
 /// # Errors
 ///
@@ -210,80 +222,41 @@ async fn delete_scope(
     blobs: &BlobStore,
     scope: DeletionScope,
 ) -> Result<DeletionReceipt, DeletionError> {
-    // The sweep phase runs before the scope is processed so a crash window
-    // between an earlier commit and its file collection self-heals here.
-    let orphan_digests_removed = sweep_orphaned_blobs(database.pool(), blobs).await?;
-    let scope_digests = collect_scope_blob_references(database.pool(), &scope).await?;
     let mut transaction = database
         .pool()
         .begin()
         .await
         .map_err(DeletionError::Query)?;
-    let (counts, deletion_id) = run_child_first_deletion(&mut transaction, &scope).await?;
+    let committed = run_child_first_deletion(&mut transaction, &scope).await?;
     transaction.commit().await.map_err(DeletionError::Query)?;
 
-    let referenced = collect_referenced_digests(database.pool()).await?;
     let mut blob_digests_removed = Vec::new();
-    for digest in &scope_digests.owned {
-        if referenced.contains(digest) {
-            continue;
-        }
-        if blobs.remove(digest).await? {
-            blob_digests_removed.push(digest.clone());
+    let mut recovered_digests_removed = Vec::new();
+    for (digest, queued_by) in drain_queue(database, blobs).await? {
+        if queued_by == committed.deletion_id {
+            blob_digests_removed.push(digest);
+        } else {
+            recovered_digests_removed.push(digest);
         }
     }
 
     // The audit row committed with the row deletions; its blob count is
     // finalized here because collection is only safe after commit.
-    finalize_audit_blob_count(database.pool(), deletion_id, blob_digests_removed.len()).await?;
+    finalize_audit_blob_count(
+        database.pool(),
+        committed.deletion_id,
+        blob_digests_removed.len(),
+    )
+    .await?;
 
-    verify_scope_empty(database.pool(), &scope).await?;
+    verify_scope_empty(database, &scope).await?;
     Ok(DeletionReceipt {
         scope,
-        counts,
+        counts: committed.counts,
         blob_digests_removed,
-        orphan_digests_removed,
-        external_source_blob_digests: scope_digests.external,
+        recovered_digests_removed,
+        external_source_blob_digests: committed.external_source_blob_digests,
     })
-}
-
-/// Removes every stored digest that no remaining row references.
-///
-/// The sweep lists the whole content-addressed root, so a process stop
-/// between an earlier commit and its file collection self-heals on the
-/// next deletion instead of leaking files permanently. Orphan files are
-/// dead weight - never evidence - because the rows referencing them are
-/// provably gone.
-async fn sweep_orphaned_blobs(
-    pool: &sqlx::PgPool,
-    blobs: &BlobStore,
-) -> Result<Vec<String>, DeletionError> {
-    let referenced = collect_referenced_digests(pool).await?;
-    let sha_root = blobs.root().join("sha256");
-    let mut orphans = Vec::new();
-    let Ok(prefix_entries) = tokio::fs::read_dir(&sha_root).await else {
-        // A missing blob root simply holds no orphans.
-        return Ok(orphans);
-    };
-    let mut prefixes = prefix_entries;
-    while let Some(prefix) = prefixes.next_entry().await.map_err(BlobError::Io)? {
-        if !prefix.file_type().await.map_err(BlobError::Io)?.is_dir() {
-            continue;
-        }
-        let mut files = tokio::fs::read_dir(prefix.path())
-            .await
-            .map_err(BlobError::Io)?;
-        while let Some(file) = files.next_entry().await.map_err(BlobError::Io)? {
-            let name = file.file_name().to_string_lossy().into_owned();
-            if !crate::blob_store::is_digest_hex(&name) || referenced.contains(&name) {
-                continue;
-            }
-            if blobs.remove(&name).await? {
-                orphans.push(name);
-            }
-        }
-    }
-    Ok(orphans)
 }
 
 /// Records the exact removed-digest count on the committed audit row.
@@ -303,57 +276,11 @@ async fn finalize_audit_blob_count(
     Ok(())
 }
 
-/// Externally owned and Knowledge-owned digest references of one scope.
-#[derive(Debug, Default)]
-struct ScopeBlobReferences {
-    /// Digests of raw responses stored in the Knowledge-owned root.
-    owned: Vec<String>,
-    /// Digests addressed by `source_refs.source_blob` and owned by the
-    /// source-owning service; never removed by this module.
-    external: Vec<String>,
-}
-
-/// Captures the blob digests the scope's rows reference today.
-async fn collect_scope_blob_references(
-    pool: &sqlx::PgPool,
-    scope: &DeletionScope,
-) -> Result<ScopeBlobReferences, DeletionError> {
-    let mut references = ScopeBlobReferences::default();
-    let response_rows: Vec<(Option<String>,)> = sqlx::query_as(
-        "select a.raw_response::text as reference
-         from knowledge.analysis_attempts a
-         join knowledge.analysis_runs r on r.run_id = a.run_id
-         join knowledge.source_refs s on s.source_ref_id = r.source_ref_id
-         where a.raw_response is not null and (s.source_ref_id = any($1))
-         union all
-         select o.raw_response::text
-         from knowledge.analysis_outputs o
-         join knowledge.analysis_runs r on r.run_id = o.run_id
-         join knowledge.source_refs s on s.source_ref_id = r.source_ref_id
-         where s.source_ref_id = any($1)",
-    )
-    .bind(scope_source_ids(pool, scope).await?)
-    .fetch_all(pool)
-    .await
-    .map_err(DeletionError::Query)?;
-    for (value,) in response_rows {
-        let Some(value) = value else {
-            continue;
-        };
-        references.owned.push(parse_reference_digest(&value)?);
-    }
-
-    let source_blobs: Vec<(String,)> = sqlx::query_as(
-        "select source_blob::text from knowledge.source_refs where source_ref_id = any($1)",
-    )
-    .bind(scope_source_ids(pool, scope).await?)
-    .fetch_all(pool)
-    .await
-    .map_err(DeletionError::Query)?;
-    for (value,) in source_blobs {
-        references.external.push(parse_reference_digest(&value)?);
-    }
-    Ok(references)
+/// Everything one committed deletion reports.
+struct CommittedDeletion {
+    counts: DeletionCounts,
+    deletion_id: Uuid,
+    external_source_blob_digests: Vec<String>,
 }
 
 /// Resolves the stored source revisions of one scope.
@@ -398,43 +325,19 @@ where
     Ok(ids.into_iter().map(|(id,)| id).collect())
 }
 
-/// Parses one stored `BlobRef` jsonb text into its digest hex.
-fn parse_reference_digest(text: &str) -> Result<String, DeletionError> {
-    let reference: BlobRef =
-        serde_json::from_str(text).map_err(|_| DeletionError::InvalidBlobReference)?;
-    Ok(reference.digest.hex.as_str().to_owned())
-}
-
-/// Extracts every digest still referenced by any attempt or output row.
-async fn collect_referenced_digests(pool: &sqlx::PgPool) -> Result<HashSet<String>, DeletionError> {
-    let rows: Vec<(Option<String>,)> = sqlx::query_as(
-        "select raw_response::text from knowledge.analysis_attempts
-         where raw_response is not null
-         union all
-         select raw_response::text from knowledge.analysis_outputs",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(DeletionError::Query)?;
-    let mut digests = HashSet::new();
-    for (value,) in rows {
-        let Some(value) = value else {
-            continue;
-        };
-        digests.insert(parse_reference_digest(&value)?);
-    }
-    Ok(digests)
-}
-
-/// Runs every child-first deletion statement plus the audit insert inside
-/// the caller's transaction and reports each statement's affected rows
-/// together with the audit row's identity.
+/// Runs every child-first deletion statement, the blob-queue insert and the audit insert inside
+/// the caller's transaction and reports each statement's affected rows together with the audit
+/// row's identity.
 async fn run_child_first_deletion(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     scope: &DeletionScope,
-) -> Result<(DeletionCounts, Uuid), DeletionError> {
+) -> Result<CommittedDeletion, DeletionError> {
+    let deletion_id = Uuid::now_v7();
     let source_ref_ids = scope_source_ids(&mut **transaction, scope).await?;
+    // The digests are read from the rows about to be deleted, so they are queued first.
+    let queued = queue_scope_blobs(&mut *transaction, &source_ref_ids, deletion_id).await?;
     let user_content = delete_user_content(&mut *transaction, scope, &source_ref_ids).await?;
+    let inbox_state = delete_inbox_state(&mut *transaction, scope).await?;
 
     // Child-first order respects the NO ACTION foreign keys:
     // embedding_failures -> embedding_chunks -> search_documents ->
@@ -468,6 +371,53 @@ async fn run_child_first_deletion(
         "search_projection_inputs",
     )
     .await?;
+    let analysis = delete_analysis_rows(&mut *transaction, &source_ref_ids).await?;
+
+    let counts = DeletionCounts {
+        tags: user_content.tags,
+        taggings: user_content.taggings,
+        collections: user_content.collections,
+        collection_items: user_content.collection_items,
+        analysis_user_states: user_content.analysis_user_states,
+        highlights: user_content.highlights,
+        analysis_feedback: user_content.analysis_feedback,
+        source_refs: analysis.source_refs,
+        analysis_runs: analysis.analysis_runs,
+        analysis_attempts: analysis.analysis_attempts,
+        analysis_outputs: analysis.analysis_outputs,
+        search_documents,
+        search_projection_inputs,
+        embedding_chunks,
+        embedding_failures,
+        source_analysis_inbox: inbox_state.source_analysis_inbox,
+        source_analysis_heads: inbox_state.source_analysis_heads,
+        ai_archive_object_inbox: inbox_state.ai_archive_object_inbox,
+        repository_analysis_requests: inbox_state.repository_analysis_requests,
+        ai_archive_tombstones: inbox_state.ai_archive_tombstones,
+        social_tombstones: inbox_state.social_tombstones,
+        event_outbox: inbox_state.event_outbox,
+    };
+    insert_audit_row(&mut *transaction, deletion_id, scope, &counts).await?;
+    Ok(CommittedDeletion {
+        counts,
+        deletion_id,
+        external_source_blob_digests: queued.external,
+    })
+}
+
+/// Rows removed from the analysis tables themselves.
+struct AnalysisRowCounts {
+    analysis_attempts: u64,
+    analysis_outputs: u64,
+    analysis_runs: u64,
+    source_refs: u64,
+}
+
+/// Deletes attempts, outputs, runs and finally the source revisions, in foreign-key order.
+async fn delete_analysis_rows(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_ref_ids: &[Uuid],
+) -> Result<AnalysisRowCounts, DeletionError> {
     let analysis_attempts = sqlx::query(
         "delete from knowledge.analysis_attempts
          where run_id in (
@@ -475,7 +425,7 @@ async fn run_child_first_deletion(
              where source_ref_id = any($1)
          )",
     )
-    .bind(&source_ref_ids)
+    .bind(source_ref_ids)
     .execute(&mut **transaction)
     .await
     .map_err(DeletionError::Query)?
@@ -487,45 +437,31 @@ async fn run_child_first_deletion(
              where source_ref_id = any($1)
          )",
     )
-    .bind(&source_ref_ids)
+    .bind(source_ref_ids)
     .execute(&mut **transaction)
     .await
     .map_err(DeletionError::Query)?
     .rows_affected();
     let analysis_runs =
         sqlx::query("delete from knowledge.analysis_runs where source_ref_id = any($1)")
-            .bind(&source_ref_ids)
+            .bind(source_ref_ids)
             .execute(&mut **transaction)
             .await
             .map_err(DeletionError::Query)?
             .rows_affected();
     let source_refs =
         sqlx::query("delete from knowledge.source_refs where source_ref_id = any($1)")
-            .bind(&source_ref_ids)
+            .bind(source_ref_ids)
             .execute(&mut **transaction)
             .await
             .map_err(DeletionError::Query)?
             .rows_affected();
-
-    let counts = DeletionCounts {
-        tags: user_content.tags,
-        taggings: user_content.taggings,
-        collections: user_content.collections,
-        collection_items: user_content.collection_items,
-        analysis_user_states: user_content.analysis_user_states,
-        highlights: user_content.highlights,
-        analysis_feedback: user_content.analysis_feedback,
-        source_refs,
-        analysis_runs,
+    Ok(AnalysisRowCounts {
         analysis_attempts,
         analysis_outputs,
-        search_documents,
-        search_projection_inputs,
-        embedding_chunks,
-        embedding_failures,
-    };
-    let deletion_id = insert_audit_row(&mut *transaction, scope, &counts).await?;
-    Ok((counts, deletion_id))
+        analysis_runs,
+        source_refs,
+    })
 }
 
 #[derive(Default)]
@@ -682,14 +618,14 @@ async fn delete_by_scope(
         .map(|query_result| query_result.rows_affected())
 }
 
-/// Inserts the audit record inside the deletion's own transaction and
-/// returns its identity.
+/// Inserts the audit record inside the deletion's own transaction.
 async fn insert_audit_row(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deletion_id: Uuid,
     scope: &DeletionScope,
     counts: &DeletionCounts,
-) -> Result<Uuid, DeletionError> {
-    let deletion_id: (Uuid,) = sqlx::query_as(
+) -> Result<(), DeletionError> {
+    sqlx::query(
         "insert into knowledge.deletion_records (
              deletion_id, tenant_ref, scope, owner_context, ai_archive_id, source_document_id,
              source_refs_deleted, analysis_runs_deleted, analysis_attempts_deleted,
@@ -698,12 +634,14 @@ async fn insert_audit_row(
              embedding_chunks_deleted, embedding_failures_deleted,
              tags_deleted, taggings_deleted, collections_deleted, collection_items_deleted,
              analysis_user_states_deleted, highlights_deleted, analysis_feedback_deleted,
+             source_analysis_inbox_deleted, source_analysis_heads_deleted,
+             ai_archive_object_inbox_deleted, repository_analysis_requests_deleted,
+             ai_archive_tombstones_deleted, social_tombstones_deleted, event_outbox_deleted,
              blob_digests_removed
          ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20, $21, 0)
-         returning deletion_id",
+                   $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, 0)",
     )
-    .bind(Uuid::now_v7())
+    .bind(deletion_id)
     .bind(scope.tenant_ref())
     .bind(scope.as_str())
     .bind(scope_owner_context(scope))
@@ -724,10 +662,17 @@ async fn insert_audit_row(
     .bind(i32_count(counts.analysis_user_states)?)
     .bind(i32_count(counts.highlights)?)
     .bind(i32_count(counts.analysis_feedback)?)
-    .fetch_one(&mut **transaction)
+    .bind(i32_count(counts.source_analysis_inbox)?)
+    .bind(i32_count(counts.source_analysis_heads)?)
+    .bind(i32_count(counts.ai_archive_object_inbox)?)
+    .bind(i32_count(counts.repository_analysis_requests)?)
+    .bind(i32_count(counts.ai_archive_tombstones)?)
+    .bind(i32_count(counts.social_tombstones)?)
+    .bind(i32_count(counts.event_outbox)?)
+    .execute(&mut **transaction)
     .await
     .map_err(DeletionError::Query)?;
-    Ok(deletion_id.0)
+    Ok(())
 }
 
 fn scope_owner_context(scope: &DeletionScope) -> Option<&str> {
@@ -758,12 +703,18 @@ fn i32_count(count: u64) -> Result<i32, DeletionError> {
 }
 
 /// Fails loudly when any row of the scope survived the committed deletion.
-async fn verify_scope_empty(
-    pool: &sqlx::PgPool,
+///
+/// # Errors
+///
+/// Returns [`DeletionError::VerificationFailed`] when any row of the scope survives and a query
+/// error when the database cannot be read.
+pub async fn verify_scope_empty(
+    database: &Database,
     scope: &DeletionScope,
 ) -> Result<(), DeletionError> {
+    let pool = database.pool();
     let survivors = scope_source_ids(pool, scope).await?;
-    if !survivors.is_empty() {
+    if !survivors.is_empty() || inbox_state_survivors(pool, scope).await? > 0 {
         return Err(DeletionError::VerificationFailed);
     }
     let DeletionScope::Tenant { tenant_ref } = scope else {

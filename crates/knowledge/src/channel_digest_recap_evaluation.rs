@@ -3,7 +3,7 @@
 use crate::{
     ChannelRecapContextError, ChannelRecapContextPolicy, ChannelRecapOutputLanguage,
     DigestManifestError, PreparedChannelRecapContext, prepare_channel_recap_context,
-    validate_channel_digest_recap, verify_digest_manifest,
+    validate_channel_recap_model_output, verify_digest_manifest,
 };
 use ratatoskr_channel_digest_contracts::KnowledgeChannelDigestRecapRequested;
 use sha2::{Digest as _, Sha256};
@@ -144,9 +144,9 @@ fn evaluate_case(
     let repeated = prepare_channel_recap_context(&verified, policy)
         .map_err(|_| ChannelRecapEvaluationError::Fixture)?;
     let language = output_language(&fixture.output_language)?;
-    let result = fixture_result(fixture, &context, &verified.digest_hex);
+    let result = fixture_result(fixture, &context);
     let validated =
-        validate_channel_digest_recap(&result, &context, &verified.digest_hex, language);
+        validate_channel_recap_model_output(&result, &context, &verified.digest_hex, language);
     let encoded =
         serde_json::to_string(&result).map_err(|_| ChannelRecapEvaluationError::Fixture)?;
     let included = context
@@ -215,7 +215,10 @@ fn fixture_manifest(
                 "revision_ref": format!(
                     "channel-post-revision:018f0000-0000-7000-8000-{index:012}"
                 ),
-                "channel_ref": format!("telegram-public-channel:fixture-{:02}", source.channel),
+                "channel_ref": format!(
+                    "telegram-public-channel:018f0000-0000-7000-8000-{:012}",
+                    100 + u64::from(source.channel)
+                ),
                 "channel_label": format!("Fixture {:02}", source.channel),
                 "message_id": source.message_id.to_string(),
                 "published_at": source.published_at,
@@ -229,6 +232,7 @@ fn fixture_manifest(
             })
         })
         .collect::<Vec<_>>();
+    sources.sort_by_key(contract_order);
     if fixture.duplicate_first_source {
         let duplicate = sources
             .first()
@@ -275,10 +279,30 @@ fn fixture_manifest(
     Ok((request, bytes))
 }
 
+/// The order the manifest contract requires: publication instant, channel, message, revision.
+fn contract_order(source: &serde_json::Value) -> (String, String, u64, u64) {
+    let text = |name: &str| {
+        source
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    (
+        text("published_at"),
+        text("channel_ref"),
+        text("message_id").parse().unwrap_or_default(),
+        source
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+    )
+}
+
+/// What a model returns for the fixture: the authored text and warnings only.
 fn fixture_result(
     fixture: &EvalFixture,
     context: &PreparedChannelRecapContext,
-    manifest_digest: &str,
 ) -> serde_json::Value {
     let citation = context
         .sources
@@ -286,11 +310,6 @@ fn fixture_result(
         .map(|source| source.revision_ref.as_str())
         .unwrap_or_default();
     serde_json::json!({
-        "contract_version": "channel_digest_recap.v1",
-        "prompt_version": "channel_digest_recap_prompt.v1",
-        "context_version": "channel_digest_recap_context.v1",
-        "output_language": fixture.output_language,
-        "manifest_digest": {"algorithm": "sha256", "hex": manifest_digest},
         "headline": "Synthetic grounded recap",
         "overview": "The committed evidence contains a bounded synthetic update.",
         "topics": [{
@@ -299,12 +318,6 @@ fn fixture_result(
             "citations": [citation]
         }],
         "notable_items": [],
-        "coverage": {
-            "selected_count": context.selected_count,
-            "included_count": context.included_count,
-            "omitted_count": context.omitted_count,
-            "channel_count": context.channel_count
-        },
         "warnings": fixture.warnings
     })
 }

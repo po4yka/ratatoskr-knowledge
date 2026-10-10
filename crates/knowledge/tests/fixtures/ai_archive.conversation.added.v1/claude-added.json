@@ -25,15 +25,68 @@
       {
         "external_message_id": "msg-0001",
         "author_role": "user",
-        "parts": [{"part_kind": "text", "text": "Explain E0597 in one line."}],
+        "parts": [
+          {
+            "part_kind": "text",
+            "text": "Explain E0597 in one line."
+          }
+        ],
         "provider_created_at": "2026-08-02T10:00:00Z",
+        "parser_name": "chatgpt_export",
+        "parser_version": "2026.08.1"
+      },
+      {
+        "external_message_id": "msg-0002",
+        "author_role": "assistant",
+        "parent_message_id": "msg-0001",
+        "parts": [
+          {
+            "part_kind": "text",
+            "text": "Searching the web for current results."
+          },
+          {
+            "part_kind": "tool_call",
+            "tool_call": {
+              "tool_call_id": "call_abc123",
+              "tool_name": "web_search"
+            }
+          },
+          {
+            "part_kind": "tool_result",
+            "tool_result": {
+              "outcome": "succeeded",
+              "output_text": "3 results found.",
+              "tool_call_id": "call_abc123"
+            }
+          },
+          {
+            "part_kind": "markdown",
+            "markdown": "Here is **the answer**."
+          }
+        ],
+        "model": "gpt-5.2",
+        "provider_created_at": "2026-08-02T10:01:00Z",
+        "parser_name": "chatgpt_export",
+        "parser_version": "2026.08.1"
+      },
+      {
+        "external_message_id": "msg-0003",
+        "author_role": "assistant",
+        "parent_message_id": "msg-0001",
+        "parts": [
+          {
+            "part_kind": "markdown",
+            "markdown": "A second regeneration of the same answer."
+          }
+        ],
+        "provider_created_at": "2026-08-02T10:01:00Z",
         "parser_name": "chatgpt_export",
         "parser_version": "2026.08.1"
       }
     ],
     "content_digest": {
       "algorithm": "sha256",
-      "hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      "hex": "30556096d50fa3e26bdf6bee5bf811c9e21c8d9a8e7d14c377714d992f0757c6"
     },
     "parser_name": "chatgpt_export",
     "parser_version": "2026.08.1"

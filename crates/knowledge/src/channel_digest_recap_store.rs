@@ -355,8 +355,8 @@ impl<'a> ChannelRecapRunStore<'a> {
                 .map_err(PersistenceError::Query)?;
             return Err(ChannelRecapRunError::StateConflict);
         };
-        if verified.manifest.owner != owner_ref
-            || verified.manifest.digest_run_id != digest_run_id
+        if verified.manifest.owner.to_string() != owner_ref
+            || verified.manifest.digest_run_id.as_uuid() != digest_run_id
             || verified.digest_hex != manifest_digest_hex
         {
             transaction

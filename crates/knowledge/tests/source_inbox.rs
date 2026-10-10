@@ -2,16 +2,18 @@
 
 #![allow(clippy::expect_used, clippy::panic, reason = "fixture assertions")]
 
-use ratatoskr_ai_archive_contracts::{AiArchiveProvenance, AiArchiveTombstone};
+use ratatoskr_ai_archive_contracts::{AiArchiveProvenance, AiArchiveTombstone, AiConversation};
 use ratatoskr_event_envelope::EventEnvelope;
 use ratatoskr_identifiers::{
     BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType, TenantRef,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
+use ratatoskr_knowledge::test_support::archive::conversation_from_json;
 use ratatoskr_knowledge::{
     ArchiveEventAdmission, ArchiveEventConsumer, FamilyValidationError, SourceInbox,
     SourceInboxAdmission, SourceInboxError, SourceReference, validate_archive_analysis,
 };
+use ratatoskr_social_contracts::{SocialSourceRemoved, SocialSourceSnapshot};
 
 const CONTRACT_CONVERSATION: &str =
     include_str!("fixtures/ai_archive.conversation.added.v1/claude-added.json");
@@ -205,13 +207,260 @@ async fn social_delivery_is_idempotent_and_a_delayed_fact_cannot_regress_the_hea
     Ok(())
 }
 
+/// The conversation of [`ARCHIVE_CONVERSATION`] with the content digest the contract computes for
+/// its messages, which is the only digest a producer may publish.
+fn valid_conversation() -> Result<AiConversation, Box<dyn std::error::Error>> {
+    conversation_from_json(ARCHIVE_CONVERSATION)
+}
+
+/// XR-021 CONTRACTS.md S07: a conversation whose messages changed after its digest was computed
+/// is corruption, not change, and must not become a source head.
+#[tokio::test]
+async fn tampered_conversation_digest_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let inbox = SourceInbox::new(&database.database);
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
+    let valid = valid_conversation()?;
+    let mut edited = serde_json::to_value(&valid)?;
+    edited["messages"][0]["parts"][0]["text"] = serde_json::json!("Explain a different error.");
+    let tampered: AiConversation = serde_json::from_value(edited)?;
+    assert_eq!(tampered.content_digest, valid.content_digest);
+
+    let tampered_event = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000821")?;
+    let admission = inbox
+        .accept_ai_conversation(
+            tampered_event,
+            "ai_archive.conversation.updated.v1",
+            &provenance,
+            &tampered,
+        )
+        .await;
+    assert!(
+        matches!(admission, Err(SourceInboxError::InvalidArchiveFact)),
+        "a stale content digest must be refused: {admission:?}"
+    );
+    let rows: i64 = sqlx::query_scalar("select count(*) from knowledge.source_analysis_inbox")
+        .fetch_one(database.database.pool())
+        .await?;
+    let heads: i64 = sqlx::query_scalar("select count(*) from knowledge.source_analysis_heads")
+        .fetch_one(database.database.pool())
+        .await?;
+    assert_eq!((rows, heads), (0, 0));
+
+    assert_eq!(
+        inbox
+            .accept_ai_conversation(
+                uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000822")?,
+                "ai_archive.conversation.added.v1",
+                &provenance,
+                &valid,
+            )
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+const SOCIAL_SOURCE: &str = "018f0000-0000-7000-8000-000000000201";
+const SOCIAL_OWNER: &str = "user:018f0000-0000-7000-8000-000000000005";
+
+fn removal(
+    owner: &str,
+    removed_at: &str,
+) -> Result<SocialSourceRemoved, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "social_source_id": SOCIAL_SOURCE,
+        "owner": owner,
+        "reason": "user_requested",
+        "removed_at": removed_at,
+    }))?)
+}
+
+fn captured_at(captured_at: &str) -> Result<SocialSourceSnapshot, Box<dyn std::error::Error>> {
+    let mut snapshot: SocialSourceSnapshot = serde_json::from_str(SOCIAL)?;
+    snapshot.captured_at = captured_at.parse()?;
+    Ok(snapshot)
+}
+
+async fn count(database: &TestDatabase, sql: &str) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(sql)
+        .fetch_one(database.database.pool())
+        .await
+}
+
+/// The derived rows of `removed` are gone and those of `kept` are untouched.
+async fn assert_derived_state_removed(
+    database: &TestDatabase,
+    removed: uuid::Uuid,
+    kept: uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    for table in ["source_refs", "search_documents", "embedding_chunks"] {
+        let sql = format!("select count(*) from knowledge.{table} where source_ref_id = $1");
+        let gone: i64 = sqlx::query_scalar(&sql)
+            .bind(removed)
+            .fetch_one(database.database.pool())
+            .await?;
+        let remaining: i64 = sqlx::query_scalar(&sql)
+            .bind(kept)
+            .fetch_one(database.database.pool())
+            .await?;
+        assert_eq!((gone, remaining), (0, 1), "derived state in {table}");
+    }
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S09: a removal deletes the derived state of its source in one transaction
+/// and orders itself against redelivered captures.
+#[tokio::test]
+async fn social_removal_deletes_derived_state_and_blocks_older_captures()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let inbox = SourceInbox::new(&database.database);
+    let owner: TenantRef = SOCIAL_OWNER.parse()?;
+    let captured_event = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000831")?;
+    let older = captured_at("2026-08-17T10:00:00Z")?;
+    assert_eq!(
+        inbox
+            .accept_social(captured_event, "social.source.captured.v1", &older)
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    assert!(inbox.is_current_head(captured_event).await?);
+    let derived = seed_archive_derived_state(&database, owner, "", SOCIAL_SOURCE).await?;
+    let sibling =
+        seed_archive_derived_state(&database, owner, "", "018f0000-0000-7000-8000-000000000299")
+            .await?;
+
+    let removal_event = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000832")?;
+    assert_eq!(
+        inbox
+            .accept_social_removed(
+                removal_event,
+                &removal(SOCIAL_OWNER, "2026-08-18T10:00:00Z")?
+            )
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    assert_eq!(
+        count(
+            &database,
+            "select count(*) from knowledge.source_analysis_heads"
+        )
+        .await?,
+        0,
+        "the source head is removed"
+    );
+    assert_eq!(
+        count(
+            &database,
+            "select count(*) from knowledge.source_analysis_inbox where family = 'social'"
+        )
+        .await?,
+        0,
+        "the stored snapshots are removed"
+    );
+    assert_derived_state_removed(&database, derived, sibling).await?;
+    assert_eq!(
+        count(
+            &database,
+            "select count(*) from knowledge.social_tombstones"
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        inbox
+            .accept_social_removed(
+                removal_event,
+                &removal(SOCIAL_OWNER, "2026-08-18T10:00:00Z")?
+            )
+            .await?,
+        SourceInboxAdmission::Duplicate
+    );
+
+    // The older capture is redelivered after the removal: it is kept as a receipt and not a head.
+    assert_eq!(
+        inbox
+            .accept_social(captured_event, "social.source.captured.v1", &older)
+            .await?,
+        SourceInboxAdmission::Tombstoned
+    );
+    assert!(!inbox.is_current_head(captured_event).await?);
+    assert_eq!(
+        count(
+            &database,
+            "select count(*) from knowledge.source_analysis_heads"
+        )
+        .await?,
+        0
+    );
+
+    // A capture made after the removal is a new capture of the source and is admitted.
+    let later_event = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000833")?;
+    assert_eq!(
+        inbox
+            .accept_social(
+                later_event,
+                "social.source.captured.v1",
+                &captured_at("2026-08-19T10:00:00Z")?,
+            )
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    assert!(inbox.is_current_head(later_event).await?);
+    assert!(!inbox.is_current_head(captured_event).await?);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A removal that arrives before any capture still orders against later deliveries, and it only
+/// concerns the tenant it names.
+#[tokio::test]
+async fn social_tombstone_orders_deliveries_per_tenant() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let inbox = SourceInbox::new(&database.database);
+    assert_eq!(
+        inbox
+            .accept_social_removed(
+                uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000841")?,
+                &removal(SOCIAL_OWNER, "2026-08-18T10:00:00Z")?,
+            )
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    assert_eq!(
+        inbox
+            .accept_social(
+                uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000842")?,
+                "social.source.captured.v1",
+                &captured_at("2026-08-17T10:00:00Z")?,
+            )
+            .await?,
+        SourceInboxAdmission::Tombstoned
+    );
+    let mut other_tenant = captured_at("2026-08-17T10:00:00Z")?;
+    other_tenant.owner = "user:018f0000-0000-7000-8000-000000000006".parse()?;
+    assert_eq!(
+        inbox
+            .accept_social(
+                uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000843")?,
+                "social.source.captured.v1",
+                &other_tenant,
+            )
+            .await?,
+        SourceInboxAdmission::AcceptedCurrent
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn archive_conversation_redelivery_creates_one_receipt()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let inbox = SourceInbox::new(&database.database);
-    let conversation: ratatoskr_ai_archive_contracts::AiConversation =
-        serde_json::from_str(ARCHIVE_CONVERSATION)?;
+    let conversation = valid_conversation()?;
     let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
     let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000803")?;
     assert_eq!(

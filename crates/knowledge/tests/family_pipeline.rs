@@ -18,14 +18,16 @@ use ratatoskr_github_contracts::{
     RepositoryAnalysisRequested, RepositoryAnalysisRevision, RepositoryFullName,
 };
 use ratatoskr_identifiers::{
-    BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, Extensions, MediaType,
-    RepositoryAnalysisRequestId, RepositoryId, TenantRef, UserId,
+    BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, EntityRef, Extensions,
+    MediaType, RepositoryAnalysisRequestId, RepositoryId, TenantRef, UserId,
 };
 use ratatoskr_knowledge::test_support::TestDatabase;
+use ratatoskr_knowledge::test_support::archive::conversation_from_json;
 use ratatoskr_knowledge::{
-    BlobStore, BudgetLedger, BudgetLimits, ControlledProvider, FamilyPipeline, FamilyPipelineError,
-    ProviderError, ProviderResponse, ProviderUsage, RateLimiter, RepositoryReadmeError,
-    RepositoryReadmeResolver, ScriptedProvider, SourceInbox, SpendControls, TokenPrices,
+    BlobStore, BudgetLedger, BudgetLimits, ControlledProvider, EventCause, FamilyPipeline,
+    FamilyPipelineError, ProviderError, ProviderResponse, ProviderUsage, RateLimiter,
+    RepositoryReadmeError, RepositoryReadmeResolver, ScriptedProvider, SourceInbox, SpendControls,
+    TokenPrices,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -108,8 +110,7 @@ async fn social_event_replay_produces_one_analysis_and_search_document()
 async fn archive_event_produces_grounded_analysis_and_search_document()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
-    let conversation: ratatoskr_ai_archive_contracts::AiConversation =
-        serde_json::from_str(ARCHIVE)?;
+    let conversation = conversation_from_json(ARCHIVE)?;
     let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
     let inbox = SourceInbox::new(&database.database);
     let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000802")?;
@@ -214,7 +215,7 @@ async fn repository_request_acquires_readme_then_projects_search_document()
     );
 
     let execution = pipeline
-        .execute_repository(&request, &StaticReadme { bytes: readme })
+        .execute_repository(&request, &cause(), &StaticReadme { bytes: readme })
         .await?;
     assert_eq!(execution.analysis.summary, "A Rust library.");
     assert!(execution.completion.is_some());
@@ -228,7 +229,7 @@ async fn one_shared_ledger_blocks_archive_after_social_usage()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let social: ratatoskr_social_contracts::SocialSourceSnapshot = serde_json::from_str(SOCIAL)?;
-    let archive: ratatoskr_ai_archive_contracts::AiConversation = serde_json::from_str(ARCHIVE)?;
+    let archive = conversation_from_json(ARCHIVE)?;
     let controls = SpendControls {
         limits: BudgetLimits {
             daily_tokens: 300,
@@ -305,6 +306,7 @@ async fn one_shared_ledger_blocks_archive_after_social_usage()
     )
     .execute_repository(
         &request,
+        &cause(),
         &StaticReadme {
             bytes: b"# Project\nA Rust library.".to_vec(),
         },
@@ -318,6 +320,15 @@ async fn one_shared_ledger_blocks_archive_after_social_usage()
     assert_eq!(repository_inner.call_count()?, 0);
     database.cleanup().await?;
     Ok(())
+}
+
+fn cause() -> EventCause {
+    EventCause {
+        event_id: uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000901")
+            .expect("cause event identity"),
+        correlation_id: EntityRef::parse("operation:018f0000-0000-7000-8000-000000000902")
+            .expect("cause correlation"),
+    }
 }
 
 #[derive(Debug)]

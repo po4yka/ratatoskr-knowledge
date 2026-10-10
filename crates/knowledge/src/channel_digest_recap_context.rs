@@ -1,6 +1,7 @@
 //! Deterministic bounded context preparation for channel-digest recap analysis.
 
 use crate::VerifiedDigestManifest;
+use ratatoskr_channel_digest_contracts::ChannelDigestManifestSource;
 use sha2::{Digest as _, Sha256};
 
 /// Stable context preparation contract identity.
@@ -196,7 +197,7 @@ pub fn prepare_channel_recap_context(
     })
 }
 
-fn prepared_source(source: crate::DigestManifestSource) -> PreparedChannelRecapSource {
+fn prepared_source(source: ChannelDigestManifestSource) -> PreparedChannelRecapSource {
     PreparedChannelRecapSource {
         revision_ref: source.revision_ref,
         channel_ref: source.channel_ref,

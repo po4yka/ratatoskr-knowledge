@@ -4,16 +4,18 @@
 
 use std::future::IntoFuture as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ratatoskr_knowledge::{
     BlobStore, BudgetLedger, BudgetLimits, ChunkPolicy, Config, ControlledEmbeddings, Database,
     DeletionReceipt, EmbeddingsSettings, HybridRetriever, Indexer, IndexerLimits,
     OpenAiCompatibleEmbeddings, RateLimiter, ResultReaderSecret, RetryPolicy, TokenPrices,
-    init_telemetry,
+    collect_pending_blobs, init_telemetry,
 };
 use ratatoskr_knowledge_service::{
     HybridSearchRetriever, Lifecycle, Metrics, admin_router, spawn_channel_recap_worker,
+    spawn_ingest_workers,
 };
 use tokio::sync::watch;
 
@@ -29,36 +31,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
     init_telemetry()?;
-    tokio::fs::create_dir_all(&config.storage.blob_root).await?;
-    let blobs = BlobStore::new(
-        &config.storage.blob_root,
-        config
-            .limits
-            .blob_bytes
-            .min(u64::try_from(config.limits.raw_response_bytes)?),
-    );
-    let database = Database::connect(
-        &config.storage.database_url,
-        config.limits.database_connections,
-        Duration::from_millis(config.limits.database_acquire_timeout_ms),
-    )
-    .await?;
-    database.apply_schema().await?;
+    let (blobs, database) = open_storage(&config).await?;
 
     let lifecycle = if config.channel_recap.enabled {
         Lifecycle::starting_with_channel_recap()
     } else {
         Lifecycle::starting()
     };
+    if config.ingest.enabled {
+        lifecycle.require_ingest();
+    }
     let metrics = Arc::new(Metrics::new());
     let (drain_tx, drain_rx) = watch::channel(false);
+    let worker_failed = Arc::new(AtomicBool::new(false));
     let recap_worker = config.channel_recap.enabled.then(|| {
-        spawn_channel_recap_worker(
-            config.clone(),
-            database.clone(),
-            blobs.clone(),
-            lifecycle.clone(),
-            drain_rx.clone(),
+        watch_worker(
+            spawn_channel_recap_worker(
+                config.clone(),
+                database.clone(),
+                blobs.clone(),
+                lifecycle.clone(),
+                drain_rx.clone(),
+            ),
+            &drain_tx,
+            &worker_failed,
+        )
+    });
+    let ingest_worker = config.ingest.enabled.then(|| {
+        watch_worker(
+            spawn_ingest_workers(
+                config.clone(),
+                database.clone(),
+                blobs.clone(),
+                lifecycle.clone(),
+                drain_rx.clone(),
+            ),
+            &drain_tx,
+            &worker_failed,
         )
     });
 
@@ -95,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await;
     let _ignored = drain_tx.send(true);
-    if let Some(worker) = recap_worker {
+    for worker in [recap_worker, ingest_worker].into_iter().flatten() {
         tokio::time::timeout(
             Duration::from_millis(config.limits.shutdown_timeout_ms),
             worker,
@@ -103,8 +112,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await??;
     }
     serve_result?;
+    if worker_failed.load(Ordering::Acquire) {
+        return Err("a bus worker ended before an orderly shutdown".into());
+    }
     database.close().await;
     Ok(())
+}
+
+/// Opens the blob root and the database, applies the schema and finishes any deletion whose rows
+/// committed before its bytes were collected.
+async fn open_storage(
+    config: &Config,
+) -> Result<(BlobStore, Database), Box<dyn std::error::Error>> {
+    tokio::fs::create_dir_all(&config.storage.blob_root).await?;
+    let blobs = BlobStore::new(
+        &config.storage.blob_root,
+        config
+            .limits
+            .blob_bytes
+            .min(u64::try_from(config.limits.raw_response_bytes)?),
+    );
+    let database = Database::connect(
+        &config.storage.database_url,
+        config.limits.database_connections,
+        Duration::from_millis(config.limits.database_acquire_timeout_ms),
+    )
+    .await?;
+    database.apply_schema().await?;
+    let recovered = collect_pending_blobs(&database, &blobs).await?;
+    if !recovered.is_empty() {
+        tracing::info!(recovered_blobs = recovered.len(), "collected queued blobs");
+    }
+    Ok((blobs, database))
+}
+
+/// Turns a worker that ends before an orderly shutdown into a process failure.
+///
+/// A worker that returns while the process is not draining has stopped doing its job; the process
+/// begins drain, so readiness fails and the listener stops, and then exits non-zero.
+fn watch_worker(
+    worker: tokio::task::JoinHandle<()>,
+    drain: &watch::Sender<bool>,
+    failed: &Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let drain = drain.clone();
+    let failed = Arc::clone(failed);
+    tokio::spawn(async move {
+        let _ended = worker.await;
+        if !*drain.borrow() {
+            failed.store(true, Ordering::Release);
+            let _ignored = drain.send(true);
+        }
+    })
 }
 
 /// One-shot `delete-source` job: strict config, scoped deletion, receipt.
@@ -332,9 +391,9 @@ fn print_deletion_receipt(receipt: &DeletionReceipt) {
     );
     let _ignored = writeln!(
         stdout,
-        "removed_blobs={} orphan_blobs={} external_source_blobs={}",
+        "removed_blobs={} recovered_blobs={} external_source_blobs={}",
         receipt.blob_digests_removed.len(),
-        receipt.orphan_digests_removed.len(),
+        receipt.recovered_digests_removed.len(),
         receipt.external_source_blob_digests.len()
     );
 }

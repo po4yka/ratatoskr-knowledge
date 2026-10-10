@@ -134,12 +134,6 @@ impl BlobStore {
         }
     }
 
-    /// Returns the owned content-addressed root for bounded enumeration.
-    #[must_use]
-    pub(crate) fn root(&self) -> &std::path::Path {
-        &self.root
-    }
-
     fn path(&self, hex: &str) -> Result<PathBuf, BlobError> {
         let prefix = hex.get(..2).ok_or(BlobError::InvalidReference)?;
         Ok(self.root.join("sha256").join(prefix).join(hex))
@@ -147,7 +141,7 @@ impl BlobStore {
 }
 
 /// Returns whether `value` is a lowercase 64-character SHA-256 hex digest.
-pub(crate) fn is_digest_hex(value: &str) -> bool {
+fn is_digest_hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

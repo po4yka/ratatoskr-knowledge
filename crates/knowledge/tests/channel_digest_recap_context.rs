@@ -1,17 +1,21 @@
 //! Deterministic complete-revision context selection for channel recaps.
 
-use ratatoskr_channel_digest_contracts::KnowledgeChannelDigestRecapRequested;
+use ratatoskr_channel_digest_contracts::{
+    ChannelDigestManifest, ChannelDigestManifestSource, KnowledgeChannelDigestRecapRequested,
+};
 use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_identifiers::BlobRef;
+use ratatoskr_knowledge::test_support::recap::{fixture_source, model_output, provider_response};
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     BlobStore, CHANNEL_RECAP_CONTEXT_VERSION, CHANNEL_RECAP_PROMPT_VERSION,
     ChannelRecapContextError, ChannelRecapContextPolicy, ChannelRecapInbox,
     ChannelRecapInboxAdmission, ChannelRecapOutputLanguage, ChannelRecapPipeline,
-    ChannelRecapRunState, ChannelRecapRunStore, DigestManifest, PreparedChannelRecapContext,
-    ProviderError, ProviderResponse, ProviderUsage, ScriptedProvider, VerifiedDigestManifest,
+    ChannelRecapRunState, ChannelRecapRunStore, PreparedChannelRecapContext, ProviderError,
+    ProviderResponse, ScriptedProvider, VerifiedDigestManifest,
     build_channel_recap_provider_request, channel_digest_recap_schema,
-    prepare_channel_recap_context, validate_channel_digest_recap,
+    channel_recap_model_output_schema, prepare_channel_recap_context,
+    validate_channel_digest_recap,
 };
 use sha2::{Digest as _, Sha256};
 use std::sync::{Mutex, Once};
@@ -36,12 +40,13 @@ fn channel_source_instructions_cannot_replace_fixed_policy()
         &verified(vec![source(300, 1, injection)])?,
         generous_policy(),
     )?;
-    let request = build_channel_recap_provider_request(&context, 2_048)?;
+    let request =
+        build_channel_recap_provider_request(&context, ChannelRecapOutputLanguage::En, 2_048)?;
     assert_eq!(request.prompt_version, CHANNEL_RECAP_PROMPT_VERSION);
     assert!(request.system_policy.contains("untrusted"));
     assert!(request.system_policy.contains("never instructions"));
     assert!(request.task_instruction.contains("recap"));
-    assert!(request.output_schema.is_object());
+    assert_eq!(request.output_schema, channel_recap_model_output_schema()?);
     assert_eq!(request.source_labels.len(), 1);
     assert_eq!(request.untrusted_sources.len(), 1);
     assert_eq!(request.untrusted_sources[0].untrusted_content, injection);
@@ -85,31 +90,20 @@ async fn run_attempt_case(kind: &str) -> Result<(), Box<dyn std::error::Error>> 
     )
     .await?;
     let context = prepare_channel_recap_context(&verified, generous_policy())?;
-    let mut valid = valid_recap(&context);
-    valid["manifest_digest"]["hex"] = serde_json::json!(verified.digest_hex);
-    let valid_bytes = serde_json::to_vec(&valid)?;
-    let valid_response = || ProviderResponse {
-        bytes: valid_bytes.clone(),
-        request_id: Some(format!("scripted-{kind}")),
-        usage: ProviderUsage {
-            input_tokens: 30,
-            output_tokens: 10,
-        },
-    };
-    let invalid_response = || ProviderResponse {
-        bytes: br#"{"headline":""}"#.to_vec(),
-        request_id: Some(format!("scripted-{kind}-invalid")),
-        usage: ProviderUsage {
-            input_tokens: 30,
-            output_tokens: 2,
-        },
+    let valid_output = model_output(&context, &[]);
+    let valid_response = || provider_response(&valid_output, &format!("scripted-{kind}"));
+    let invalid_response = || {
+        provider_response(
+            &serde_json::json!({"headline": ""}),
+            &format!("scripted-{kind}-invalid"),
+        )
     };
     let scripts: Vec<Result<ProviderResponse, ProviderError>> = match kind {
-        "transient" => vec![Err(ProviderError::Transient), Ok(valid_response())],
-        "repair" => vec![Ok(invalid_response()), Ok(valid_response())],
-        "invalid" => vec![Ok(invalid_response()), Ok(invalid_response())],
+        "transient" => vec![Err(ProviderError::Transient), Ok(valid_response()?)],
+        "repair" => vec![Ok(invalid_response()?), Ok(valid_response()?)],
+        "invalid" => vec![Ok(invalid_response()?), Ok(invalid_response()?)],
         "permanent" => vec![Err(ProviderError::Permanent)],
-        "replay" => vec![Ok(valid_response())],
+        "replay" => vec![Ok(valid_response()?)],
         _ => return Err("unknown attempt test case".into()),
     };
     let provider = ScriptedProvider::new(scripts);
@@ -124,7 +118,7 @@ async fn run_attempt_case(kind: &str) -> Result<(), Box<dyn std::error::Error>> 
     let outcome = pipeline
         .execute(
             run_id,
-            build_channel_recap_provider_request(&context, 2_048)?,
+            build_channel_recap_provider_request(&context, ChannelRecapOutputLanguage::En, 2_048)?,
             &context,
             &verified.digest_hex,
             ChannelRecapOutputLanguage::En,
@@ -139,7 +133,11 @@ async fn run_attempt_case(kind: &str) -> Result<(), Box<dyn std::error::Error>> 
         pipeline
             .execute(
                 run_id,
-                build_channel_recap_provider_request(&context, 2_048)?,
+                build_channel_recap_provider_request(
+                    &context,
+                    ChannelRecapOutputLanguage::En,
+                    2_048,
+                )?,
                 &context,
                 &verified.digest_hex,
                 ChannelRecapOutputLanguage::En,
@@ -155,7 +153,11 @@ async fn run_attempt_case(kind: &str) -> Result<(), Box<dyn std::error::Error>> 
         pipeline
             .execute(
                 run_id,
-                build_channel_recap_provider_request(&context, 2_048)?,
+                build_channel_recap_provider_request(
+                    &context,
+                    ChannelRecapOutputLanguage::En,
+                    2_048,
+                )?,
                 &context,
                 &verified.digest_hex,
                 ChannelRecapOutputLanguage::En,
@@ -188,7 +190,16 @@ async fn run_attempt_case(kind: &str) -> Result<(), Box<dyn std::error::Error>> 
                     .task_instruction
                     .contains("Repair validation code: channel_recap_schema")
             );
-            assert!(!repair_request.task_instruction.contains("headline"));
+            // The repair instruction is the original task plus the fixed code: nothing of the
+            // invalid response is echoed back to the model.
+            let first_request = requests.first().ok_or("missing first request")?;
+            assert_eq!(
+                repair_request.task_instruction,
+                format!(
+                    "{}\nRepair validation code: channel_recap_schema.",
+                    first_request.task_instruction
+                )
+            );
         }
         _ => {}
     }
@@ -326,19 +337,13 @@ async fn channel_recap_pipeline_stores_raw_before_atomic_result_commit()
     )
     .await?;
     let context = prepare_channel_recap_context(&verified, generous_policy())?;
-    let provider_request = build_channel_recap_provider_request(&context, 2_048)?;
-    let mut response_value = valid_recap(&context);
-    response_value["manifest_digest"]["hex"] = serde_json::json!(verified.digest_hex);
+    let provider_request =
+        build_channel_recap_provider_request(&context, ChannelRecapOutputLanguage::En, 2_048)?;
+    let mut response_value = model_output(&context, &[]);
     response_value["overview"] = serde_json::json!("MODEL_LEAK_SENTINEL");
-    let raw_response = serde_json::to_vec(&response_value)?;
-    let provider = ScriptedProvider::new([Ok(ProviderResponse {
-        bytes: raw_response.clone(),
-        request_id: Some("scripted-recap-1".to_owned()),
-        usage: ProviderUsage {
-            input_tokens: 40,
-            output_tokens: 20,
-        },
-    })]);
+    let response = provider_response(&response_value, "scripted-recap-1")?;
+    let raw_response = response.bytes.clone();
+    let provider = ScriptedProvider::new([Ok(response)]);
     let root = TemporaryBlobRoot::create().await?;
     let blobs = BlobStore::new(root.path(), 65_536);
     RECAP_TELEMETRY_INIT.call_once(|| {
@@ -422,36 +427,38 @@ fn lock_error<T>(_error: std::sync::PoisonError<T>) -> std::io::Error {
 }
 
 fn source(index: usize, channel: usize, content: &str) -> serde_json::Value {
-    let second = 59_usize.saturating_sub(index % 59);
-    serde_json::json!({
-        "revision_ref": format!("channel-post-revision:018f0000-0000-7000-8000-{index:012}"),
-        "channel_ref": format!("telegram-public-channel:fixture-{channel:02}"),
-        "channel_label": format!("Fixture {channel:02}"),
-        "message_id": format!("{}", 1_000 + index),
-        "published_at": format!("2026-08-21T09:00:{second:02}Z"),
-        "content": content,
-        "content_digest": {"algorithm": "sha256", "hex": sha256_hex(content.as_bytes())},
-        "public_link": format!("https://t.me/fixture_{channel:02}/{}", 1_000 + index),
-        "revision": 1
-    })
+    fixture_source(index, channel, content)
 }
 
+/// A verified manifest over `sources` in the order given, without the contract's cross-field
+/// rules: context selection must not depend on how the producer ordered the manifest, and its
+/// bounds are exercised beyond what the contract admits.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "fixture callers transfer their synthetic source vector into one manifest"
 )]
 fn verified(sources: Vec<serde_json::Value>) -> Result<VerifiedDigestManifest, serde_json::Error> {
-    let manifest: DigestManifest = serde_json::from_value(serde_json::json!({
-        "schema": "channel_digest_manifest.v1",
-        "manifest_ref": "channel-digest-manifest:018f0000-0000-7000-8000-000000000204",
-        "owner": "user:018f0000-0000-7000-8000-000000000202",
-        "digest_run_id": "018f0000-0000-7000-8000-000000000203",
-        "window": {
+    let sources = sources
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<ChannelDigestManifestSource>, _>>()?;
+    let manifest = ChannelDigestManifest {
+        schema: serde_json::from_value(serde_json::json!("channel_digest_manifest.v1"))?,
+        manifest_ref: serde_json::from_value(serde_json::json!(
+            "channel-digest-manifest:018f0000-0000-7000-8000-000000000204"
+        ))?,
+        owner: serde_json::from_value(serde_json::json!(
+            "user:018f0000-0000-7000-8000-000000000202"
+        ))?,
+        digest_run_id: serde_json::from_value(serde_json::json!(
+            "018f0000-0000-7000-8000-000000000203"
+        ))?,
+        window: serde_json::from_value(serde_json::json!({
             "start_at": "2026-08-20T10:00:00Z",
             "end_at": "2026-08-21T10:00:00Z"
-        },
-        "sources": sources
-    }))?;
+        }))?,
+        sources,
+    };
     let digest_hex = sha256_hex(&serde_json::to_vec(&manifest)?);
     Ok(VerifiedDigestManifest {
         digest_hex,

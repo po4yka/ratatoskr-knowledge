@@ -6,7 +6,7 @@ use ratatoskr_ai_archive_contracts::{
 };
 use ratatoskr_event_envelope::{EnvelopeError, EventEnvelope, EventPayload};
 use ratatoskr_identifiers::{ContentDigest, WireTimestamp};
-use ratatoskr_social_contracts::SocialSourceSnapshot;
+use ratatoskr_social_contracts::{SocialSourceRemoved, SocialSourceSnapshot};
 
 use crate::{Database, DeletionError, DeletionScope, PersistenceError, execute_deletion};
 
@@ -102,6 +102,91 @@ impl<'a> SourceInbox<'a> {
         .await
     }
 
+    /// Claims a social removal and deletes the derived state of its source.
+    ///
+    /// One transaction claims the removal as a tombstone, drops the source head and its stored
+    /// snapshots, and deletes every derived row of the source. The tombstone stays: it orders the
+    /// removal against captures that are delivered late.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceInboxError`] when the removal cannot be persisted.
+    pub async fn accept_social_removed(
+        &self,
+        event_id: uuid::Uuid,
+        removed: &SocialSourceRemoved,
+    ) -> Result<SourceInboxAdmission, SourceInboxError> {
+        let tenant_ref = removed.owner.to_string();
+        let source_id = removed.social_source_id.to_string();
+        let reason = serde_json::to_value(removed.reason)
+            .map_err(SourceInboxError::Encode)?
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(SourceInboxError::InvalidArchiveFact)?;
+        let mut transaction = self
+            .database
+            .pool()
+            .begin()
+            .await
+            .map_err(PersistenceError::Query)?;
+        let claimed: Option<uuid::Uuid> = sqlx::query_scalar(
+            "insert into knowledge.social_tombstones
+                 (event_id, tenant_ref, source_id, reason, removed_at)
+             values ($1, $2, $3, $4, $5::timestamptz)
+             on conflict (event_id) do nothing
+             returning event_id",
+        )
+        .bind(event_id)
+        .bind(&tenant_ref)
+        .bind(&source_id)
+        .bind(reason)
+        .bind(removed.removed_at.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        if claimed.is_none() {
+            transaction
+                .commit()
+                .await
+                .map_err(PersistenceError::Query)?;
+            return Ok(SourceInboxAdmission::Duplicate);
+        }
+        self.remove_source_state(&mut transaction, "social", &tenant_ref, &source_id)
+            .await?;
+        execute_deletion(
+            &mut transaction,
+            &DeletionScope::Source {
+                tenant_ref,
+                owner_context: "ratatoskr-knowledge".to_owned(),
+                source_document_id: source_id,
+            },
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(PersistenceError::Query)?;
+        Ok(SourceInboxAdmission::AcceptedCurrent)
+    }
+
+    /// Reports whether `event_id` is the delivery that is the current head of its source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceInboxError`] when the head cannot be read.
+    pub async fn is_current_head(&self, event_id: uuid::Uuid) -> Result<bool, SourceInboxError> {
+        let head: bool = sqlx::query_scalar(
+            "select exists (
+                 select 1 from knowledge.source_analysis_heads where inbox_event_id = $1
+             )",
+        )
+        .bind(event_id)
+        .fetch_one(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(head)
+    }
+
     /// Claims an AI conversation added or updated source fact.
     ///
     /// # Errors
@@ -116,6 +201,9 @@ impl<'a> SourceInbox<'a> {
     ) -> Result<SourceInboxAdmission, SourceInboxError> {
         provenance
             .validate_conversation(conversation)
+            .map_err(|_| SourceInboxError::InvalidArchiveFact)?;
+        conversation
+            .verify_content_digest()
             .map_err(|_| SourceInboxError::InvalidArchiveFact)?;
         let source = ArchiveConversationSource {
             provenance: provenance.clone(),
@@ -383,10 +471,23 @@ impl<'a> SourceInbox<'a> {
         tenant_ref: &str,
         source_id: &str,
     ) -> Result<(), SourceInboxError> {
+        self.remove_source_state(transaction, "ai_archive", tenant_ref, source_id)
+            .await
+    }
+
+    /// Deletes the head and the stored deliveries of one source of one family.
+    async fn remove_source_state(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        family: &str,
+        tenant_ref: &str,
+        source_id: &str,
+    ) -> Result<(), SourceInboxError> {
         sqlx::query(
             "delete from knowledge.source_analysis_heads
-             where family = 'ai_archive' and tenant_ref = $1 and source_id = $2",
+             where family = $1 and tenant_ref = $2 and source_id = $3",
         )
+        .bind(family)
         .bind(tenant_ref)
         .bind(source_id)
         .execute(&mut **transaction)
@@ -394,8 +495,9 @@ impl<'a> SourceInbox<'a> {
         .map_err(PersistenceError::Query)?;
         sqlx::query(
             "delete from knowledge.source_analysis_inbox
-             where family = 'ai_archive' and tenant_ref = $1 and source_id = $2",
+             where family = $1 and tenant_ref = $2 and source_id = $3",
         )
+        .bind(family)
         .bind(tenant_ref)
         .bind(source_id)
         .execute(&mut **transaction)
@@ -453,8 +555,11 @@ impl<'a> SourceInbox<'a> {
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
-        let blocked = delivery.family == "ai_archive"
-            && tombstone_blocks(&mut transaction, &delivery).await?;
+        let blocked = match delivery.family {
+            "ai_archive" => tombstone_blocks(&mut transaction, &delivery).await?,
+            "social" => social_tombstone_blocks(&mut transaction, &delivery).await?,
+            _ => false,
+        };
         if !insert_receipt(&mut transaction, &delivery).await? {
             transaction
                 .commit()
@@ -552,6 +657,26 @@ async fn tombstone_blocks(
     )
     .bind(&delivery.tenant_ref)
     .bind(delivery.archive_id.as_deref().unwrap_or_default())
+    .bind(&delivery.source_id)
+    .bind(delivery.observed_at.to_string())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(PersistenceError::Query)?;
+    Ok(blocked)
+}
+
+/// A removal blocks a capture of its source that the removal does not predate.
+async fn social_tombstone_blocks(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    delivery: &Delivery<'_>,
+) -> Result<bool, SourceInboxError> {
+    let blocked: bool = sqlx::query_scalar(
+        "select exists (
+             select 1 from knowledge.social_tombstones
+             where tenant_ref = $1 and source_id = $2 and removed_at >= $3::timestamptz
+         )",
+    )
+    .bind(&delivery.tenant_ref)
     .bind(&delivery.source_id)
     .bind(delivery.observed_at.to_string())
     .fetch_one(&mut **transaction)

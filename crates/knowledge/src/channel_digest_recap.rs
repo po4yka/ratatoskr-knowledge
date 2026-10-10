@@ -1,11 +1,12 @@
 //! Authenticated retrieval and integrity verification for channel-digest manifests.
 
 use ratatoskr_channel_digest_contracts::{
-    ChannelDigestRecapFailureCode, DigestWindow, KnowledgeChannelDigestRecapRequested,
+    ChannelDigestContractError, ChannelDigestManifest, ChannelDigestManifestRef,
+    ChannelDigestRecapFailureCode, HEADER_DIGEST_RUN_ID, HEADER_MANIFEST_DIGEST, HEADER_OWNER_ID,
+    KnowledgeChannelDigestRecapRequested, READY_PATH, manifest_path, sha256_hex,
 };
-use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, WireTimestamp};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
+use ratatoskr_identifiers::DigestAlgorithm;
+use serde::Serialize;
 use std::time::Duration;
 
 use crate::channel_digest_recap_store::{
@@ -63,8 +64,8 @@ pub struct DigestSourceClientSettings {
 /// Authority claims for one immutable manifest read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestManifestRequest {
-    /// Internal Ratatoskr owner reference.
-    pub owner: String,
+    /// Bare user identity of the owner.
+    pub owner: uuid::Uuid,
     /// Digest run whose immutable source is being resolved.
     pub digest_run_id: uuid::Uuid,
     /// Opaque manifest reference minted by the digest service.
@@ -171,7 +172,7 @@ impl DigestSourceClient {
         tokio::time::timeout(self.request_deadline, async {
             let endpoint = self
                 .base_url
-                .join("ready")
+                .join(READY_PATH.trim_start_matches('/'))
                 .map_err(|_| DigestSourceClientError::InvalidConfiguration)?;
             let response = self
                 .client
@@ -194,13 +195,11 @@ impl DigestSourceClient {
         &self,
         request: &DigestManifestRequest,
     ) -> Result<Vec<u8>, DigestSourceClientError> {
-        let manifest_id = request
+        let manifest_ref = request
             .manifest_ref
-            .strip_prefix("channel-digest-manifest:")
-            .and_then(|value| uuid::Uuid::parse_str(value).ok())
-            .ok_or(DigestSourceClientError::InvalidRequest)?;
-        if request.owner.is_empty()
-            || request.manifest_digest_hex.len() != 64
+            .parse::<ChannelDigestManifestRef>()
+            .map_err(|_| DigestSourceClientError::InvalidRequest)?;
+        if request.manifest_digest_hex.len() != 64
             || !request
                 .manifest_digest_hex
                 .bytes()
@@ -210,22 +209,15 @@ impl DigestSourceClient {
         }
         let endpoint = self
             .base_url
-            .join(&format!("v1/channel-digest/manifests/{manifest_id}"))
+            .join(manifest_path(&manifest_ref).trim_start_matches('/'))
             .map_err(|_| DigestSourceClientError::InvalidConfiguration)?;
         let response = self
             .client
             .get(endpoint)
             .bearer_auth(self.service_secret.expose_secret())
-            .header("x-ratatoskr-owner", request.owner.as_str())
-            .header(
-                "x-ratatoskr-digest-run-id",
-                request.digest_run_id.to_string(),
-            )
-            .header("x-ratatoskr-manifest-ref", request.manifest_ref.as_str())
-            .header(
-                "x-ratatoskr-manifest-digest",
-                request.manifest_digest_hex.as_str(),
-            )
+            .header(HEADER_OWNER_ID, request.owner.to_string())
+            .header(HEADER_DIGEST_RUN_ID, request.digest_run_id.to_string())
+            .header(HEADER_MANIFEST_DIGEST, request.manifest_digest_hex.as_str())
             .send()
             .await
             .map_err(|_| DigestSourceClientError::Unavailable)?;
@@ -260,63 +252,13 @@ async fn read_digest_source_body(
     Ok(bytes)
 }
 
-/// Version marker for the canonical digest-source manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DigestManifestSchema {
-    /// First and only development manifest schema.
-    #[serde(rename = "channel_digest_manifest.v1")]
-    ChannelDigestManifestV1,
-}
-
-/// One immutable selected public-channel post revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DigestManifestSource {
-    /// Stable immutable revision reference.
-    pub revision_ref: String,
-    /// Stable owner-independent public-channel reference.
-    pub channel_ref: String,
-    /// Bounded channel label for source attribution.
-    pub channel_label: String,
-    /// Stable provider message identity within the channel.
-    pub message_id: String,
-    /// Provider-authored canonical UTC publication instant.
-    pub published_at: WireTimestamp,
-    /// Complete normalized post revision bytes interpreted as UTF-8.
-    pub content: String,
-    /// SHA-256 of the exact normalized UTF-8 content bytes.
-    pub content_digest: ContentDigest,
-    /// Canonical bounded public Telegram link when one exists.
-    pub public_link: Option<String>,
-    /// Monotonic revision ordinal for the stable provider message.
-    pub revision: u32,
-}
-
-/// Canonical immutable manifest resolved from the digest service.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DigestManifest {
-    /// Manifest encoding marker.
-    pub schema: DigestManifestSchema,
-    /// Owner-authorized opaque manifest reference.
-    pub manifest_ref: String,
-    /// Internal Ratatoskr owner reference.
-    pub owner: String,
-    /// Digest run that selected the sources.
-    pub digest_run_id: uuid::Uuid,
-    /// Exact closed-open publication window.
-    pub window: DigestWindow,
-    /// Selected immutable source revisions.
-    pub sources: Vec<DigestManifestSource>,
-}
-
 /// Parsed manifest whose request linkage and immutable bytes were verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedDigestManifest {
     /// Verified exact SHA-256 of canonical response bytes.
     pub digest_hex: String,
-    /// Closed decoded manifest.
-    pub manifest: DigestManifest,
+    /// Closed decoded manifest, validated by its contract type.
+    pub manifest: ChannelDigestManifest,
 }
 
 /// Safe manifest integrity failure.
@@ -385,7 +327,7 @@ pub async fn attempt_digest_manifest(
         return Ok(DigestManifestAttemptOutcome::RetryScheduled);
     }
     let authority = DigestManifestRequest {
-        owner: request.owner.to_string(),
+        owner: request.owner.user_id().0,
         digest_run_id: request.digest_run_id.as_uuid(),
         manifest_ref: request.manifest_ref.to_string(),
         manifest_digest_hex: request.manifest_digest.hex.to_string(),
@@ -447,93 +389,48 @@ pub async fn attempt_digest_manifest(
     }
 }
 
-/// Parses canonical bytes as the closed digest manifest shape.
+/// Verifies the received bytes against the request and decodes them as the contract manifest.
+///
+/// The digest of the received bytes must equal the digest the request carries, the bytes must be
+/// the canonical rendering of a manifest the contract accepts, and the manifest must belong to
+/// exactly the owner, run, reference, window and counts the request names.
 ///
 /// # Errors
 ///
-/// Returns a safe encoding error when the closed manifest cannot be decoded.
+/// Returns a safe encoding, integrity or linkage failure.
 pub fn verify_digest_manifest(
     request: &KnowledgeChannelDigestRecapRequested,
     bytes: &[u8],
 ) -> Result<VerifiedDigestManifest, DigestManifestError> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| DigestManifestError::InvalidEncoding)?;
-    let canonical = serde_json::to_vec(&value).map_err(|_| DigestManifestError::InvalidEncoding)?;
-    if canonical != bytes {
-        return Err(DigestManifestError::Integrity);
-    }
-    let digest_hex = format!("{:x}", Sha256::digest(bytes));
+    let digest_hex = sha256_hex(bytes);
     if !matches!(request.manifest_digest.algorithm, DigestAlgorithm::Sha256)
         || request.manifest_digest.hex.as_str() != digest_hex
     {
         return Err(DigestManifestError::Integrity);
     }
-    let manifest: DigestManifest =
-        serde_json::from_value(value).map_err(|_| DigestManifestError::InvalidEncoding)?;
-    if manifest.owner != request.owner.to_string()
-        || manifest.digest_run_id != request.digest_run_id.as_uuid()
-        || manifest.manifest_ref != request.manifest_ref.to_string()
+    let manifest =
+        ChannelDigestManifest::from_canonical_bytes(bytes).map_err(|error| match error {
+            ChannelDigestContractError::ManifestInvalid
+            | ChannelDigestContractError::ManifestIntegrity => DigestManifestError::Integrity,
+            _ => DigestManifestError::InvalidEncoding,
+        })?;
+    let channels = manifest
+        .sources
+        .iter()
+        .map(|source| source.channel_ref.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if manifest.owner != request.owner
+        || manifest.digest_run_id != request.digest_run_id
+        || manifest.manifest_ref != request.manifest_ref
         || manifest.window != request.window
         || manifest.sources.len() != usize::from(request.source_count.get())
+        || channels != usize::from(request.channel_count.get())
     {
         return Err(DigestManifestError::Linkage);
     }
-    validate_manifest_sources(request, &manifest)?;
     Ok(VerifiedDigestManifest {
         digest_hex,
         manifest,
     })
-}
-
-fn validate_manifest_sources(
-    request: &KnowledgeChannelDigestRecapRequested,
-    manifest: &DigestManifest,
-) -> Result<(), DigestManifestError> {
-    let mut revision_refs = std::collections::BTreeSet::new();
-    let mut provider_revisions = std::collections::BTreeSet::new();
-    let mut channels = std::collections::BTreeSet::new();
-    for source in &manifest.sources {
-        let identity = (
-            source.channel_ref.as_str(),
-            source.message_id.as_str(),
-            source.revision,
-        );
-        channels.insert(source.channel_ref.as_str());
-        if !revision_refs.insert(source.revision_ref.as_str())
-            || !provider_revisions.insert(identity)
-            || !valid_manifest_source(source, request.window)
-        {
-            return Err(DigestManifestError::Integrity);
-        }
-    }
-    if channels.len() != usize::from(request.channel_count.get()) {
-        return Err(DigestManifestError::Linkage);
-    }
-    Ok(())
-}
-
-fn valid_manifest_source(source: &DigestManifestSource, window: DigestWindow) -> bool {
-    let content_digest = format!("{:x}", Sha256::digest(source.content.as_bytes()));
-    let valid_link = source.public_link.as_deref().is_none_or(|link| {
-        link.len() <= 512
-            && link.starts_with("https://t.me/")
-            && !link.contains(['?', '#'])
-            && reqwest::Url::parse(link).is_ok()
-    });
-    source.revision_ref.starts_with("channel-post-revision:")
-        && source.revision_ref.len() <= 160
-        && source.channel_ref.starts_with("telegram-public-channel:")
-        && source.channel_ref.len() <= 160
-        && !source.message_id.is_empty()
-        && source.message_id.len() <= 32
-        && source.message_id.bytes().all(|byte| byte.is_ascii_digit())
-        && (1..=80).contains(&source.channel_label.chars().count())
-        && !source.content.is_empty()
-        && source.content.len() <= 16_384
-        && matches!(source.content_digest.algorithm, DigestAlgorithm::Sha256)
-        && source.content_digest.hex.as_str() == content_digest
-        && source.revision > 0
-        && source.published_at >= window.start_at
-        && source.published_at < window.end_at
-        && valid_link
 }
