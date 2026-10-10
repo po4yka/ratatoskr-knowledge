@@ -46,14 +46,17 @@ jobs:
         run: >-
           docker run --detach --name knowledge-nats --publish 127.0.0.1:4222:4222
           nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da -js
-      - name: Extract the pinned nats-server binary for the authorized-broker tests
+      - name: Take the nats-server binary from the pinned broker image for the authorized-broker tests
+        # The alpine image keeps the executable in /usr/local/bin (only the scratch variant puts it
+        # at the filesystem root), so ask the running container where it is instead of hard-coding
+        # the layout.
         run: |
           set -euo pipefail
-          id=$(docker create nats@sha256:d4ac35882ac65aff236cd65b9d3fa4d24332c681e1a85f94eedccd3cdd65b1da)
+          server_path="$(docker exec knowledge-nats sh -c 'command -v nats-server')"
           mkdir -p "$RUNNER_TEMP/bin"
-          docker cp "$id:/nats-server" "$RUNNER_TEMP/bin/nats-server"
-          docker rm "$id"
+          docker cp "knowledge-nats:${server_path}" "$RUNNER_TEMP/bin/nats-server"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/nats-server" --version
       - run: cargo fetch --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
