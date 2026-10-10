@@ -15,6 +15,7 @@ use async_nats::jetstream::{self, consumer::PullConsumer};
 use futures_util::StreamExt as _;
 use ratatoskr_knowledge::{
     BlobStore, Config, Database, GithubReadmeClient, GithubReadmeClientSettings, LlmProvider,
+    RateLimiter,
 };
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -194,8 +195,9 @@ pub(crate) struct IngestContext<P> {
 
 /// Spawns the ingest supervisor with the provider the configuration selects.
 ///
-/// The caller must signal drain and join the returned handle. A handle that finishes before drain
-/// means the worker failed and the process must exit non-zero.
+/// `limiter` is the process-wide inference limiter, shared with the recap worker. The caller must
+/// signal drain and join the returned handle. A handle that finishes before drain means the worker
+/// failed and the process must exit non-zero.
 #[must_use]
 pub fn spawn_ingest_workers(
     config: Config,
@@ -203,9 +205,10 @@ pub fn spawn_ingest_workers(
     blobs: BlobStore,
     lifecycle: Lifecycle,
     drain: watch::Receiver<bool>,
+    limiter: Arc<RateLimiter>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        match IngestProvider::from_config(&config, &database) {
+        match IngestProvider::from_config(&config, &database, limiter) {
             Ok(provider) => {
                 supervise(
                     config,

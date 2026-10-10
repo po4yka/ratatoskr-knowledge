@@ -23,7 +23,7 @@ pub use ingest::{
 };
 pub use ingest_publish::{PublishFailure, publish_event_outbox};
 pub use metrics::Metrics;
-pub use provider_runtime::{IngestProvider, ProviderRuntimeError};
+pub use provider_runtime::{IngestProvider, ProviderRuntimeError, inference_limiter};
 
 /// The production hybrid retrieval selector over the controlled embeddings
 /// adapter.

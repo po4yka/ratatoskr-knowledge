@@ -1,29 +1,29 @@
 //! The workers against a broker that enforces the Knowledge identity of XR-021 CONTRACTS.md S03.
 //!
-//! `deploy/nats/identity.conf` is the Knowledge stanza of the single reviewed ACL. This test boots
-//! an authorization-enabled broker with exactly that stanza, provisions the durables as the
-//! platform would, and runs the real recap and ingest workers under the Knowledge nkey. The
-//! refusals are observed the only way a client can see them: as a missing acknowledgement, because
-//! a denied publish is visible in the server log alone.
+//! `deploy/nats/identity.conf` is the Knowledge stanza of the single reviewed ACL. These tests
+//! boot an authorization-enabled broker with exactly that stanza and provision the durables as the
+//! platform would. The first runs the real recap and ingest workers under the Knowledge nkey and
+//! feeds every durable one valid message: each must be fetched, acknowledged and answered with its
+//! completion fact, and the process must report ready. Removing one durable's grants from the
+//! stanza makes that test fail, because that consumer can no longer connect. The second observes
+//! the refusals the only way a client can: as a missing acknowledgement, because a denied publish
+//! is visible in the server log alone.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, pull};
 use async_nats::jetstream::{self, stream};
+use ratatoskr_channel_digest_contracts::manifest_path;
 use ratatoskr_knowledge::test_support::recap::{
-    fixture_source, model_output, provider_response, seed_recap_run, seed_recap_run_variant,
+    fixture_manifest_bytes, fixture_source, seed_recap_run,
 };
-use ratatoskr_knowledge::test_support::{
-    FakeReply, FakeTransport, TemporaryBlobRoot, TestDatabase,
-};
+use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
-    BlobStore, ChannelRecapContextPolicy, ChannelRecapOutputLanguage, ChannelRecapPipeline,
-    ChannelRecapRunState, ChannelRecapRunStore, Config, DigestSourceSecret, IngestProviderMode,
-    ProviderResponse, ProviderSecret, ProviderUsage, ScriptedProvider,
-    build_channel_recap_provider_request, prepare_channel_recap_context,
+    BlobStore, ChannelRecapProviderMode, ChannelRecapRunState, ChannelRecapRunStore, Config,
+    DigestSourceSecret, IngestProviderMode, ProviderSecret, RateLimiter,
 };
 use ratatoskr_knowledge_service::{
     EVENTS_STREAM, IngestFamily, Lifecycle, spawn_channel_recap_worker,
@@ -31,25 +31,19 @@ use ratatoskr_knowledge_service::{
 };
 use tokio::sync::watch;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::fixtures::{
+    ARCHIVE_ANALYSIS, ARTICLE_ANALYSIS, CAPTURED, CONTRACT_CONVERSATION, CONVERSATION_ADDED,
+    EVENT_A, EVENT_B, EVENT_C, EVENT_D, HttpStub, OWNER, REPOSITORY_ANALYSIS_ABSENT,
+    REPOSITORY_REQUESTED, SOCIAL_ANALYSIS, envelope, extracted_document, repository_request,
+    routed, social_payload,
+};
+use crate::ingest_support::{TestResult, eventually};
 
-const PORT: u16 = 57_063;
 const COMMANDS_STREAM: &str = "ratatoskr_commands";
 const RECAP_DURABLE: &str = "ratatoskr_knowledge_channel_recap";
 const RECAP_SUBJECT: &str = "cmd.knowledge.channel_digest_recap.requested.v1";
 const FOREIGN_DURABLE: &str = "ratatoskr_channel_digest_recap_completed";
 const PLACEHOLDER_PREFIX: &str = "UREPLACE_ME_WITH_THE_PUBLIC_NKEY_OF_RATATOSKR_KNOWLEDGE_";
-const OWNER: &str = "user:018f0000-0000-7000-8000-000000000005";
-const SOCIAL: &str = r#"{
-  "social_source_id":"018f0000-0000-7000-8000-000000000201",
-  "platform":"x", "external_post_id":"1234567890123456789",
-  "owner":"user:018f0000-0000-7000-8000-000000000005",
-  "captured_at":"2026-08-17T10:00:00Z", "text":"A useful post.",
-  "content_digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
-  "acquisition":"official_api", "saved_authority":"authoritative_platform_state",
-  "completeness":"complete", "upstream_availability":"available"
-}"#;
-const SOCIAL_ANALYSIS: &str = r#"{"summary":"Useful post.","topics":["rust"],"evidence_excerpt":"useful post","confidence":"grounded"}"#;
 
 /// Kills the broker when the test ends, passed or failed.
 struct Broker(Child);
@@ -84,8 +78,122 @@ fn knowledge_stanza(public_key: &str) -> Result<String, Box<dyn std::error::Erro
         .join("\n"))
 }
 
+/// A loopback port nothing listens on; the kernel picks it, so concurrent runs cannot collide.
+fn free_port() -> Result<u16, std::io::Error> {
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port())
+}
+
+/// An authorization-enabled broker with the Knowledge identity, its topology and an admin handle.
+struct Authorized {
+    _broker: Broker,
+    _directory: TemporaryBlobRoot,
+    url: String,
+    seed: PathBuf,
+    knowledge: nkeys::KeyPair,
+    admin: jetstream::Context,
+}
+
+impl Authorized {
+    async fn boot() -> Result<Self, Box<dyn std::error::Error>> {
+        let admin_key = nkeys::KeyPair::new_user();
+        let knowledge = nkeys::KeyPair::new_user();
+        let directory = TemporaryBlobRoot::create().await?;
+        let seed = directory.path().join("knowledge.nkey");
+        std::fs::write(&seed, knowledge.seed()?)?;
+        let port = free_port()?;
+        let broker = start_broker(
+            directory.path(),
+            port,
+            &admin_key.public_key(),
+            &knowledge_stanza(&knowledge.public_key())?,
+        )?;
+        let url = format!("nats://127.0.0.1:{port}");
+        let options = async_nats::ConnectOptions::with_nkey(admin_key.seed()?);
+        let mut connected = None;
+        for _ in 0..100 {
+            if let Ok(client) = options.clone().connect(&url).await {
+                connected = Some(client);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let admin = jetstream::new(connected.ok_or("the authorized broker did not start")?);
+        provision(&admin).await?;
+        Ok(Self {
+            _broker: broker,
+            _directory: directory,
+            url,
+            seed,
+            knowledge,
+            admin,
+        })
+    }
+
+    fn config(&self, digest_source: std::net::SocketAddr) -> Config {
+        let mut config = Config::default();
+        config.ingest.enabled = true;
+        config.ingest.bus_endpoint.clone_from(&self.url);
+        config.ingest.bus_credentials_file = Some(self.seed.clone());
+        config.ingest.provider_mode = IngestProviderMode::Fixture;
+        config.ingest.github_readme_service_secret =
+            Some(ProviderSecret::new("readme-secret".to_owned()));
+        config.channel_recap.enabled = true;
+        config.channel_recap.provider_mode = ChannelRecapProviderMode::Scripted;
+        config.channel_recap.bus_endpoint.clone_from(&self.url);
+        config.channel_recap.bus_credentials_file = Some(self.seed.clone());
+        config.channel_recap.digest_source_base_url = format!("http://{digest_source}/");
+        config.channel_recap.digest_source_service_secret =
+            Some(DigestSourceSecret::new("digest-secret".to_owned()));
+        config.limits.provider_timeout_ms = 5_000;
+        config
+    }
+
+    /// Unacknowledged, undelivered and delivered counts of one durable.
+    async fn durable(
+        &self,
+        stream_name: &str,
+        durable: &str,
+    ) -> Result<(usize, u64, u64), Box<dyn std::error::Error>> {
+        let mut consumer: PullConsumer = self
+            .admin
+            .get_consumer_from_stream(durable, stream_name)
+            .await?;
+        let info = consumer.info().await?;
+        Ok((
+            info.num_ack_pending,
+            info.num_pending,
+            info.delivered.consumer_sequence,
+        ))
+    }
+
+    /// How many messages `subject` holds on the events stream.
+    async fn messages_on(&self, subject: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        let events = self.admin.get_stream(EVENTS_STREAM).await?;
+        let mut consumer = events
+            .create_consumer(pull::Config {
+                filter_subject: subject.to_owned(),
+                ack_policy: AckPolicy::None,
+                deliver_policy: DeliverPolicy::All,
+                ..pull::Config::default()
+            })
+            .await?;
+        Ok(usize::try_from(consumer.info().await?.num_pending)?)
+    }
+
+    async fn publish(&self, subject: &str, bytes: Vec<u8>) -> TestResult {
+        self.admin
+            .publish(subject.to_owned(), bytes.into())
+            .await?
+            .await?;
+        Ok(())
+    }
+}
+
 fn start_broker(
     directory: &Path,
+    port: u16,
     admin_public: &str,
     stanza: &str,
 ) -> Result<Broker, Box<dyn std::error::Error>> {
@@ -93,7 +201,7 @@ fn start_broker(
     std::fs::write(
         &configuration,
         format!(
-            "port: {PORT}\nhost: 127.0.0.1\nserver_name: ratatoskr_test\n\
+            "port: {port}\nhost: 127.0.0.1\nserver_name: ratatoskr_test\n\
              jetstream {{ store_dir: \"{}\" }}\n\
              authorization {{\n  users: [\n    {{ nkey: {admin_public}, permissions: {{ publish: \">\", subscribe: \">\" }} }},\n{stanza}\n  ]\n}}\n",
             directory.join("store").display()
@@ -109,23 +217,6 @@ fn start_broker(
             .stderr(Stdio::null())
             .spawn()?,
     ))
-}
-
-async fn eventually<F, Fut>(what: &str, mut check: F) -> TestResult
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<bool, Box<dyn std::error::Error>>>,
-{
-    let deadline = Instant::now() + Duration::from_secs(40);
-    loop {
-        if check().await.unwrap_or(false) {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            return Err(format!("timed out waiting for: {what}").into());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 /// Creates both streams and every durable the Knowledge identity may use, plus one it may not.
@@ -179,188 +270,234 @@ async fn provision(context: &jetstream::Context) -> TestResult {
     Ok(())
 }
 
-async fn messages_on(
-    context: &jetstream::Context,
-    subject: &str,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let events = context.get_stream(EVENTS_STREAM).await?;
-    let mut consumer = events
-        .create_consumer(pull::Config {
-            filter_subject: subject.to_owned(),
-            ack_policy: AckPolicy::None,
-            deliver_policy: DeliverPolicy::All,
-            ..pull::Config::default()
-        })
-        .await?;
-    Ok(usize::try_from(consumer.info().await?.num_pending)?)
-}
-
-fn knowledge_config(seed: &Path, digest_source: std::net::SocketAddr) -> Config {
-    let url = format!("nats://127.0.0.1:{PORT}");
-    let mut config = Config::default();
-    config.ingest.enabled = true;
-    config.ingest.bus_endpoint.clone_from(&url);
-    config.ingest.bus_credentials_file = Some(seed.to_path_buf());
-    config.ingest.provider_mode = IngestProviderMode::Fixture;
-    config.ingest.github_readme_service_secret =
-        Some(ProviderSecret::new("readme-secret".to_owned()));
-    config.channel_recap.enabled = true;
-    config.channel_recap.bus_endpoint = url;
-    config.channel_recap.bus_credentials_file = Some(seed.to_path_buf());
-    config.channel_recap.digest_source_base_url = format!("http://{digest_source}/");
-    config.channel_recap.digest_source_service_secret =
-        Some(DigestSourceSecret::new("digest-secret".to_owned()));
-    config.limits.provider_timeout_ms = 5_000;
-    config
-}
-
-#[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one scenario proves every permitted and refused operation under one identity"
-)]
-async fn knowledge_workers_run_under_the_pinned_identity_and_nothing_more() -> TestResult {
-    let admin = nkeys::KeyPair::new_user();
-    let knowledge = nkeys::KeyPair::new_user();
-    let directory = TemporaryBlobRoot::create().await?;
-    let seed = directory.path().join("knowledge.nkey");
-    std::fs::write(&seed, knowledge.seed()?)?;
-    let _broker = start_broker(
-        directory.path(),
-        &admin.public_key(),
-        &knowledge_stanza(&knowledge.public_key())?,
-    )?;
-    let url = format!("nats://127.0.0.1:{PORT}");
-    let admin_client = {
-        let options = async_nats::ConnectOptions::with_nkey(admin.seed()?);
-        let mut connected = None;
-        for _ in 0..100 {
-            if let Ok(client) = options.clone().connect(&url).await {
-                connected = Some(client);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        connected.ok_or("the authorized broker did not start")?
-    };
-    let admin_context = jetstream::new(admin_client);
-    provision(&admin_context).await?;
-
-    // Two terminal recap facts waiting in the outbox, one completed and one failed.
-    let database = TestDatabase::create().await?;
-    let blobs_root = TemporaryBlobRoot::create().await?;
-    let blobs = BlobStore::new(blobs_root.path(), 1_048_576);
-    let runs = ChannelRecapRunStore::new(&database.database);
-    let failed_recap = seed_recap_run(
+/// A recap run that failed before the workers start, so a failed fact waits in the outbox.
+async fn seed_failed_recap(database: &TestDatabase) -> TestResult {
+    let failed = seed_recap_run(
         &database.database,
         vec![fixture_source(900, 1, "authorized bus fixture")],
         "en",
     )
     .await?;
-    runs.settle_failed(
-        failed_recap.run_id,
-        ChannelRecapRunState::ContextPrepared,
-        &serde_json::from_value(serde_json::json!({
-            "owner": failed_recap.request.owner,
-            "operation_id": failed_recap.request.operation_id,
-            "digest_run_id": failed_recap.request.digest_run_id,
-            "manifest_digest": failed_recap.request.manifest_digest,
-            "failure_code": "provider_unavailable",
-            "failed_at": "2026-08-21T10:01:00Z",
-        }))?,
-    )
-    .await?;
-    complete_a_recap(&database, &blobs).await?;
+    ChannelRecapRunStore::new(&database.database)
+        .settle_failed(
+            failed.run_id,
+            ChannelRecapRunState::ContextPrepared,
+            &serde_json::from_value(serde_json::json!({
+                "owner": failed.request.owner,
+                "operation_id": failed.request.operation_id,
+                "digest_run_id": failed.request.digest_run_id,
+                "manifest_digest": failed.request.manifest_digest,
+                "failure_code": "provider_unavailable",
+                "failed_at": "2026-08-21T10:01:00Z",
+            }))?,
+        )
+        .await?;
+    Ok(())
+}
 
-    let digest_source = FakeTransport::start(
-        std::iter::repeat_with(|| FakeReply::bytes(200, Vec::new()))
-            .take(64)
-            .collect(),
-    )
+/// A valid recap command and the digest-source route that serves its manifest.
+struct RecapCommand {
+    command: Vec<u8>,
+    manifest_path: String,
+    manifest: Vec<u8>,
+}
+
+fn recap_command() -> Result<RecapCommand, Box<dyn std::error::Error>> {
+    let (manifest, request) = fixture_manifest_bytes(
+        vec![fixture_source(901, 2, "authorized bus recap fixture")],
+        "en",
+        1,
+    )?;
+    let command = serde_json::to_vec(&serde_json::json!({
+        "command_id": "018f0000-0000-7000-8000-000000000c51",
+        "command_type": "knowledge.channel_digest_recap.requested.v1",
+        "issued_at": "2026-08-21T10:00:01Z",
+        "producer": "ratatoskr-channel-digests",
+        "aggregate_id": format!("channel-digest-run:{}", request.digest_run_id),
+        "correlation_id": format!("operation:{}", request.operation_id.0),
+        "tenant_id": request.owner,
+        "schema_version": 1,
+        "payload": request,
+    }))?;
+    Ok(RecapCommand {
+        command,
+        manifest_path: manifest_path(&request.manifest_ref),
+        manifest,
+    })
+}
+
+/// One valid message for each of the five durables.
+async fn publish_one_valid_message_per_durable(
+    fabric: &Authorized,
+    recap_command: Vec<u8>,
+) -> TestResult {
+    fabric.publish(RECAP_SUBJECT, recap_command).await?;
+    fabric
+        .publish(
+            "evt.content.document.extracted.v1",
+            envelope(
+                EVENT_A,
+                "content.document.extracted.v1",
+                "ratatoskr-extractor",
+                Some(OWNER),
+                &extracted_document()?,
+            ),
+        )
+        .await?;
+    fabric
+        .publish(
+            "evt.social.source.captured.v1",
+            envelope(
+                EVENT_B,
+                CAPTURED,
+                "ratatoskr-x",
+                Some(OWNER),
+                &social_payload("2026-08-17T10:00:00Z")?,
+            ),
+        )
+        .await?;
+    fabric
+        .publish(
+            "evt.ai_archive.conversation.added.v1",
+            envelope(
+                EVENT_C,
+                CONVERSATION_ADDED,
+                "ratatoskr-chatgpt",
+                Some(OWNER),
+                &serde_json::from_str(CONTRACT_CONVERSATION)?,
+            ),
+        )
+        .await?;
+    fabric
+        .publish(
+            "evt.knowledge.repository_analysis.requested.v1",
+            envelope(
+                EVENT_D,
+                REPOSITORY_REQUESTED,
+                "ratatoskr-github",
+                Some(OWNER),
+                &serde_json::to_value(repository_request(OWNER, None)?)?,
+            ),
+        )
+        .await
+}
+
+/// Every durable fetched exactly one message and holds none open.
+async fn assert_every_durable_consumed_and_acknowledged(fabric: &Authorized) -> TestResult {
+    let mut durables = vec![(COMMANDS_STREAM, RECAP_DURABLE)];
+    durables.extend(
+        IngestFamily::ALL
+            .into_iter()
+            .map(|family| (EVENTS_STREAM, family.durable())),
+    );
+    for (stream_name, durable) in durables {
+        eventually(
+            &format!("{durable} is consumed and acknowledged"),
+            || async { Ok(fabric.durable(stream_name, durable).await? == (0, 0, 1)) },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_knowledge_consumer_runs_and_acknowledges_under_the_pinned_identity() -> TestResult {
+    let fabric = Authorized::boot().await?;
+    let database = TestDatabase::create().await?;
+    seed_failed_recap(&database).await?;
+    let blobs_root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(blobs_root.path(), 1_048_576);
+    let recap = recap_command()?;
+    let digest_source = HttpStub::start(vec![
+        ("/ready".to_owned(), 200, Vec::new()),
+        (recap.manifest_path.clone(), 200, recap.manifest.clone()),
+    ])
     .await?;
-    let config = knowledge_config(&seed, digest_source.local_addr());
-    let recap_lifecycle = Lifecycle::starting_with_channel_recap();
-    let ingest_lifecycle = Lifecycle::starting_with_ingest();
+
+    let config = fabric.config(digest_source.address());
+    let lifecycle = Lifecycle::starting_with_channel_recap();
+    lifecycle.require_ingest();
+    lifecycle.mark_ready();
     let (drain, receiver) = watch::channel(false);
     let recap_worker = spawn_channel_recap_worker(
         config.clone(),
         database.database.clone(),
         blobs.clone(),
-        recap_lifecycle,
+        lifecycle.clone(),
         receiver.clone(),
+        Arc::new(RateLimiter::new(Duration::ZERO)),
     );
     let ingest_worker = spawn_ingest_workers_with_provider(
         config,
         database.database.clone(),
         blobs,
-        ingest_lifecycle,
+        lifecycle.clone(),
         receiver,
-        Arc::new(ScriptedProvider::new([Ok(ProviderResponse {
-            bytes: SOCIAL_ANALYSIS.as_bytes().to_vec(),
-            request_id: Some("scripted-authorized".to_owned()),
-            usage: ProviderUsage {
-                input_tokens: 20,
-                output_tokens: 10,
-            },
-        })])),
+        routed(&[
+            ("article_prompt_v1", ARTICLE_ANALYSIS),
+            ("social_prompt_v1", SOCIAL_ANALYSIS),
+            ("archive_prompt_v1", ARCHIVE_ANALYSIS),
+            ("repository_prompt_v1", REPOSITORY_ANALYSIS_ABSENT),
+        ]),
     );
+    eventually("both workers report ready under the identity", || async {
+        Ok(lifecycle.is_ready())
+    })
+    .await?;
 
-    // The recap path: the consumer fetches and acknowledges a command (a malformed one is
-    // terminated), and the outbox publisher then publishes both terminal facts.
-    admin_context
-        .publish(RECAP_SUBJECT.to_owned(), b"not a command".to_vec().into())
-        .await?
-        .await?;
-    // The ingest path: a social capture is consumed, analysed and its completion published.
-    let source: serde_json::Value = serde_json::from_str(SOCIAL)?;
-    admin_context
-        .publish(
-            "evt.social.source.captured.v1".to_owned(),
-            serde_json::to_vec(&serde_json::json!({
-                "event_id": "018f0000-0000-7000-8000-000000000c01",
-                "event_type": "social.source.captured.v1",
-                "occurred_at": "2026-08-27T06:00:00Z",
-                "producer": "ratatoskr-x",
-                "aggregate_id": "social_source:018f0000-0000-7000-8000-000000000201",
-                "correlation_id": "operation:018f0000-0000-7000-8000-000000000c02",
-                "tenant_id": OWNER,
-                "schema_version": 1,
-                "payload": {"source": source},
-            }))?
-            .into(),
-        )
-        .await?
-        .await?;
-
+    publish_one_valid_message_per_durable(&fabric, recap.command).await?;
+    assert_every_durable_consumed_and_acknowledged(&fabric).await?;
     for subject in [
         "evt.knowledge.channel_digest_recap.completed.v1",
         "evt.knowledge.channel_digest_recap.failed.v1",
         "evt.knowledge.analysis.completed.v1",
+        "evt.knowledge.ai_archive_analysis.completed.v1",
+        "evt.knowledge.repository_analysis.completed.v1",
     ] {
         eventually(subject, || async {
-            Ok(messages_on(&admin_context, subject).await? == 1)
+            Ok(fabric.messages_on(subject).await? == 1)
         })
         .await?;
     }
     let documents: i64 = sqlx::query_scalar("select count(*) from knowledge.search_documents")
         .fetch_one(database.database.pool())
         .await?;
-    assert_eq!(documents, 1, "the ingest consumer analysed the capture");
-    let mut recap_consumer: PullConsumer = admin_context
-        .get_consumer_from_stream(RECAP_DURABLE, COMMANDS_STREAM)
-        .await?;
-    let recap_info = recap_consumer.info().await?;
     assert_eq!(
-        (recap_info.num_ack_pending, recap_info.num_pending),
-        (0, 0),
-        "the command was fetched and acknowledged"
+        documents, 4,
+        "the document, social, archive and repository analyses are all searchable"
+    );
+    assert_eq!(
+        digest_source.hits(&recap.manifest_path),
+        1,
+        "the recap manifest was fetched once"
+    );
+    assert!(
+        lifecycle.is_ready(),
+        "the process is still ready after it served every durable"
     );
 
-    // Refusals, as the Knowledge identity itself.
-    let own_client = async_nats::ConnectOptions::with_nkey(knowledge.seed()?)
-        .connect(&url)
-        .await?;
-    let own = jetstream::new(own_client);
+    let _ignored = drain.send(true);
+    tokio::time::timeout(Duration::from_secs(10), recap_worker).await??;
+    tokio::time::timeout(Duration::from_secs(10), ingest_worker).await??;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_knowledge_identity_cannot_publish_or_inspect_outside_its_allowlist() -> TestResult {
+    let fabric = Authorized::boot().await?;
+    let own = jetstream::new(
+        async_nats::ConnectOptions::with_nkey(fabric.knowledge.seed()?)
+            .connect(&fabric.url)
+            .await?,
+    );
+    // Control: the identity does reach its own durable, so the refusals below are the ACL's.
+    own.get_consumer_from_stream::<pull::Config, _, _>(
+        IngestFamily::Documents.durable(),
+        EVENTS_STREAM,
+    )
+    .await?;
+
     let denied_publish = tokio::time::timeout(Duration::from_secs(3), async {
         own.publish(
             "evt.platform.notification.raised.v1".to_owned(),
@@ -375,7 +512,9 @@ async fn knowledge_workers_run_under_the_pinned_identity_and_nothing_more() -> T
         "a publish outside the Knowledge allowlist must not be acknowledged"
     );
     assert_eq!(
-        messages_on(&admin_context, "evt.platform.notification.raised.v1").await?,
+        fabric
+            .messages_on("evt.platform.notification.raised.v1")
+            .await?,
         0,
         "the refused message never reached the stream"
     );
@@ -388,46 +527,5 @@ async fn knowledge_workers_run_under_the_pinned_identity_and_nothing_more() -> T
         !matches!(denied_inspection, Ok(Ok(_))),
         "another service's durable must not be inspectable"
     );
-
-    let _ignored = drain.send(true);
-    tokio::time::timeout(Duration::from_secs(10), recap_worker).await??;
-    tokio::time::timeout(Duration::from_secs(10), ingest_worker).await??;
-    database.cleanup().await?;
-    Ok(())
-}
-
-/// A second recap run, executed to completion, so a completed fact waits in the outbox.
-async fn complete_a_recap(
-    database: &TestDatabase,
-    blobs: &BlobStore,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let seeded = seed_recap_run_variant(
-        &database.database,
-        vec![fixture_source(901, 2, "authorized bus second fixture")],
-        "en",
-        1,
-    )
-    .await?;
-    let context = prepare_channel_recap_context(
-        &seeded.verified,
-        ChannelRecapContextPolicy {
-            max_sources: 100,
-            max_channels: 20,
-            max_characters: 100_000,
-        },
-    )?;
-    let provider = ScriptedProvider::new([Ok(provider_response(
-        &model_output(&context, &[]),
-        "scripted-authorized-recap",
-    )?)]);
-    ChannelRecapPipeline::new(&database.database, &provider, blobs, Duration::from_secs(5))
-        .execute(
-            seeded.run_id,
-            build_channel_recap_provider_request(&context, ChannelRecapOutputLanguage::En, 2_048)?,
-            &context,
-            &seeded.verified.digest_hex,
-            ChannelRecapOutputLanguage::En,
-        )
-        .await?;
     Ok(())
 }

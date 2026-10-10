@@ -18,13 +18,29 @@ pub(crate) type ControlledOpenRouter = ControlledProvider<OpenRouterProvider>;
 #[error("the inference provider could not be constructed")]
 pub struct ProviderRuntimeError;
 
+/// Builds the process-wide limiter that spaces every inference request.
+///
+/// The recap and ingest workers share the one limiter, so `provider_requests_per_minute` bounds
+/// the process, not each worker.
+///
+/// # Errors
+///
+/// Returns [`ProviderRuntimeError`] when the configured rate does not divide a minute.
+pub fn inference_limiter(config: &Config) -> Result<Arc<RateLimiter>, ProviderRuntimeError> {
+    let spacing =
+        Duration::try_from_secs_f64(60.0 / f64::from(config.limits.provider_requests_per_minute))
+            .map_err(|_| ProviderRuntimeError)?;
+    Ok(Arc::new(RateLimiter::new(spacing)))
+}
+
 /// Builds the controlled `OpenRouter` provider from the process configuration.
 ///
-/// One construction serves every worker, so the rate limiter, the spend ledger and the call
-/// bounds are the same wherever a model is called.
+/// The caller passes the one process-wide `limiter`; the spend ledger and the call bounds are
+/// the same wherever a model is called.
 pub(crate) fn openrouter_provider(
     config: &Config,
     database: &Database,
+    limiter: Arc<RateLimiter>,
 ) -> Result<Box<ControlledOpenRouter>, ProviderRuntimeError> {
     let configured = config
         .provider
@@ -43,12 +59,9 @@ pub(crate) fn openrouter_provider(
         retry: RetryPolicy::new(3, 200, 2_000),
     })
     .map_err(|_| ProviderRuntimeError)?;
-    let spacing =
-        Duration::try_from_secs_f64(60.0 / f64::from(config.limits.provider_requests_per_minute))
-            .map_err(|_| ProviderRuntimeError)?;
     Ok(Box::new(ControlledProvider::new(
         inner,
-        Arc::new(RateLimiter::new(spacing)),
+        limiter,
         BudgetLedger::new(database.pool().clone()),
         SpendControls {
             limits: BudgetLimits {
@@ -81,11 +94,15 @@ impl IngestProvider {
     /// # Errors
     ///
     /// Returns [`ProviderRuntimeError`] when the selected provider is not configured.
-    pub fn from_config(config: &Config, database: &Database) -> Result<Self, ProviderRuntimeError> {
+    pub fn from_config(
+        config: &Config,
+        database: &Database,
+        limiter: Arc<RateLimiter>,
+    ) -> Result<Self, ProviderRuntimeError> {
         match config.ingest.provider_mode {
             IngestProviderMode::Fixture => Ok(Self::Fixture(ExtractiveArticleProvider)),
             IngestProviderMode::OpenRouter => {
-                openrouter_provider(config, database).map(Self::OpenRouter)
+                openrouter_provider(config, database, limiter).map(Self::OpenRouter)
             }
         }
     }

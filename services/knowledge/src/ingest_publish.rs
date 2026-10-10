@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use async_nats::jetstream;
-use ratatoskr_event_envelope::EventEnvelope;
+use ratatoskr_event_envelope::{EnvelopeSchemaVersion, EventEnvelope};
 use ratatoskr_knowledge::{Database, EventOutbox, OutboxRow};
 
 const PRODUCER: &str = "ratatoskr-knowledge";
@@ -42,7 +42,7 @@ fn envelope_for(row: &OutboxRow) -> Result<EventEnvelope, PublishFailure> {
         "aggregate_id": row.aggregate_id,
         "correlation_id": row.correlation_id,
         "tenant_id": row.tenant,
-        "schema_version": 1,
+        "schema_version": EnvelopeSchemaVersion::CURRENT,
         "payload": row.payload,
     });
     if let (Some(causation), Some(object)) = (&row.causation_id, value.as_object_mut()) {

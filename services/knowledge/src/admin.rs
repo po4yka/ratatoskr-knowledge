@@ -93,7 +93,10 @@ impl Lifecycle {
         self.state.fetch_or(DRAINING, Ordering::AcqRel);
     }
 
-    fn is_ready(&self) -> bool {
+    /// Whether `/ready` would report ready: storage is up, no drain has begun, and every required
+    /// worker is ready.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
         state & STORAGE_READY != 0
             && state & DRAINING == 0

@@ -57,7 +57,11 @@ async fn wait_for_broker(url: &str) -> TestResult {
 /// reconnected and verified their durables.
 #[tokio::test]
 async fn broker_outage_flips_readiness_false_and_recovers() -> TestResult {
-    let port = 57_062_u16;
+    // The kernel picks the port; the broker restarts on the same one, so it is reserved only
+    // for the instant it takes to start the first broker.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
     let url = format!("nats://127.0.0.1:{port}");
     let store = TemporaryBlobRoot::create().await?;
     let mut broker = spawn_broker(port, store.path())?;

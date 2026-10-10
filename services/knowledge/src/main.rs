@@ -14,8 +14,8 @@ use ratatoskr_knowledge::{
     collect_pending_blobs, init_telemetry,
 };
 use ratatoskr_knowledge_service::{
-    HybridSearchRetriever, Lifecycle, Metrics, admin_router, spawn_channel_recap_worker,
-    spawn_ingest_workers,
+    HybridSearchRetriever, Lifecycle, Metrics, admin_router, inference_limiter,
+    spawn_channel_recap_worker, spawn_ingest_workers,
 };
 use tokio::sync::watch;
 
@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(Metrics::new());
     let (drain_tx, drain_rx) = watch::channel(false);
     let worker_failed = Arc::new(AtomicBool::new(false));
+    let limiter = inference_limiter(&config)?;
     let recap_worker = config.channel_recap.enabled.then(|| {
         watch_worker(
             spawn_channel_recap_worker(
@@ -52,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 blobs.clone(),
                 lifecycle.clone(),
                 drain_rx.clone(),
+                Arc::clone(&limiter),
             ),
             &drain_tx,
             &worker_failed,
@@ -65,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 blobs.clone(),
                 lifecycle.clone(),
                 drain_rx.clone(),
+                limiter,
             ),
             &drain_tx,
             &worker_failed,

@@ -1,5 +1,6 @@
 //! Supervised `JetStream` intake and durable channel-recap execution.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream;
@@ -15,7 +16,7 @@ use ratatoskr_knowledge::{
     ChannelRecapInbox, ChannelRecapOutputLanguage, ChannelRecapPipeline, ChannelRecapProviderMode,
     ChannelRecapRunState, ChannelRecapRunStore, Config, Database, DigestManifestAttemptOutcome,
     DigestSourceClient, DigestSourceClientSettings, LlmProvider, PreparedChannelRecapContext,
-    ProviderResponse, ProviderUsage, ScriptedProvider, VerifiedDigestManifest,
+    ProviderResponse, ProviderUsage, RateLimiter, ScriptedProvider, VerifiedDigestManifest,
     attempt_digest_manifest, build_channel_recap_provider_request, prepare_channel_recap_context,
 };
 use tokio::sync::watch;
@@ -52,6 +53,8 @@ enum Disposition {
 }
 
 /// Spawns one owned recap supervisor. The caller must signal and join the returned handle.
+///
+/// `limiter` is the process-wide inference limiter, shared with the ingest worker.
 #[must_use]
 pub fn spawn_channel_recap_worker(
     config: Config,
@@ -59,9 +62,10 @@ pub fn spawn_channel_recap_worker(
     blobs: BlobStore,
     lifecycle: Lifecycle,
     drain: watch::Receiver<bool>,
+    limiter: Arc<RateLimiter>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        supervise(config, database, blobs, lifecycle, drain).await;
+        supervise(config, database, blobs, lifecycle, drain, limiter).await;
     })
 }
 
@@ -71,8 +75,9 @@ async fn supervise(
     blobs: BlobStore,
     lifecycle: Lifecycle,
     mut drain: watch::Receiver<bool>,
+    limiter: Arc<RateLimiter>,
 ) {
-    let provider = match runtime_provider(&config, &database) {
+    let provider = match runtime_provider(&config, &database, limiter) {
         Ok(provider) => provider,
         Err(error) => {
             tracing::error!(class = "provider_configuration", %error);
@@ -344,11 +349,12 @@ enum RuntimeProvider {
 fn runtime_provider(
     config: &Config,
     database: &Database,
+    limiter: Arc<RateLimiter>,
 ) -> Result<RuntimeProvider, ChannelRecapWorkerError> {
     if config.channel_recap.provider_mode == ChannelRecapProviderMode::Scripted {
         return Ok(RuntimeProvider::Scripted);
     }
-    openrouter_provider(config, database)
+    openrouter_provider(config, database, limiter)
         .map(RuntimeProvider::OpenRouter)
         .map_err(|_| ChannelRecapWorkerError::Work)
 }
