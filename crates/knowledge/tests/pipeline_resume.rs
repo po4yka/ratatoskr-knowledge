@@ -313,6 +313,95 @@ async fn a_stored_invalid_response_is_repaired_once() -> TestResult {
     Ok(())
 }
 
+/// A stop between storing a response and recording the state change leaves the run at
+/// `model_requested` with a newest attempt that already holds its response. The next execute
+/// finishes the run from that response without calling the provider.
+#[tokio::test]
+async fn a_response_stored_before_its_state_change_is_accepted_without_a_provider_call()
+-> TestResult {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    seed_stored_response(
+        &database,
+        &blobs,
+        run_id,
+        "model_requested",
+        "response_received",
+        VALID,
+    )
+    .await?;
+    let provider = ScriptedProvider::new([]);
+
+    let article = pipeline(&database, &provider, &blobs)
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(article.summary, "A grounded summary.");
+    assert_eq!(provider.call_count()?, 0);
+    assert_eq!(
+        run_summary(&database, run_id).await?,
+        ("persisted".to_owned(), 1, 1)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The same stop with a stored response that fails validation is repaired once, as an
+/// uninterrupted run would.
+#[tokio::test]
+async fn an_invalid_response_stored_before_its_state_change_is_repaired_once() -> TestResult {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    seed_stored_response(
+        &database,
+        &blobs,
+        run_id,
+        "model_requested",
+        "response_received",
+        INVALID,
+    )
+    .await?;
+    let provider = ScriptedProvider::new([Ok(valid_response("repair"))]);
+
+    pipeline(&database, &provider, &blobs)
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(provider.call_count()?, 1);
+    assert!(
+        provider.requests()?[0]
+            .task_instruction
+            .contains("Repair validation code: schema.")
+    );
+    let attempts: Vec<(String, String)> = sqlx::query_as(
+        "select reason, outcome from knowledge.analysis_attempts where run_id = $1 order by ordinal",
+    )
+    .bind(run_id)
+    .fetch_all(database.database.pool())
+    .await?;
+    assert_eq!(
+        attempts,
+        [
+            ("initial".to_owned(), "invalid".to_owned()),
+            ("repair".to_owned(), "accepted".to_owned())
+        ]
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// An executor that finds the run held by another one reports a conflict, which a later delivery
 /// can overcome, and touches neither the provider nor the run.
 #[tokio::test]

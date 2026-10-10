@@ -12,7 +12,9 @@
 //!   recorded as interrupted and the next call continues the run, and a run whose calls were
 //!   abandoned twice is failed rather than tried a third time;
 //! - a run at `response_received` or `schema_validated` has its raw response on disk: that
-//!   response is validated again and the provider is not called for it.
+//!   response is validated again and the provider is not called for it, and so is a run still at
+//!   `model_requested` whose newest attempt already holds its response (a stop between the two
+//!   writes that follow an answer).
 //!
 //! Each drive makes at most two provider calls: the first, and one retry after a transient
 //! failure or one repair after invalid output.
@@ -191,6 +193,18 @@ impl<P: LlmProvider> RunDriver<'_, P> {
         }
         if snapshot.state == "failed" {
             self.reopen(run_id, &snapshot).await?;
+            snapshot = self.snapshot(run_id).await?;
+        }
+        if snapshot.state == "model_requested"
+            && snapshot
+                .newest
+                .as_ref()
+                .is_some_and(|newest| newest.outcome == "response_received")
+        {
+            // A stop between storing the response and recording the state change: the response is
+            // durable, so the run catches up to it instead of asking the provider again.
+            self.transition(run_id, RunState::ModelRequested, RunState::ResponseReceived)
+                .await?;
             snapshot = self.snapshot(run_id).await?;
         }
         let mut reason = match snapshot.state.as_str() {
