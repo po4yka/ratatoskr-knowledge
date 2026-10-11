@@ -25,5 +25,5 @@
 
 ## 6. Operator example and documentation (R2-10)
 
-- [ ] 6.1 RED: add `services/knowledge/tests/deployment_profile.rs::the_shipped_example_enables_ingest_recap_and_both_listeners`; run it and confirm the example file is absent.
-- [ ] 6.2 GREEN: write `deploy/systemd/knowledge.conf.example`, the `deploy/README.md` section, and refresh `README.md` and `DEVELOPMENT.md`. Documentation and a shipped example cannot start from a failing implementation test; the loader test in 6.1 is the check.
+- [x] 6.1 RED: add `services/knowledge/tests/deployment_profile.rs::the_shipped_example_enables_ingest_recap_and_both_listeners`; run it and confirm the example file is absent.
+- [x] 6.2 GREEN: write `deploy/systemd/knowledge.conf.example`, the `deploy/README.md` section, and refresh `README.md` and `DEVELOPMENT.md`. Documentation and a shipped example cannot start from a failing implementation test; the loader test in 6.1 is the check.

@@ -356,11 +356,13 @@ cargo run --locked -p ratatoskr-knowledge-service -- reindex-embeddings [--tenan
 
 Knowledge does not fetch web pages, run Chromium, synchronize provider accounts, execute Git, own
 source records, accept public analysis requests, or expose retrieval anywhere but the loopback API
-listener's `/internal/search` (default `127.0.0.1:8091`, never the operator listener). It does accept the internal, contract-bound repository-analysis request
-and keeps its pending/result linkage in PostgreSQL; the separate worker that performs that family is
-still planned. Real `OpenRouter` inference is implemented through the library adapter and manual
-smoke example; wiring embeddings, hybrid ranking, more analysis families, and legacy import remain
-separate planned changes.
+listener's `/internal/search` (default `127.0.0.1:8091`, never the operator listener). It accepts
+the internal, contract-bound repository-analysis request on the ingest worker's
+`ratatoskr_knowledge_repository_requests` durable, analyses the repository README it fetches from
+GitHub's loopback byte endpoint, and publishes the completion or failure fact through the
+transactional outbox; the worker is dormant unless `RATATOSKR__INGEST__ENABLED=true`. Real `OpenRouter`
+inference is implemented through the library adapter and the manual smoke example; legacy import
+remains a separate planned change.
 
 ## Workspace integration
 

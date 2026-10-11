@@ -1,0 +1,44 @@
+# /etc/ratatoskr/knowledge.conf — root:ratatoskr-knowledge 0640, read by systemd as an
+# EnvironmentFile and handed to a process running as `ratatoskr-knowledge`.
+#
+# Every secret below is the placeholder CHANGE-ME; replace each one before starting the unit.
+# `services/knowledge/tests/deployment_profile.rs` loads this file through the service's own
+# configuration loader, so a renamed key or a flow that stops being enabled fails the gate.
+
+# Listeners. The API listener is where Edge routes `/v1/k` and where Platform's library client
+# calls; the operator listener serves /live, /ready, /metrics and /version and is host only.
+RATATOSKR__API__LISTEN_ADDRESS=127.0.0.1:8091
+RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9081
+
+# Storage. Raw model responses and source snapshots live under the blob root.
+RATATOSKR__STORAGE__DATABASE_URL=postgres://ratatoskr_knowledge:CHANGE-ME@127.0.0.1:5432/ratatoskr
+RATATOSKR__STORAGE__BLOB_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-knowledge
+
+# Inference. Both flows below use the openrouter provider, which needs this key and model.
+RATATOSKR__PROVIDER__OPENROUTER__API_KEY=CHANGE-ME
+RATATOSKR__PROVIDER__OPENROUTER__MODEL=openai/gpt-oss-20b
+
+# Ingest is DORMANT unless this is true: with it unset, documents, social facts, AI-archive facts
+# and repository requests are never consumed and nothing is analysed. This example enables it.
+# One seed serves the ingest and the channel recap workers; the broker identity is
+# `deploy/nats/identity.conf`.
+RATATOSKR__INGEST__ENABLED=true
+RATATOSKR__INGEST__PROVIDER_MODE=openrouter
+RATATOSKR__INGEST__BUS_ENDPOINT=nats://127.0.0.1:4222
+RATATOSKR__INGEST__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+# GitHub's loopback README byte endpoint and the credential it expects.
+RATATOSKR__INGEST__GITHUB_README_BASE_URL=http://127.0.0.1:8092/
+RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET=CHANGE-ME
+
+# The channel recap is DORMANT unless this is true. This example enables it with the openrouter
+# provider: the default, because the scripted provider answers every request with fixed text.
+RATATOSKR__CHANNEL_RECAP__ENABLED=true
+RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE=openrouter
+RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT=nats://127.0.0.1:4222
+RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+# The channel-digests API that serves manifests, and the credential Knowledge presents to it.
+RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL=http://127.0.0.1:8098/
+RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET=CHANGE-ME
+# The credential channel-digests presents to read a finished recap from the API listener. Omit it
+# and `/internal/channel-digest-results/{analysis_id}` is not installed.
+RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET=CHANGE-ME

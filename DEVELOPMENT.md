@@ -68,6 +68,17 @@ default `127.0.0.1:9081`) and the API listener (`RATATOSKR__API__LISTEN_ADDRESS`
 `127.0.0.1:8091`). The result route above is on the API listener. A process test that starts the real
 binary must give each listener its own ephemeral port.
 
+The keys a deployment states because the flow is not enabled by default are in
+`deploy/systemd/knowledge.conf.example`: `RATATOSKR__API__LISTEN_ADDRESS`,
+`RATATOSKR__INGEST__ENABLED` (ingest is dormant unless it is `true`),
+`RATATOSKR__INGEST__BUS_CREDENTIALS_FILE`, `RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET`,
+`RATATOSKR__CHANNEL_RECAP__ENABLED`, `RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE` (default `openrouter`;
+`scripted` is accepted only with an anonymous loopback `nats://` broker),
+`RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE` and the digest-source and result-reader secrets.
+`services/knowledge/tests/deployment_profile.rs` loads the example through the production
+configuration loader, so it cannot drift from the code. The recap worker's `FETCH_BATCH` defaults to
+one and its redelivery is bounded (`min(2 s * 2^(delivered-1), 60 s)`).
+
 The route test uses an in-process router and disposable database; the boot test starts the real
 binary twice and verifies enabled/disabled routing plus bounded `SIGTERM` drain. No gate command
 uses a production credential or a real recap.
