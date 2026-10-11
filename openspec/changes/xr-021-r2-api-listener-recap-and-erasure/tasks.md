@@ -5,8 +5,8 @@
 
 ## 2. Recap provider default (R2-13)
 
-- [ ] 2.1 RED: add `channel_recap_defaults_to_openrouter_and_requires_a_key_when_enabled` and `scripted_mode_requires_a_loopback_nats_endpoint` to `crates/knowledge/tests/config.rs`; run them and confirm the default is `scripted` and there is no loopback rule.
-- [ ] 2.2 GREEN: change the default, extend `validate_channel_recap`, log the scripted mode at startup and set the explicit mode in every test that relied on the default.
+- [x] 2.1 RED: add `channel_recap_defaults_to_openrouter_and_requires_a_key_when_enabled` and `scripted_mode_requires_a_loopback_nats_endpoint` to `crates/knowledge/tests/config.rs`; run them and confirm the default is `scripted` and there is no loopback rule.
+- [x] 2.2 GREEN: change the default, extend `validate_channel_recap`, log the scripted mode at startup and set the explicit mode in every test that relied on the default.
 
 ## 3. Recap redelivery, batch size and progress (R2-05 c and d)
 

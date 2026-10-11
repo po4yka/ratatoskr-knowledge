@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::ProviderSecret;
 use crate::config_api::{ApiConfig, apply_api_entry, validate_listeners};
 use crate::config_ingest::{IngestConfig, apply_ingest_entry, validate_ingest};
+use crate::config_recap::{apply_channel_recap_entry, validate_channel_recap};
 use crate::result_reader_secret::ResultReaderSecret;
 
 const ENV_PREFIX: &str = "RATATOSKR__";
@@ -23,9 +24,9 @@ pub(crate) const EMBEDDING_STORAGE_DIMENSIONS: i32 = 1536;
 pub struct Config {
     /// Operator listener configuration.
     pub admin: AdminConfig,
-    /// Owned durable storage configuration.
     /// Domain API listener configuration.
     pub api: ApiConfig,
+    /// Owned durable storage configuration.
     pub storage: StorageConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
@@ -41,7 +42,8 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelRecapProviderMode {
-    /// Deterministic offline provider for fixtures and composed acceptance.
+    /// Fixed-text provider for fixtures and composed acceptance; accepted only with an anonymous
+    /// loopback `nats://` broker, because it answers every recap with the same synthetic text.
     Scripted,
     /// Configured controlled `OpenRouter` provider.
     OpenRouter,
@@ -305,11 +307,11 @@ fn apply_entry(
     if key.starts_with("RATATOSKR__INGEST__") {
         return apply_ingest_entry(&mut config.ingest, key, value);
     }
-    match key {
-        "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
     if key.starts_with("RATATOSKR__API__") {
         return apply_api_entry(&mut config.api, key, value);
     }
+    match key {
+        "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
             let address = value
                 .parse::<SocketAddr>()
                 .map_err(|_| ConfigError::new(key, "must be a socket address"))?;
@@ -809,7 +811,7 @@ impl Default for Config {
             },
             channel_recap: ChannelRecapConfig {
                 enabled: false,
-                provider_mode: ChannelRecapProviderMode::Scripted,
+                provider_mode: ChannelRecapProviderMode::OpenRouter,
                 digest_source_base_url: "http://127.0.0.1:8098/".to_owned(),
                 digest_source_service_secret: None,
                 result_reader_service_secret: None,

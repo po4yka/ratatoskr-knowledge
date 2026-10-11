@@ -16,7 +16,6 @@ mod channel_digest_recap_result;
 mod channel_digest_recap_store;
 mod chunking;
 mod config;
-mod config_ingest;
 mod config_api;
 mod context;
 mod controlled;

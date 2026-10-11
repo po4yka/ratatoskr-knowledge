@@ -511,3 +511,108 @@ fn api_listener_defaults_and_validation() -> Result<(), Box<dyn std::error::Erro
     }
     Ok(())
 }
+
+const RECAP_SECRET: (&str, &str) = (
+    "RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET",
+    "digest-LEAKME",
+);
+
+/// XR-021 CONTRACTS.md R2-13: an operator who only enables the recap must not serve scripted text.
+#[test]
+fn channel_recap_defaults_to_openrouter_and_requires_a_key_when_enabled()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        Config::default().channel_recap.provider_mode,
+        ratatoskr_knowledge::ChannelRecapProviderMode::OpenRouter
+    );
+
+    let diagnostic = match Config::from_environment([
+        ("RATATOSKR__CHANNEL_RECAP__ENABLED", "true"),
+        RECAP_SECRET,
+    ]) {
+        Ok(_) => return Err("an enabled recap without a provider key was accepted".into()),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        diagnostic.contains("RATATOSKR__PROVIDER__OPENROUTER__API_KEY"),
+        "{diagnostic} should name the provider key"
+    );
+    assert!(!diagnostic.contains("LEAKME"));
+
+    let accepted = Config::from_environment([
+        ("RATATOSKR__CHANNEL_RECAP__ENABLED", "true"),
+        RECAP_SECRET,
+        ("RATATOSKR__PROVIDER__OPENROUTER__API_KEY", "sk-or-LEAKME"),
+        (
+            "RATATOSKR__PROVIDER__OPENROUTER__MODEL",
+            "openai/gpt-oss-20b",
+        ),
+    ])?;
+    assert_eq!(
+        accepted.channel_recap.provider_mode,
+        ratatoskr_knowledge::ChannelRecapProviderMode::OpenRouter
+    );
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R2-13: scripted text is accepted only on an anonymous loopback broker.
+#[test]
+fn scripted_mode_requires_a_loopback_nats_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+    const MODE: &str = "RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE";
+    let seed_file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    let scripted = [
+        ("RATATOSKR__CHANNEL_RECAP__ENABLED", "true"),
+        (MODE, "scripted"),
+        RECAP_SECRET,
+    ];
+
+    for extra in [
+        vec![
+            (
+                "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+                "tls://nats.example.internal:4222",
+            ),
+            ("RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE", seed_file),
+        ],
+        vec![
+            (
+                "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+                "nats://127.0.0.1:4222",
+            ),
+            ("RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE", seed_file),
+        ],
+    ] {
+        let mut entries = scripted.to_vec();
+        entries.extend(extra);
+        let diagnostic = match Config::from_environment(entries) {
+            Ok(_) => {
+                return Err("scripted recap off an anonymous loopback broker was accepted".into());
+            }
+            Err(error) => error.to_string(),
+        };
+        assert!(diagnostic.contains(MODE), "{diagnostic} should name {MODE}");
+        assert!(!diagnostic.contains("LEAKME"));
+    }
+
+    let mut loopback = scripted.to_vec();
+    loopback.push((
+        "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+        "nats://127.0.0.1:4222",
+    ));
+    let accepted = Config::from_environment(loopback)?;
+    assert_eq!(
+        accepted.channel_recap.provider_mode,
+        ratatoskr_knowledge::ChannelRecapProviderMode::Scripted
+    );
+
+    // The rule only binds an enabled recap, like every other recap rule.
+    let dormant = Config::from_environment([
+        (MODE, "scripted"),
+        (
+            "RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT",
+            "tls://nats.example.internal:4222",
+        ),
+    ])?;
+    assert!(!dormant.channel_recap.enabled);
+    Ok(())
+}
