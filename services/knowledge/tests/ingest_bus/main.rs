@@ -6,6 +6,8 @@
 
 #[path = "../ingest_support/mod.rs"]
 mod ingest_support;
+#[path = "../log_capture/mod.rs"]
+mod log_capture;
 
 mod authorized;
 mod fixtures;
@@ -14,3 +16,4 @@ mod lifecycle;
 mod repository;
 mod resume;
 mod tenant;
+mod tombstone;

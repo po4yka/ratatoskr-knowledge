@@ -15,10 +15,10 @@ use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
 use ratatoskr_github_contracts::{AnalysisFailureCode, RepositoryAnalysisRequested};
 use ratatoskr_identifiers::{EntityRef, Extensions, TenantRef, WireTimestamp};
 use ratatoskr_knowledge::{
-    ArchiveEventAdmission, ArchiveEventConsumer, DocumentIntake, DocumentIntakeError, EventCause,
-    EventOutbox, FamilyPipeline, FamilyPipelineError, LlmProvider, OutboxFact, OutboxSubject,
-    RepositoryAnalysisConsumer, RepositoryReadmeError, SourceInbox, SourceInboxAdmission,
-    collect_pending_blobs,
+    ArchiveEventAdmission, ArchiveEventConsumer, ArchiveEventError, DocumentIntake,
+    DocumentIntakeError, EventCause, EventOutbox, FamilyPipeline, FamilyPipelineError, LlmProvider,
+    OutboxFact, OutboxSubject, RepositoryAnalysisConsumer, RepositoryReadmeError, SourceInbox,
+    SourceInboxAdmission, SourceInboxError, collect_pending_blobs,
 };
 use ratatoskr_social_contracts::{
     SocialSourceAnalysisCompleted, SocialSourceCaptured, SocialSourceRemoved, SocialSourceSnapshot,
@@ -223,39 +223,53 @@ impl<P: LlmProvider> IngestContext<P> {
     }
 
     /// `ai_archive.*`: claim the delivery, analyse conversations and projects, apply tombstones.
+    ///
+    /// A tombstone is a privacy deletion, so every transient failure of one is redelivered without
+    /// a delivery budget (XR-021 CONTRACTS.md R3-08); the other facts give up after the budget.
+    /// A fact that can never succeed is rejected at its first delivery.
     pub(crate) async fn ai_archive(&self, bytes: &[u8]) -> Outcome {
         let (envelope, tenant) = match decode(bytes, ARCHIVE_PRODUCERS) {
             Ok(decoded) => decoded,
             Err(outcome) => return outcome,
         };
-        let retry = |class| Outcome::Retry {
-            class,
-            event_id: envelope.event_id.0,
+        let tombstone = envelope.event_type.to_wire() == AiArchiveTombstone::EVENT_TYPE;
+        let retry = |class| {
+            if tombstone {
+                Outcome::Redeliver("archive_tombstone")
+            } else {
+                Outcome::Retry {
+                    class,
+                    event_id: envelope.event_id.0,
+                }
+            }
         };
         match archive_owner(&envelope) {
             Ok(owner) if owner == tenant => {}
             Ok(_) => return Outcome::Reject("owner"),
             Err(outcome) => return outcome,
         }
-        let Ok(admission) = ArchiveEventConsumer::new(&self.database)
+        let admission = match ArchiveEventConsumer::new(&self.database)
             .accept(&envelope)
             .await
-        else {
-            return retry("archive_inbox");
+        {
+            Ok(admission) => admission,
+            Err(error) => return archive_accept_failure(&error, tombstone, &retry),
         };
         let inbox = SourceInbox::new(&self.database);
         let (conversation, admitted) = match admission {
             ArchiveEventAdmission::Conversation(admitted) => (true, admitted),
             ArchiveEventAdmission::Project(admitted) => (false, admitted),
-            ArchiveEventAdmission::Tombstone => {
+            // A duplicate tombstone still drains the erasure queue: the delivery that committed
+            // the row deletion may have failed or died before the blobs were erased.
+            ArchiveEventAdmission::Tombstone | ArchiveEventAdmission::TombstoneDuplicate => {
                 return match collect_pending_blobs(&self.database, &self.blobs).await {
                     Ok(_) => Outcome::Done,
                     Err(_) => retry("archive_tombstone"),
                 };
             }
-            ArchiveEventAdmission::ObjectRecorded
-            | ArchiveEventAdmission::ObjectDuplicate
-            | ArchiveEventAdmission::TombstoneDuplicate => return Outcome::Done,
+            ArchiveEventAdmission::ObjectRecorded | ArchiveEventAdmission::ObjectDuplicate => {
+                return Outcome::Done;
+            }
         };
         let analyse = match admitted {
             SourceInboxAdmission::AcceptedCurrent => true,
@@ -388,9 +402,31 @@ fn classify_repository_failure(error: &FamilyPipelineError) -> (AnalysisFailureC
     }
 }
 
+/// Maps a failed `accept` to a disposition: a fact that can never succeed is rejected with a
+/// closed class, and a storage failure is left to `retry`.
+fn archive_accept_failure(
+    error: &ArchiveEventError,
+    tombstone: bool,
+    retry: &impl Fn(&'static str) -> Outcome,
+) -> Outcome {
+    match error {
+        ArchiveEventError::Envelope(_)
+        | ArchiveEventError::Inbox(SourceInboxError::Envelope(_)) => Outcome::Reject("undecodable"),
+        ArchiveEventError::Unsupported => Outcome::Reject("unsupported"),
+        ArchiveEventError::Inbox(SourceInboxError::InvalidArchiveFact) => {
+            Outcome::Reject(if tombstone {
+                "foreign_subject"
+            } else {
+                "invalid_fact"
+            })
+        }
+        _ => retry("archive_inbox"),
+    }
+}
+
 /// The owner an archive event names, from its typed payload.
 fn archive_owner(envelope: &EventEnvelope) -> Result<TenantRef, Outcome> {
-    let payload = Outcome::Reject("payload");
+    let payload = Outcome::Reject("undecodable");
     let subject = envelope.event_type.to_wire();
     match subject.as_str() {
         AiArchiveImport::EVENT_TYPE => envelope
@@ -417,7 +453,7 @@ fn archive_owner(envelope: &EventEnvelope) -> Result<TenantRef, Outcome> {
         AiArchiveTombstone::EVENT_TYPE => envelope
             .payload_as::<AiArchiveTombstone>()
             .map(|tombstone| tombstone.owner),
-        _ => return Err(Outcome::Reject("type")),
+        _ => return Err(Outcome::Reject("unsupported")),
     }
     .map_err(|_| payload)
 }

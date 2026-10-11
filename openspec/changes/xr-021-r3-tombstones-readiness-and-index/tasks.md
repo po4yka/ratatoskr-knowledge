@@ -5,8 +5,8 @@
 
 ## 2. Tombstones (R3-08)
 
-- [ ] 2.1 RED: add `services/knowledge/tests/ingest_bus/tombstone.rs` with the six scenarios; run them and confirm the dead letter after five deliveries, the duplicate that acknowledges without draining and the foreign subject that is retried.
-- [ ] 2.2 GREEN: classify the archive handler outcomes as designed.
+- [x] 2.1 RED: add `services/knowledge/tests/ingest_bus/tombstone.rs` with the six scenarios; run them and confirm the dead letter after five deliveries, the duplicate that acknowledges without draining, the foreign subject that is redelivered six times and the unsupported type logged under the old class.
+- [x] 2.2 GREEN: classify the archive handler outcomes as designed.
 
 ## 3. Recap reachability (R3-09)
 

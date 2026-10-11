@@ -28,7 +28,7 @@ fn nats_url() -> String {
 pub(crate) struct Harness {
     pub(crate) database: TestDatabase,
     blobs: BlobStore,
-    _root: TemporaryBlobRoot,
+    root: TemporaryBlobRoot,
     context: jetstream::Context,
     url: String,
     ack_wait: Duration,
@@ -50,11 +50,16 @@ impl Harness {
         Ok(Self {
             database: TestDatabase::create().await?,
             blobs: BlobStore::new(root.path(), 1_048_576),
-            _root: root,
+            root,
             context,
             url,
             ack_wait,
         })
+    }
+
+    /// The directory the worker's blob store writes under.
+    pub(crate) fn blob_root(&self) -> &std::path::Path {
+        self.root.path()
     }
 
     /// The worker configuration for this broker, for a test that adjusts it before spawning.
@@ -123,7 +128,7 @@ impl Harness {
         Ok(total)
     }
 
-    async fn durable(
+    pub(crate) async fn durable(
         &self,
         family: IngestFamily,
     ) -> Result<(usize, u64, u64), Box<dyn std::error::Error>> {

@@ -239,10 +239,15 @@ ratatoskr_events / ratatoskr_knowledge_repository_requests evt.knowledge.reposit
 
 Each durable is explicit-ack, deliver-all, unlimited redelivery, with an ack wait equal to
 `RATATOSKR__INGEST__ACK_WAIT_SECONDS` (120). A delivery from the wrong producer, without a tenant,
-undecodable, or whose tenant differs from the payload owner is terminated on first delivery. A failed
-analysis is redelivered after 2 seconds; the fifth delivery is terminal and leaves a content-free row
-in `knowledge.ingest_failures`, except for repository requests, which settle as a
-`knowledge.repository_analysis.failed.v1` fact so the requester is told. A redelivery whose inbox
+undecodable, of an unsupported type, or whose tenant differs from the payload owner is terminated on
+first delivery, and an AI-archive tombstone for a subject that belongs only to another tenant is
+terminated with the class `foreign_subject`. A failed analysis is redelivered after 2 seconds; the
+fifth delivery is terminal and leaves a content-free row in `knowledge.ingest_failures`, except for
+repository requests, which settle as a `knowledge.repository_analysis.failed.v1` fact so the
+requester is told, and except for AI-archive deletion tombstones, which are redelivered without a
+delivery budget until they are applied. A redelivered tombstone also drains the blob erasure queue
+before it is acknowledged, so a delivery that committed the row deletion and then failed finishes
+the byte erasure. A redelivery whose inbox
 row was committed before the analysis ran resumes the analysis when that delivery is still the head
 of its source; a delayed older delivery is kept as a receipt and never regresses the head.
 
