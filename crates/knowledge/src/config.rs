@@ -5,6 +5,7 @@ use std::{error, fmt};
 use serde::Serialize;
 
 use crate::ProviderSecret;
+use crate::config_api::{ApiConfig, apply_api_entry, validate_listeners};
 use crate::config_ingest::{IngestConfig, apply_ingest_entry, validate_ingest};
 use crate::result_reader_secret::ResultReaderSecret;
 
@@ -23,6 +24,8 @@ pub struct Config {
     /// Operator listener configuration.
     pub admin: AdminConfig,
     /// Owned durable storage configuration.
+    /// Domain API listener configuration.
+    pub api: ApiConfig,
     pub storage: StorageConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
@@ -254,6 +257,7 @@ impl Config {
         config.provider.embeddings = embeddings_draft.finish()?;
         validate_channel_recap(&config)?;
         validate_ingest(&config)?;
+        validate_listeners(&config)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -303,6 +307,9 @@ fn apply_entry(
     }
     match key {
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => {
+    if key.starts_with("RATATOSKR__API__") {
+        return apply_api_entry(&mut config.api, key, value);
+    }
             let address = value
                 .parse::<SocketAddr>()
                 .map_err(|_| ConfigError::new(key, "must be a socket address"))?;
@@ -609,6 +616,7 @@ fn apply_embeddings_entry(
         "RATATOSKR__PROVIDER__EMBEDDINGS__MODEL" => {
             validate_model_id(key, value)?;
             draft.model = Some(value.to_owned());
+            api: ApiConfig::default(),
         }
         "RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL" => {
             draft.base_url = Some(value.to_owned());

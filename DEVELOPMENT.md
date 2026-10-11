@@ -63,6 +63,11 @@ RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET=test-only-reader-secret \
   cargo run --locked -p ratatoskr-knowledge-service -- check-config
 ```
 
+The service binds two loopback listeners: the operator listener (`RATATOSKR__ADMIN__LISTEN_ADDRESS`,
+default `127.0.0.1:9081`) and the API listener (`RATATOSKR__API__LISTEN_ADDRESS`, default
+`127.0.0.1:8091`). The result route above is on the API listener. A process test that starts the real
+binary must give each listener its own ephemeral port.
+
 The route test uses an in-process router and disposable database; the boot test starts the real
 binary twice and verifies enabled/disabled routing plus bounded `SIGTERM` drain. No gate command
 uses a production credential or a real recap.

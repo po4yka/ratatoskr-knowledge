@@ -11,50 +11,34 @@ use ratatoskr_knowledge::{
     BudgetLedger, BudgetLimits, ControlledEmbeddings, EmbeddingsSettings, HybridRetriever,
     OpenAiCompatibleEmbeddings, ProviderSecret, RateLimiter, RetryPolicy, TokenPrices,
 };
-use ratatoskr_knowledge_service::{Lifecycle, Metrics, admin_router};
+use ratatoskr_knowledge_service::{Lifecycle, Listener, Metrics, admin_router, api_router};
 use serde_json::Value;
 use tower::ServiceExt as _;
 
 #[tokio::test]
 async fn readiness_follows_storage_startup_and_drain() -> Result<(), Box<dyn std::error::Error>> {
-    let database = TestDatabase::create().await?;
     let lifecycle = Lifecycle::starting();
-    let app = admin_router(
-        lifecycle.clone(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
+    let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
 
     assert_response(&app, "/live", StatusCode::OK).await?;
     assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
-    lifecycle.mark_ready();
+    bind_and_mark_ready(&lifecycle);
     assert_response(&app, "/ready", StatusCode::OK).await?;
     assert_response(&app, "/metrics", StatusCode::OK).await?;
     assert_response(&app, "/version", StatusCode::OK).await?;
     lifecycle.begin_drain();
     assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
     assert_response(&app, "/live", StatusCode::OK).await?;
-
-    database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn channel_recap_readiness_requires_consumer_and_source_and_fails_on_drain()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database = TestDatabase::create().await?;
     let lifecycle = Lifecycle::starting_with_channel_recap();
-    let app = admin_router(
-        lifecycle.clone(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
+    let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
 
-    lifecycle.mark_ready();
+    bind_and_mark_ready(&lifecycle);
     assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
     lifecycle.set_channel_recap_ready(true);
     assert_response(&app, "/ready", StatusCode::OK).await?;
@@ -63,24 +47,15 @@ async fn channel_recap_readiness_requires_consumer_and_source_and_fails_on_drain
     lifecycle.set_channel_recap_ready(true);
     lifecycle.begin_drain();
     assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
-
-    database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn ready_requires_ingest_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
-    let database = TestDatabase::create().await?;
     let lifecycle = Lifecycle::starting_with_ingest();
-    let app = admin_router(
-        lifecycle.clone(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
+    let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
 
-    lifecycle.mark_ready();
+    bind_and_mark_ready(&lifecycle);
     assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
     lifecycle.set_ingest_ready(true);
     assert_response(&app, "/ready", StatusCode::OK).await?;
@@ -93,21 +68,70 @@ async fn ready_requires_ingest_when_enabled() -> Result<(), Box<dyn std::error::
     // Recap and ingest are both required when both are configured.
     let both = Lifecycle::starting_with_channel_recap();
     both.require_ingest();
-    let both_app = admin_router(
-        both.clone(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
-    both.mark_ready();
+    let both_app = admin_router(both.clone(), Arc::new(Metrics::new()));
+    bind_and_mark_ready(&both);
     both.set_channel_recap_ready(true);
     assert_response(&both_app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
     both.set_ingest_ready(true);
     assert_response(&both_app, "/ready", StatusCode::OK).await?;
-
-    database.cleanup().await?;
     Ok(())
+}
+
+/// XR-021 CONTRACTS.md R2-01: `/ready` requires both listeners bound.
+#[tokio::test]
+async fn readiness_requires_both_listeners_bound() -> Result<(), Box<dyn std::error::Error>> {
+    let lifecycle = Lifecycle::starting();
+    let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
+
+    lifecycle.mark_ready();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.mark_listener_bound(Listener::Operator);
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    lifecycle.mark_listener_bound(Listener::Api);
+    assert_response(&app, "/ready", StatusCode::OK).await?;
+    lifecycle.begin_drain();
+    assert_response(&app, "/ready", StatusCode::SERVICE_UNAVAILABLE).await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R2-01: the operator plane serves `/live`, `/ready`, `/metrics` and
+/// `/version` only; the library surface lives on the API listener.
+#[tokio::test]
+async fn operator_plane_serves_only_health_metrics_and_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let lifecycle = Lifecycle::starting();
+    bind_and_mark_ready(&lifecycle);
+    let app = admin_router(lifecycle, Arc::new(Metrics::new()));
+
+    for path in [
+        "/v1/capabilities",
+        "/internal/search?tenant=t&q=x",
+        "/internal/user-content/collection?tenant=t",
+        "/internal/channel-digest-results/018f0000-0000-7000-8000-000000000218",
+    ] {
+        assert_response(&app, path, StatusCode::NOT_FOUND).await?;
+    }
+    let command = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/user-content/command")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"operation":"create_tag","tenant":"user:operator-plane","name":"Moved"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(command.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+/// Marks storage ready and both listeners bound, the state of a fully started process.
+fn bind_and_mark_ready(lifecycle: &Lifecycle) {
+    lifecycle.mark_listener_bound(Listener::Operator);
+    lifecycle.mark_listener_bound(Listener::Api);
+    lifecycle.mark_ready();
 }
 
 async fn assert_response(
@@ -132,8 +156,7 @@ async fn assert_response(
 #[tokio::test]
 async fn capability_document_declares_library_surfaces() -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let app = api_router(
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
@@ -177,8 +200,7 @@ async fn search_endpoint_returns_ranked_results_and_requires_tenant()
         10,
     )
     .await?;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let app = api_router(
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
@@ -227,8 +249,7 @@ async fn search_endpoint_returns_ranked_results_and_requires_tenant()
 async fn user_content_routes_require_tenant_scope_and_hide_foreign_targets()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let app = api_router(
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
@@ -277,8 +298,7 @@ async fn library_search_and_read_state_adapter_is_bounded_and_tenant_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let (read_output, unread_output, foreign_output) = seed_library_state(&database).await?;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let app = api_router(
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,
@@ -430,13 +450,9 @@ async fn metrics_counters_track_served_search_paths_without_embeddings()
         10,
     )
     .await?;
-    let app = admin_router(
-        Lifecycle::starting(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
+    let metrics = Arc::new(Metrics::new());
+    let app = api_router(database.database.clone(), Arc::clone(&metrics), None, None);
+    let operator = admin_router(Lifecycle::starting(), metrics);
 
     // A blank query browses by recency.
     let response = app
@@ -471,7 +487,7 @@ async fn metrics_counters_track_served_search_paths_without_embeddings()
     );
     assert!(results[0]["rank"].as_f64().is_some_and(|rank| rank > 0.0));
 
-    let response = app
+    let response = operator
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -555,13 +571,14 @@ async fn search_uses_the_hybrid_retrieval_selection_when_configured()
     .await?;
     let (transport, retriever) = fake_hybrid_retriever(database.database.pool().clone()).await?;
     let _transport_guard = transport;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let metrics = Arc::new(Metrics::new());
+    let app = api_router(
         database.database.clone(),
-        Arc::new(Metrics::new()),
+        Arc::clone(&metrics),
         Some(Arc::clone(&retriever)),
         None,
     );
+    let operator = admin_router(Lifecycle::starting(), metrics);
 
     let response = app
         .clone()
@@ -578,7 +595,7 @@ async fn search_uses_the_hybrid_retrieval_selection_when_configured()
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["title"], "Echo report");
 
-    let response = app
+    let response = operator
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
         .await?;
     let body = response.into_body().collect().await?.to_bytes();

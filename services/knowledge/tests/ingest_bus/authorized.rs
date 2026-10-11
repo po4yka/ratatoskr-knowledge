@@ -417,6 +417,8 @@ async fn every_knowledge_consumer_runs_and_acknowledges_under_the_pinned_identit
     let config = fabric.config(digest_source.address());
     let lifecycle = Lifecycle::starting_with_channel_recap();
     lifecycle.require_ingest();
+    lifecycle.mark_listener_bound(ratatoskr_knowledge_service::Listener::Operator);
+    lifecycle.mark_listener_bound(ratatoskr_knowledge_service::Listener::Api);
     lifecycle.mark_ready();
     let (drain, receiver) = watch::channel(false);
     let recap_worker = spawn_channel_recap_worker(

@@ -2,12 +2,18 @@
 
 ## Current process interface
 
-The loopback admin listener exposes only:
+The process binds two loopback listeners (XR-021 CONTRACTS.md R2-01). The operator listener
+(`RATATOSKR__ADMIN__LISTEN_ADDRESS`, default `127.0.0.1:9081`) exposes only:
 
 - `GET /live`;
-- `GET /ready`;
+- `GET /ready`, which requires both listeners bound;
 - `GET /metrics`;
 - `GET /version`.
+
+The API listener (`RATATOSKR__API__LISTEN_ADDRESS`, default `127.0.0.1:8091`, the address Edge
+routes the Knowledge domain API to) exposes only:
+
+- `GET /v1/capabilities`;
 - `GET /internal/search?tenant=<tenant>&q=<query>&read_state=read|unread&limit=<n>&offset=<n>`;
 - `POST /internal/user-content/command`, including the narrow `set_read_state` operation;
 - `GET /internal/user-content/collection`.

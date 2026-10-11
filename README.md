@@ -68,8 +68,10 @@ analysis, and persists the evidence and result.
   Knowledge blob bytes through a durable erasure queue;
 - idempotent `reindex-embeddings` and `reindex-search-documents` subcommands for explicit
   regeneration after a model, chunking, or lexical-projection change;
-- an admin-only process with `/live`, `/ready`, `/metrics`, `/version`, and a loopback-only
-  `/internal/search` adapter plus an independently authenticated channel-recap result reader;
+- two loopback listeners: an operator listener with `/live`, `/ready`, `/metrics` and `/version`, and
+  an API listener (default `127.0.0.1:8091`, where Edge routes the Knowledge domain API) with the
+  capability document, the `/internal/search` adapter, the user-content routes and an
+  independently authenticated channel-recap result reader;
 - tenant-scoped user content over accepted analyses: normalized tags and transactional tag merge,
   ordered collections of analysis outputs or immutable source revisions, read/favorite state,
   typed feedback, and Document-IR block anchored highlights.
@@ -120,13 +122,14 @@ Source bytes stay with the source-owning service. Knowledge stores the immutable
 identity and source `BlobRef`. Raw model-response bytes stay in the Knowledge blob root under their
 SHA-256 address.
 
-## Run the admin-only process
+## Run the process
 
 The process needs PostgreSQL 17 and a writable blob directory. These settings have finite defaults
 and can be changed with strict environment keys:
 
 ```text
 RATATOSKR__ADMIN__LISTEN_ADDRESS
+RATATOSKR__API__LISTEN_ADDRESS
 RATATOSKR__STORAGE__DATABASE_URL
 RATATOSKR__STORAGE__BLOB_ROOT
 RATATOSKR__LIMITS__DATABASE_CONNECTIONS
@@ -203,7 +206,7 @@ configuration without opening a listener:
 cargo run --locked -p ratatoskr-knowledge-service -- check-config
 ```
 
-Start the admin listener:
+Start the listeners:
 
 ```bash
 cargo run --locked -p ratatoskr-knowledge-service
@@ -251,7 +254,7 @@ inference credential, and it answers no other family.
 
 ## Internal channel-recap result surface
 
-`GET /internal/channel-digest-results/{analysis_id}` is installed on the loopback admin listener
+`GET /internal/channel-digest-results/{analysis_id}` is installed on the loopback API listener
 only when the dedicated result-reader secret is configured. It accepts `Authorization: Bearer
 <secret>` and one UUID from the published recap completion fact. A successful response contains
 only `analysis_id`, its exact SHA-256 `result_digest`, and the closed typed `recap`; it is bounded to
@@ -346,8 +349,8 @@ cargo run --locked -p ratatoskr-knowledge-service -- reindex-embeddings [--tenan
 ## Boundaries
 
 Knowledge does not fetch web pages, run Chromium, synchronize provider accounts, execute Git, own
-source records, accept public analysis requests, or expose retrieval anywhere but the operator
-plane's `/internal/search`. It does accept the internal, contract-bound repository-analysis request
+source records, accept public analysis requests, or expose retrieval anywhere but the loopback API
+listener's `/internal/search` (default `127.0.0.1:8091`, never the operator listener). It does accept the internal, contract-bound repository-analysis request
 and keeps its pending/result linkage in PostgreSQL; the separate worker that performs that family is
 still planned. Real `OpenRouter` inference is implemented through the library adapter and manual
 smoke example; wiring embeddings, hybrid ranking, more analysis families, and legacy import remain

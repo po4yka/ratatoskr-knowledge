@@ -15,7 +15,7 @@ use ingest_support::{PLATFORM_ACK_WAIT, TestResult, config, eventually, provisio
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{BlobStore, ScriptedProvider};
 use ratatoskr_knowledge_service::{
-    Lifecycle, Metrics, admin_router, spawn_ingest_workers_with_provider,
+    Lifecycle, Listener, Metrics, admin_router, spawn_ingest_workers_with_provider,
 };
 use tokio::sync::watch;
 use tower::ServiceExt as _;
@@ -81,13 +81,9 @@ async fn broker_outage_flips_readiness_false_and_recovers() -> TestResult {
         receiver,
         Arc::new(ScriptedProvider::new([])),
     );
-    let app = admin_router(
-        lifecycle.clone(),
-        database.database.clone(),
-        Arc::new(Metrics::new()),
-        None,
-        None,
-    );
+    let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
+    lifecycle.mark_listener_bound(Listener::Operator);
+    lifecycle.mark_listener_bound(Listener::Api);
     lifecycle.mark_ready();
     eventually("ingest is ready", || async {
         Ok(ready_status(&app).await? == StatusCode::OK)

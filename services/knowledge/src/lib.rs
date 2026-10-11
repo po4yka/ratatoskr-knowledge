@@ -4,6 +4,7 @@
 //! Process boundary for Ratatoskr Knowledge.
 
 mod admin;
+mod api;
 mod bus;
 mod channel_recap;
 mod ingest;
@@ -14,7 +15,8 @@ mod provider_runtime;
 
 use ratatoskr_knowledge::{ControlledEmbeddings, HybridRetriever, OpenAiCompatibleEmbeddings};
 
-pub use admin::{CHANNEL_DIGEST_RESULT_ROUTE, Lifecycle, admin_router};
+pub use admin::{Lifecycle, Listener, admin_router};
+pub use api::{CHANNEL_DIGEST_RESULT_ROUTE, api_router};
 pub use bus::BusFailure;
 pub use channel_recap::{ChannelRecapWorkerError, spawn_channel_recap_worker};
 pub use ingest::{

@@ -28,6 +28,7 @@ fn command(address: SocketAddr, database_url: &str, blob_root: &std::path::Path)
     let mut command = Command::new(env!("CARGO_BIN_EXE_ratatoskr-knowledge-service"));
     command
         .env("RATATOSKR__ADMIN__LISTEN_ADDRESS", address.to_string())
+        .env("RATATOSKR__API__LISTEN_ADDRESS", free_loopback_address())
         .env("RATATOSKR__STORAGE__DATABASE_URL", database_url)
         .env("RATATOSKR__STORAGE__BLOB_ROOT", blob_root)
         .env("RATATOSKR__INGEST__ENABLED", "true")
@@ -179,8 +180,11 @@ async fn fixture_mode_process_makes_a_published_document_searchable() -> TestRes
 
     let reserved = TcpListener::bind("127.0.0.1:0")?;
     let address = reserved.local_addr()?;
+    let api_reserved = TcpListener::bind("127.0.0.1:0")?;
+    let api = api_reserved.local_addr()?;
     let mut ingest = command(address, &database_url, &blob_root);
     ingest
+        .env("RATATOSKR__API__LISTEN_ADDRESS", api.to_string())
         .env("RATATOSKR__INGEST__BUS_ENDPOINT", &nats_url)
         .env(
             "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET",
@@ -189,6 +193,7 @@ async fn fixture_mode_process_makes_a_published_document_searchable() -> TestRes
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     drop(reserved);
+    drop(api_reserved);
     let mut child = ingest.spawn()?;
 
     wait_until(&mut child, "the ingest worker is ready", || {
@@ -206,7 +211,7 @@ async fn fixture_mode_process_makes_a_published_document_searchable() -> TestRes
         .await?;
     wait_until(&mut child, "the document is searchable", || {
         let (status, body) = http_get(
-            address,
+            api,
             &format!("/internal/search?tenant={OWNER}&q=quokka&limit=5"),
         )?;
         Ok(status == 200 && body.contains("Quokka migration notes"))
@@ -242,4 +247,14 @@ fn ingest_without_its_readme_source_is_refused_at_startup() -> TestResult {
         "the refusal names the missing key: {diagnostic}"
     );
     Ok(())
+}
+
+/// A loopback address the kernel just handed out, so parallel processes never share an API port.
+fn free_loopback_address() -> String {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map_or_else(
+            |_| "127.0.0.1:18091".to_owned(),
+            |address| address.to_string(),
+        )
 }

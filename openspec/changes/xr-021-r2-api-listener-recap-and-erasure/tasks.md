@@ -1,7 +1,7 @@
 ## 1. Dedicated API listener (XR-021 CONTRACTS.md R2-01)
 
-- [ ] 1.1 RED: add `crates/knowledge/tests/config.rs::api_listener_defaults_and_validation`, `services/knowledge/tests/admin.rs::operator_plane_serves_only_health_metrics_and_version` and `services/knowledge/tests/api_listener.rs`; run them and confirm the API key is unknown, the operator router still serves the library routes and the real service binds one listener.
-- [ ] 1.2 GREEN: add `ApiConfig`, split `admin_router` and `api_router`, bind both in `main.rs`, make readiness require both and update every test and document that used the moved routes.
+- [x] 1.1 RED: add `crates/knowledge/tests/config.rs::api_listener_defaults_and_validation`, `services/knowledge/tests/admin.rs::operator_plane_serves_only_health_metrics_and_version` and `services/knowledge/tests/api_listener.rs`; run them and confirm the API key is unknown, the operator router still serves the library routes and the real service binds one listener.
+- [x] 1.2 GREEN: add `ApiConfig`, split `admin_router` and `api_router`, bind both in `main.rs`, make readiness require both and update every test and document that used the moved routes.
 
 ## 2. Recap provider default (R2-13)
 

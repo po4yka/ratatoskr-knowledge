@@ -730,19 +730,24 @@ Provider or prompt changes cannot become default solely because examples look su
 
 ## 24. Deployment architecture
 
-The current deployment is one process with an admin plane and optional channel-recap worker. It
-requires PostgreSQL 17 with pgvector and a writable owned blob directory. The default profile does
-not require NATS, model credentials, or Qdrant; enabling recap additionally requires an exact
-pre-provisioned JetStream durable and the authenticated loopback digest-source readiness endpoint.
-PostgreSQL FTS is the offline retrieval path; configured embeddings add hybrid ranking.
+The current deployment is one process with an operator listener, an API listener and optional
+channel-recap and ingest workers. It requires PostgreSQL 17 with pgvector and a writable owned blob
+directory. The default profile does not require NATS, model credentials, or Qdrant; enabling recap
+additionally requires an exact pre-provisioned JetStream durable and the authenticated loopback
+digest-source readiness endpoint. PostgreSQL FTS is the offline retrieval path; configured embeddings add hybrid ranking.
 
-The admin listener is loopback-only. `check-config` validates strict environment settings without
-binding. Readiness becomes successful after storage and the current schema are ready and, when recap
-is enabled, after both recap dependencies are verified. `SIGINT` and `SIGTERM` start drain; the
+The process binds two loopback listeners: the operator listener (`RATATOSKR__ADMIN__LISTEN_ADDRESS`,
+default `127.0.0.1:9081`) serves `/live`, `/ready`, `/metrics` and `/version`, and the API listener
+(`RATATOSKR__API__LISTEN_ADDRESS`, default `127.0.0.1:8091`, the port Edge routes the Knowledge
+domain API to) serves the capability document, search, user-content and result routes. Configuration
+refuses an API address that is not loopback or equals the operator address. `check-config` validates
+strict environment settings without binding. Readiness becomes successful after storage and the
+current schema are ready, both listeners are bound and, when recap is enabled, after both recap
+dependencies are verified. `SIGINT` and `SIGTERM` start drain; the
 process joins the recap supervisor and server shutdown within its configured bound.
 
 An optional dedicated result-reader secret installs
-`GET /internal/channel-digest-results/{analysis_id}` on this same loopback listener. It does not
+`GET /internal/channel-digest-results/{analysis_id}` on the API listener. It does not
 enable the worker or widen readiness: the route is a bounded authenticated projection of an already
 completed Knowledge-owned recap. Single-host deployment injects the independent value only into
 Knowledge and channel-digest, rotates Knowledge before its consumer, and rolls back the consumer

@@ -465,3 +465,49 @@ fn ingest_section_refuses_unsafe_readme_source_and_limits() -> Result<(), Box<dy
 fn admin_default_is_the_allocated_operator_port() {
     assert_eq!(Config::default().admin.listen_address.port(), 9081);
 }
+
+/// XR-021 CONTRACTS.md R2-01: the library surface has its own loopback listener, distinct from the
+/// operator listener, and every refusal names the API key.
+#[test]
+fn api_listener_defaults_and_validation() -> Result<(), Box<dyn std::error::Error>> {
+    const KEY: &str = "RATATOSKR__API__LISTEN_ADDRESS";
+
+    let defaults = Config::default();
+    assert_eq!(defaults.api.listen_address.to_string(), "127.0.0.1:8091");
+    assert_eq!(defaults.admin.listen_address.to_string(), "127.0.0.1:9081");
+
+    let moved = Config::from_environment([(KEY, "127.0.0.1:18091")])?;
+    assert_eq!(moved.api.listen_address.to_string(), "127.0.0.1:18091");
+
+    for (entries, rule) in [
+        (vec![(KEY, "0.0.0.0:8091")], "non-loopback IPv4"),
+        (vec![(KEY, "10.0.0.5:8091")], "private address"),
+        (vec![(KEY, "127.0.0.1:0")], "port zero"),
+        (vec![(KEY, "localhost")], "not a socket address"),
+        (
+            vec![(KEY, "127.0.0.1:9081")],
+            "the default operator address",
+        ),
+        (
+            vec![
+                ("RATATOSKR__ADMIN__LISTEN_ADDRESS", "127.0.0.1:9100"),
+                (KEY, "127.0.0.1:9100"),
+            ],
+            "an explicitly configured operator address",
+        ),
+        (
+            vec![("RATATOSKR__ADMIN__LISTEN_ADDRESS", "127.0.0.1:8091")],
+            "an operator address that takes the default API address",
+        ),
+    ] {
+        let diagnostic = match Config::from_environment(entries) {
+            Ok(_) => return Err(format!("{rule} was accepted").into()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            diagnostic.contains(KEY),
+            "{rule}: {diagnostic} should name {KEY}"
+        );
+    }
+    Ok(())
+}

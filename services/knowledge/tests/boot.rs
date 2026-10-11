@@ -50,22 +50,22 @@ async fn result_reader_configuration_survives_restart_and_bounded_drain()
     std::fs::create_dir_all(&blob_root)?;
     let absent_path = "/internal/channel-digest-results/018f0000-0000-7000-8000-000000000218";
 
-    let (mut disabled, disabled_address) = spawn_reader_process(&database_url, &blob_root, None)?;
-    assert_eq!(http_status(disabled_address, absent_path)?, 404);
+    let (mut disabled, disabled_api) = spawn_reader_process(&database_url, &blob_root, None)?;
+    assert_eq!(http_status(disabled_api, absent_path)?, 404);
     stop_process(&mut disabled)?;
 
     for _restart in 0..2 {
-        let (mut child, address) = spawn_reader_process(
+        let (mut child, api) = spawn_reader_process(
             &database_url,
             &blob_root,
             Some("knowledge-reader-boot-secret"),
         )?;
         assert_eq!(
-            http_status_with_bearer(address, absent_path, Some("wrong-reader-secret"))?,
+            http_status_with_bearer(api, absent_path, Some("wrong-reader-secret"))?,
             401
         );
         assert_eq!(
-            http_status_with_bearer(address, absent_path, Some("knowledge-reader-boot-secret"))?,
+            http_status_with_bearer(api, absent_path, Some("knowledge-reader-boot-secret"))?,
             404
         );
         stop_process(&mut child)?;
@@ -83,7 +83,10 @@ fn spawn_reader_process(
 ) -> Result<(Child, SocketAddr), Box<dyn std::error::Error>> {
     let reserved = TcpListener::bind("127.0.0.1:0")?;
     let address = reserved.local_addr()?;
+    let api_reserved = TcpListener::bind("127.0.0.1:0")?;
+    let api = api_reserved.local_addr()?;
     let mut command = configured_command(address, database_url, blob_root);
+    command.env("RATATOSKR__API__LISTEN_ADDRESS", api.to_string());
     if let Some(secret) = secret {
         command.env(
             "RATATOSKR__CHANNEL_RECAP__RESULT_READER_SERVICE_SECRET",
@@ -91,12 +94,13 @@ fn spawn_reader_process(
         );
     }
     drop(reserved);
+    drop(api_reserved);
     let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
     exercise_process(&mut child, address)?;
-    Ok((child, address))
+    Ok((child, api))
 }
 
 #[tokio::test]
@@ -691,6 +695,7 @@ fn configured_command(
     let mut command = Command::new(env!("CARGO_BIN_EXE_ratatoskr-knowledge-service"));
     command
         .env("RATATOSKR__ADMIN__LISTEN_ADDRESS", address.to_string())
+        .env("RATATOSKR__API__LISTEN_ADDRESS", free_loopback_address())
         .env("RATATOSKR__STORAGE__DATABASE_URL", database_url)
         .env("RATATOSKR__STORAGE__BLOB_ROOT", blob_root);
     command
@@ -775,4 +780,14 @@ fn test_database_url(database_name: &str) -> Result<String, Box<dyn std::error::
         .rsplit_once('/')
         .ok_or("invalid test database URL")?;
     Ok(format!("{server}/{database_name}"))
+}
+
+/// A loopback address the kernel just handed out, so parallel processes never share an API port.
+fn free_loopback_address() -> String {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map_or_else(
+            |_| "127.0.0.1:18091".to_owned(),
+            |address| address.to_string(),
+        )
 }

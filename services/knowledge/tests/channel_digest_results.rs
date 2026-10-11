@@ -8,7 +8,7 @@ use http_body_util::BodyExt as _;
 use ratatoskr_event_envelope::CommandEnvelope;
 use ratatoskr_knowledge::test_support::TestDatabase;
 use ratatoskr_knowledge::{ChannelRecapInbox, ChannelRecapInboxAdmission, ResultReaderSecret};
-use ratatoskr_knowledge_service::{Lifecycle, Metrics, admin_router};
+use ratatoskr_knowledge_service::{Metrics, api_router};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
 
@@ -23,8 +23,7 @@ async fn result_route_requires_service_auth_and_returns_only_the_typed_recap()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let (analysis_id, recap, digest) = seed_completed_recap(&database).await?;
-    let app = admin_router(
-        Lifecycle::starting(),
+    let app = api_router(
         database.database.clone(),
         Arc::new(Metrics::new()),
         None,

@@ -14,8 +14,8 @@ use ratatoskr_knowledge::{
     collect_pending_blobs, init_telemetry,
 };
 use ratatoskr_knowledge_service::{
-    HybridSearchRetriever, Lifecycle, Metrics, admin_router, inference_limiter,
-    spawn_channel_recap_worker, spawn_ingest_workers,
+    HybridSearchRetriever, Lifecycle, Listener, Metrics, admin_router, api_router,
+    inference_limiter, spawn_channel_recap_worker, spawn_ingest_workers,
 };
 use tokio::sync::watch;
 
@@ -90,11 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&metrics),
     );
 
-    let listener = tokio::net::TcpListener::bind(config.admin.listen_address).await?;
+    let listeners = bind_listeners(&config, &lifecycle).await?;
     lifecycle.mark_ready();
-    let serve_result = serve_admin(
-        listener,
-        AdminServer {
+    let serve_result = serve_listeners(
+        listeners,
+        Planes {
             lifecycle,
             database: database.clone(),
             metrics,
@@ -561,8 +561,26 @@ async fn run_indexing_pass(worker: &IndexingWorker, metrics: &Metrics) {
     }
 }
 
-/// Operator-plane dependencies served by the admin listener.
-struct AdminServer {
+/// The two bound sockets: operator health and the domain API.
+struct Listeners {
+    operator: tokio::net::TcpListener,
+    api: tokio::net::TcpListener,
+}
+
+/// Binds the operator and API sockets and records each in the lifecycle that readiness reads.
+async fn bind_listeners(
+    config: &Config,
+    lifecycle: &Lifecycle,
+) -> Result<Listeners, Box<dyn std::error::Error>> {
+    let operator = tokio::net::TcpListener::bind(config.admin.listen_address).await?;
+    lifecycle.mark_listener_bound(Listener::Operator);
+    let api = tokio::net::TcpListener::bind(config.api.listen_address).await?;
+    lifecycle.mark_listener_bound(Listener::Api);
+    Ok(Listeners { operator, api })
+}
+
+/// Dependencies behind the operator and API routers.
+struct Planes {
     lifecycle: Lifecycle,
     database: Database,
     metrics: Arc<Metrics>,
@@ -570,42 +588,45 @@ struct AdminServer {
     result_reader_secret: Option<ResultReaderSecret>,
 }
 
-async fn serve_admin(
-    listener: tokio::net::TcpListener,
-    server: AdminServer,
+/// Serves both listeners until a signal or a worker failure begins drain, then waits for both to
+/// finish within the shutdown bound.
+async fn serve_listeners(
+    listeners: Listeners,
+    planes: Planes,
     drain_tx: watch::Sender<bool>,
-    mut drain_rx: watch::Receiver<bool>,
+    drain_rx: watch::Receiver<bool>,
     shutdown_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let AdminServer {
+    let Planes {
         lifecycle,
         database,
         metrics,
         retriever,
         result_reader_secret,
-    } = server;
-    let server = axum::serve(
-        listener,
-        admin_router(
-            lifecycle.clone(),
-            database,
-            metrics,
-            retriever,
-            result_reader_secret,
-        ),
+    } = planes;
+    let operator = axum::serve(
+        listeners.operator,
+        admin_router(lifecycle.clone(), Arc::clone(&metrics)),
     )
-    .with_graceful_shutdown(async move {
-        let _ignored = drain_rx.changed().await;
-    })
+    .with_graceful_shutdown(drained(drain_rx.clone()))
     .into_future();
-    tokio::pin!(server);
+    let api = axum::serve(
+        listeners.api,
+        api_router(database, metrics, retriever, result_reader_secret),
+    )
+    .with_graceful_shutdown(drained(drain_rx))
+    .into_future();
+    let servers = async { tokio::try_join!(operator, api) };
+    tokio::pin!(servers);
     tokio::select! {
-        result = &mut server => result?,
+        result = &mut servers => {
+            result?;
+        }
         result = shutdown_signal() => {
             result?;
             lifecycle.begin_drain();
             let _ignored = drain_tx.send(true);
-            tokio::time::timeout(shutdown_timeout, &mut server).await??;
+            tokio::time::timeout(shutdown_timeout, &mut servers).await??;
         }
     }
     Ok(())
@@ -613,6 +634,11 @@ async fn serve_admin(
 
 #[cfg(unix)]
 async fn shutdown_signal() -> Result<(), std::io::Error> {
+/// Resolves once drain begins.
+async fn drained(mut drain: watch::Receiver<bool>) {
+    let _ignored = drain.changed().await;
+}
+
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = tokio::signal::ctrl_c() => result,

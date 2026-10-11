@@ -17,6 +17,7 @@ mod channel_digest_recap_store;
 mod chunking;
 mod config;
 mod config_ingest;
+mod config_api;
 mod context;
 mod controlled;
 mod database;
@@ -99,6 +100,7 @@ pub use config_ingest::{IngestConfig, IngestProviderMode};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };
+pub use config_api::ApiConfig;
 pub use controlled::{ControlledProvider, SpendControls};
 pub use database::{Database, PersistenceError};
 pub use deletion::{
