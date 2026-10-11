@@ -20,4 +20,10 @@ grant connect, create on database ratatoskr to ratatoskr_knowledge;
 
 \connect ratatoskr
 create extension if not exists vector;
-revoke all on schema public from ratatoskr_knowledge;
+-- USAGE on schema public, never CREATE. Platform's 01-database-and-roles.sql runs
+-- `revoke all on schema public from public`, and `create extension vector` above puts the `vector`
+-- type and its operators in public, so without this grant the service role cannot resolve
+-- `vector(1536)` and applying schema.sql at the first start fails with `type "vector" does not
+-- exist`. Every object the service owns lives in the `knowledge` schema, which the role creates
+-- itself through `create` on the database; it needs no right to add objects to public.
+grant usage on schema public to ratatoskr_knowledge;

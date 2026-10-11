@@ -10,7 +10,7 @@
 
 ## 3. Recap reachability (R3-09)
 
-- [x] 3.1 RED: add the four readiness scenarios to `services/knowledge/tests/channel_recap_source.rs`; run them and confirm `/ready` is 503 while the source is down and the warning repeats each second.
+- [x] 3.1 RED: add the four readiness scenarios to `services/knowledge/tests/ingest_bus/recap_source.rs`; run them and confirm `/ready` is 503 while the source is down and the warning repeats each second.
 - [x] 3.2 GREEN: verify the durable before the probe, add the gauge, back off and log the transition only.
 
 ## 4. Ack-wait validation (R3-09)

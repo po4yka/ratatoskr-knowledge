@@ -188,12 +188,22 @@ fn the_example_names_the_shared_database_and_the_role_file_exists() -> Result<()
         "create extension if not exists vector",
         "nosuperuser nocreatedb nocreaterole noreplication nobypassrls",
         "\\connect ratatoskr",
+        // Platform's `01-database-and-roles.sql` revokes every right on schema `public` from
+        // `public`, and the `vector` type and its operators live in `public`: without USAGE the
+        // service role cannot resolve `vector(1536)` and `schema.sql` fails at startup.
+        "grant usage on schema public to ratatoskr_knowledge",
     ] {
         assert!(
             role.contains(required),
             "role.sql must contain `{required}`"
         );
     }
+    assert!(
+        !role
+            .to_lowercase()
+            .contains("grant create on schema public"),
+        "the role needs USAGE on schema public, never CREATE"
+    );
     assert!(
         !role.to_lowercase().contains("password '"),
         "no credential belongs in the role file"

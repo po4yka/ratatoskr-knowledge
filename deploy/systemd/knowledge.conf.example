@@ -12,7 +12,8 @@ RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9081
 
 # Storage. Raw model responses and source snapshots live under the blob root. The database and the
 # role come from `deploy/postgres/role.sql`, which a PostgreSQL administrator runs once before the
-# first start (it also installs pgvector, which this role may not); start order is Platform's
+# first start (it also installs pgvector, which this role may not, and grants it usage on schema
+# `public`, where the `vector` type lives); start order is Platform's
 # `01-database-and-roles.sql`, then that file, then this service.
 RATATOSKR__STORAGE__DATABASE_URL=postgres://ratatoskr_knowledge:CHANGE-ME@127.0.0.1:5432/ratatoskr
 RATATOSKR__STORAGE__BLOB_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-knowledge

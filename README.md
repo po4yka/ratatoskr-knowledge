@@ -128,7 +128,9 @@ The process needs PostgreSQL 17 with the pgvector extension and a writable blob 
 PostgreSQL administrator provisions the `ratatoskr_knowledge` role and installs the extension once,
 before the first start, with `deploy/postgres/role.sql` (see `deploy/README.md`): pgvector is not a
 trusted extension, so the service role cannot run the `create extension` statement in `schema.sql`
-itself and startup fails with `permission denied to create extension "vector"` without that step.
+itself and startup fails with `permission denied to create extension "vector"` without that step. The
+same file grants the role `usage` on schema `public`, where the `vector` type lives; without it
+`schema.sql` fails with `type "vector" does not exist`.
 These settings have finite defaults and can be changed with strict environment keys:
 
 ```text
@@ -225,7 +227,9 @@ ingest and search keep serving while it is down. The recap worker does not pull 
 source is down, so they wait on the durable; it probes again after 1 second, doubling to 30
 seconds, and logs one warning when the source becomes unreachable and one line when it answers
 again. `SIGINT` or `SIGTERM` makes readiness fail, drains the consumer, and joins it within the
-configured shutdown bound. Readiness also requires both listeners bound. The recap provider mode defaults to `openrouter`, which requires the
+configured shutdown bound. Readiness also requires both listeners bound.
+
+The recap provider mode defaults to `openrouter`, which requires the
 existing controlled provider configuration and spend limits; `scripted` mode answers every recap
 with fixed text, is accepted only with an anonymous loopback `nats://` broker, and logs a warning
 naming the mode at startup, so an operator who only sets `RATATOSKR__CHANNEL_RECAP__ENABLED=true`
