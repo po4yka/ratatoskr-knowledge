@@ -72,7 +72,8 @@ impl Lifecycle {
         }
     }
 
-    /// Records whether both recap transport and source dependencies are usable.
+    /// Records whether the recap worker's bus connection and durable are verified. The digest
+    /// source is deliberately not part of it (XR-021 CONTRACTS.md R3-09).
     pub fn set_channel_recap_ready(&self, ready: bool) {
         if ready {
             self.state.fetch_or(CHANNEL_RECAP_READY, Ordering::AcqRel);

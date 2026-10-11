@@ -57,6 +57,16 @@ impl Harness {
         })
     }
 
+    /// The broker context the harness provisioned and publishes through.
+    pub(crate) fn context(&self) -> &jetstream::Context {
+        &self.context
+    }
+
+    /// The blob store the ingest worker writes through.
+    pub(crate) fn blobs(&self) -> BlobStore {
+        self.blobs.clone()
+    }
+
     /// The directory the worker's blob store writes under.
     pub(crate) fn blob_root(&self) -> &std::path::Path {
         self.root.path()
@@ -78,7 +88,16 @@ impl Harness {
         config: Config,
         provider: Arc<P>,
     ) -> Worker {
-        let lifecycle = Lifecycle::starting_with_ingest();
+        self.spawn_with_lifecycle(config, provider, Lifecycle::starting_with_ingest())
+    }
+
+    /// Spawns the ingest worker into a lifecycle the test shares with another worker.
+    pub(crate) fn spawn_with_lifecycle<P: LlmProvider + 'static>(
+        &self,
+        config: Config,
+        provider: Arc<P>,
+        lifecycle: Lifecycle,
+    ) -> Worker {
         let (drain, receiver) = watch::channel(false);
         let handle = spawn_ingest_workers_with_provider(
             config,

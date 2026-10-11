@@ -5,6 +5,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use ratatoskr_channel_digest_contracts::manifest_path;
 use ratatoskr_document_contracts::{
     ContentDocumentExtracted, Document, DocumentAddress, DocumentBlock,
 };
@@ -16,6 +17,7 @@ use ratatoskr_identifiers::{
     BlobOwner, BlobRef, BlockId, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, Extensions,
     MediaType, RepositoryAnalysisRequestId, RepositoryId, TenantRef,
 };
+use ratatoskr_knowledge::test_support::recap::{fixture_manifest_bytes, fixture_source};
 use ratatoskr_knowledge::{
     GenerationRequest, LlmProvider, ProviderError, ProviderFailure, ProviderIdentity,
     ProviderResponse, ProviderUsage,
@@ -249,7 +251,15 @@ pub(crate) struct HttpStub {
 impl HttpStub {
     /// Serves `routes`, each `(path, status, body)`.
     pub(crate) async fn start(routes: Vec<(String, u16, Vec<u8>)>) -> Result<Self, std::io::Error> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+        Self::start_at(SocketAddr::from(([127, 0, 0, 1], 0)), routes).await
+    }
+
+    /// Serves `routes` on `address`, for a test that decides the port before the server exists.
+    pub(crate) async fn start_at(
+        address: SocketAddr,
+        routes: Vec<(String, u16, Vec<u8>)>,
+    ) -> Result<Self, std::io::Error> {
+        let listener = tokio::net::TcpListener::bind(address).await?;
         let address = listener.local_addr()?;
         let routes: Arc<HashMap<String, (u16, Vec<u8>)>> = Arc::new(
             routes
@@ -345,4 +355,35 @@ async fn serve(
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(&body).await?;
     stream.flush().await
+}
+
+/// A valid recap command and the digest-source route that serves its manifest.
+pub(crate) struct RecapCommand {
+    pub(crate) command: Vec<u8>,
+    pub(crate) manifest_path: String,
+    pub(crate) manifest: Vec<u8>,
+}
+
+pub(crate) fn recap_command() -> Result<RecapCommand, Box<dyn std::error::Error>> {
+    let (manifest, request) = fixture_manifest_bytes(
+        vec![fixture_source(901, 2, "authorized bus recap fixture")],
+        "en",
+        1,
+    )?;
+    let command = serde_json::to_vec(&serde_json::json!({
+        "command_id": "018f0000-0000-7000-8000-000000000c51",
+        "command_type": "knowledge.channel_digest_recap.requested.v1",
+        "issued_at": "2026-08-21T10:00:01Z",
+        "producer": "ratatoskr-channel-digests",
+        "aggregate_id": format!("channel-digest-run:{}", request.digest_run_id),
+        "correlation_id": format!("operation:{}", request.operation_id.0),
+        "tenant_id": request.owner,
+        "schema_version": 1,
+        "payload": request,
+    }))?;
+    Ok(RecapCommand {
+        command,
+        manifest_path: manifest_path(&request.manifest_ref),
+        manifest,
+    })
 }

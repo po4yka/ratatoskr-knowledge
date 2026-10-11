@@ -213,10 +213,15 @@ cargo run --locked -p ratatoskr-knowledge-service
 ```
 
 Readiness becomes successful after the blob directory, database connection, and current schema are
-ready. When channel recap is enabled it additionally requires the exact pre-provisioned durable and
-an authenticated `GET /ready` from the loopback digest source. `SIGINT` or `SIGTERM` makes readiness
-fail, drains the consumer, and joins it within the configured shutdown bound. Readiness also
-requires both listeners bound. The recap provider mode defaults to `openrouter`, which requires the
+ready. When channel recap is enabled it additionally requires the recap worker's bus connection and
+the exact pre-provisioned durable: a missing or different durable is Knowledge's own
+misconfiguration. It does not require the digest source. Whether the channel-digests API answers an
+authenticated `GET /ready` is reported by the gauge `knowledge_channel_recap_source_up` (1 or 0), so
+ingest and search keep serving while it is down. The recap worker does not pull commands while the
+source is down, so they wait on the durable; it probes again after 1 second, doubling to 30
+seconds, and logs one warning when the source becomes unreachable and one line when it answers
+again. `SIGINT` or `SIGTERM` makes readiness fail, drains the consumer, and joins it within the
+configured shutdown bound. Readiness also requires both listeners bound. The recap provider mode defaults to `openrouter`, which requires the
 existing controlled provider configuration and spend limits; `scripted` mode answers every recap
 with fixed text, is accepted only with an anonymous loopback `nats://` broker, and logs a warning
 naming the mode at startup, so an operator who only sets `RATATOSKR__CHANNEL_RECAP__ENABLED=true`

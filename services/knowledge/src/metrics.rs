@@ -1,7 +1,7 @@
 //! Bounded label-free operator counters rendered as Prometheus text.
 
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ratatoskr_knowledge::RankingPath;
 
@@ -18,6 +18,7 @@ pub struct Metrics {
     search_lexical: AtomicU64,
     search_hybrid: AtomicU64,
     channel_recap_redeliveries: AtomicU64,
+    channel_recap_source_up: AtomicBool,
 }
 
 impl Metrics {
@@ -48,6 +49,13 @@ impl Metrics {
     pub fn record_channel_recap_redelivery(&self) {
         self.channel_recap_redeliveries
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records whether the channel-digests API answered its last probe.
+    ///
+    /// This is reported, never a readiness condition: Knowledge answers library traffic without it.
+    pub fn set_channel_recap_source_up(&self, up: bool) {
+        self.channel_recap_source_up.store(up, Ordering::Relaxed);
     }
 
     /// Records which ranking path served one search request.
@@ -109,6 +117,11 @@ impl Metrics {
             &mut text,
             "knowledge_channel_recap_redeliveries_total",
             self.channel_recap_redeliveries.load(Ordering::Relaxed),
+        );
+        let _ = writeln!(
+            text,
+            "# TYPE knowledge_channel_recap_source_up gauge\nknowledge_channel_recap_source_up {}",
+            u8::from(self.channel_recap_source_up.load(Ordering::Relaxed))
         );
         text
     }

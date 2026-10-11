@@ -13,6 +13,7 @@ mod authorized;
 mod fixtures;
 mod harness;
 mod lifecycle;
+mod recap_source;
 mod repository;
 mod resume;
 mod tenant;

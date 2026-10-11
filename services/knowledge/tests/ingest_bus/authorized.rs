@@ -16,10 +16,7 @@ use std::time::Duration;
 
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, pull};
 use async_nats::jetstream::{self, stream};
-use ratatoskr_channel_digest_contracts::manifest_path;
-use ratatoskr_knowledge::test_support::recap::{
-    fixture_manifest_bytes, fixture_source, seed_recap_run,
-};
+use ratatoskr_knowledge::test_support::recap::{fixture_source, seed_recap_run};
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     BlobStore, ChannelRecapProviderMode, ChannelRecapRunState, ChannelRecapRunStore, Config,
@@ -34,8 +31,8 @@ use tokio::sync::watch;
 use crate::fixtures::{
     ARCHIVE_ANALYSIS, ARTICLE_ANALYSIS, CAPTURED, CONTRACT_CONVERSATION, CONVERSATION_ADDED,
     EVENT_A, EVENT_B, EVENT_C, EVENT_D, HttpStub, OWNER, REPOSITORY_ANALYSIS_ABSENT,
-    REPOSITORY_REQUESTED, SOCIAL_ANALYSIS, envelope, extracted_document, repository_request,
-    routed, social_payload,
+    REPOSITORY_REQUESTED, SOCIAL_ANALYSIS, envelope, extracted_document, recap_command,
+    repository_request, routed, social_payload,
 };
 use crate::ingest_support::{TestResult, eventually};
 
@@ -293,37 +290,6 @@ async fn seed_failed_recap(database: &TestDatabase) -> TestResult {
         )
         .await?;
     Ok(())
-}
-
-/// A valid recap command and the digest-source route that serves its manifest.
-struct RecapCommand {
-    command: Vec<u8>,
-    manifest_path: String,
-    manifest: Vec<u8>,
-}
-
-fn recap_command() -> Result<RecapCommand, Box<dyn std::error::Error>> {
-    let (manifest, request) = fixture_manifest_bytes(
-        vec![fixture_source(901, 2, "authorized bus recap fixture")],
-        "en",
-        1,
-    )?;
-    let command = serde_json::to_vec(&serde_json::json!({
-        "command_id": "018f0000-0000-7000-8000-000000000c51",
-        "command_type": "knowledge.channel_digest_recap.requested.v1",
-        "issued_at": "2026-08-21T10:00:01Z",
-        "producer": "ratatoskr-channel-digests",
-        "aggregate_id": format!("channel-digest-run:{}", request.digest_run_id),
-        "correlation_id": format!("operation:{}", request.operation_id.0),
-        "tenant_id": request.owner,
-        "schema_version": 1,
-        "payload": request,
-    }))?;
-    Ok(RecapCommand {
-        command,
-        manifest_path: manifest_path(&request.manifest_ref),
-        manifest,
-    })
 }
 
 /// One valid message for each of the five durables.

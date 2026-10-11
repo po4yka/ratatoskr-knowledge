@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_nats::connection::State;
 use async_nats::jetstream;
 use futures_util::StreamExt as _;
 use ratatoskr_channel_digest_contracts::{
@@ -74,6 +75,65 @@ pub fn spawn_channel_recap_worker(
     })
 }
 
+/// What one recap supervisor shares with every reconnect of its consumer.
+struct RecapWorker<'a> {
+    config: &'a Config,
+    database: &'a Database,
+    blobs: &'a BlobStore,
+    provider: &'a RuntimeProvider,
+    lifecycle: &'a Lifecycle,
+    metrics: &'a Metrics,
+}
+
+/// The first and the longest wait between two probes of an unreachable digest source.
+const SOURCE_RETRY_MIN: Duration = Duration::from_secs(1);
+const SOURCE_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// Whether the digest source answered the last time it was asked.
+///
+/// It lives in the supervisor, not in one connection, so a bus reconnect while the source stays
+/// down does not log the same transition again (XR-021 CONTRACTS.md R3-09).
+#[derive(Debug)]
+struct SourceWatch {
+    reachable: bool,
+}
+
+impl SourceWatch {
+    /// A source is assumed reachable until a probe says otherwise, so a healthy start logs nothing.
+    const fn new() -> Self {
+        Self { reachable: true }
+    }
+
+    /// Records one probe: the gauge follows every probe, the log only a change of state.
+    fn observe(&mut self, reachable: bool, metrics: &Metrics) {
+        metrics.set_channel_recap_source_up(reachable);
+        if reachable == self.reachable {
+            return;
+        }
+        self.reachable = reachable;
+        if reachable {
+            tracing::info!(
+                class = "source_reachable",
+                "channel recap digest source answers again"
+            );
+        } else {
+            tracing::warn!(
+                class = "source_unavailable",
+                "channel recap digest source is unreachable; commands wait on the durable"
+            );
+        }
+    }
+}
+
+/// How one pass over the message stream ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// Drain began.
+    Drained,
+    /// The digest source stopped answering between two messages.
+    SourceDown,
+}
+
 async fn supervise(
     config: Config,
     database: Database,
@@ -90,11 +150,17 @@ async fn supervise(
             return;
         }
     };
+    let worker = RecapWorker {
+        config: &config,
+        database: &database,
+        blobs: &blobs,
+        provider: &provider,
+        lifecycle: &lifecycle,
+        metrics: &metrics,
+    };
+    let mut source_watch = SourceWatch::new();
     while !*drain.borrow() {
-        let result = consume_once(
-            &config, &database, &blobs, &provider, &lifecycle, &mut drain, &metrics,
-        )
-        .await;
+        let result = consume_once(&worker, &mut drain, &mut source_watch).await;
         lifecycle.set_channel_recap_ready(false);
         if *drain.borrow() {
             break;
@@ -118,16 +184,17 @@ async fn supervise(
     }
 }
 
+/// Connects, verifies the durable, reports ready, then serves the durable while the digest source
+/// answers and waits for it while it does not.
+///
+/// Readiness follows the bus connection and the durable only: the digest source is Knowledge's
+/// own dependency for recaps, not a condition for answering library traffic (R3-09).
 async fn consume_once(
-    config: &Config,
-    database: &Database,
-    blobs: &BlobStore,
-    provider: &RuntimeProvider,
-    lifecycle: &Lifecycle,
+    worker: &RecapWorker<'_>,
     drain: &mut watch::Receiver<bool>,
-    metrics: &Metrics,
+    source_watch: &mut SourceWatch,
 ) -> Result<(), ChannelRecapWorkerError> {
-    let recap = &config.channel_recap;
+    let recap = &worker.config.channel_recap;
     let client = connect_bus(recap).await?;
     let context = jetstream::new(client.clone());
     let consumer: jetstream::consumer::PullConsumer = context
@@ -137,19 +204,72 @@ async fn consume_once(
     verify_consumer(&consumer, recap)?;
     let source = source_client(
         recap,
-        Duration::from_millis(config.limits.provider_timeout_ms),
+        Duration::from_millis(worker.config.limits.provider_timeout_ms),
     )?;
-    source
-        .probe()
-        .await
-        .map_err(|_| ChannelRecapWorkerError::Source)?;
+    worker.lifecycle.set_channel_recap_ready(true);
+    loop {
+        if !wait_for_source(&source, &client, drain, source_watch, worker.metrics).await? {
+            return Ok(());
+        }
+        if serve(worker, &consumer, &context, &source, drain).await? == Served::Drained {
+            return Ok(());
+        }
+    }
+}
+
+/// Probes the digest source until it answers, backing off from 1 s to 30 s between probes.
+///
+/// Returns `Ok(false)` when drain began first and an error when the bus connection is lost while
+/// waiting. No pull stream exists meanwhile, so no command is prefetched from the durable.
+async fn wait_for_source(
+    source: &DigestSourceClient,
+    client: &async_nats::Client,
+    drain: &mut watch::Receiver<bool>,
+    source_watch: &mut SourceWatch,
+    metrics: &Metrics,
+) -> Result<bool, ChannelRecapWorkerError> {
+    let mut delay = SOURCE_RETRY_MIN;
+    loop {
+        // cancel-safe: watch::changed and the probe request commit nothing.
+        tokio::select! {
+            biased;
+            _ = drain.changed() => return Ok(false),
+            probed = source.probe() => {
+                source_watch.observe(probed.is_ok(), metrics);
+                if probed.is_ok() {
+                    return Ok(true);
+                }
+            }
+        }
+        // cancel-safe: watch::changed and sleep retain no partial work.
+        tokio::select! {
+            biased;
+            _ = drain.changed() => return Ok(false),
+            () = tokio::time::sleep(delay) => {}
+        }
+        if client.connection_state() != State::Connected {
+            return Err(ChannelRecapWorkerError::Bus);
+        }
+        delay = delay.saturating_mul(2).min(SOURCE_RETRY_MAX);
+    }
+}
+
+/// Pulls and handles commands until drain, a lost bus connection or a silent digest source.
+async fn serve(
+    worker: &RecapWorker<'_>,
+    consumer: &jetstream::consumer::PullConsumer,
+    context: &jetstream::Context,
+    source: &DigestSourceClient,
+    drain: &mut watch::Receiver<bool>,
+) -> Result<Served, ChannelRecapWorkerError> {
+    let config = worker.config;
+    let recap = &config.channel_recap;
     let mut messages = consumer
         .stream()
         .max_messages_per_batch(usize::try_from(recap.fetch_batch).unwrap_or(1))
         .messages()
         .await
         .map_err(|_| ChannelRecapWorkerError::Bus)?;
-    lifecycle.set_channel_recap_ready(true);
     let mut probe = tokio::time::interval(Duration::from_secs(5));
     probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     probe.tick().await;
@@ -157,9 +277,11 @@ async fn consume_once(
         // cancel-safe: watch::changed, Interval::tick, and StreamExt::next do not commit work.
         tokio::select! {
             biased;
-            _ = drain.changed() => return Ok(()),
+            _ = drain.changed() => return Ok(Served::Drained),
             _ = probe.tick() => {
-                source.probe().await.map_err(|_| ChannelRecapWorkerError::Source)?;
+                if source.probe().await.is_err() {
+                    return Ok(Served::SourceDown);
+                }
             }
             next = messages.next() => {
                 let Some(next) = next else {
@@ -173,17 +295,17 @@ async fn consume_once(
                     Duration::from_secs(recap.ack_wait_seconds),
                     async {
                         let disposition = process_message(
-                            database,
-                            blobs,
-                            &source,
-                            provider,
+                            worker.database,
+                            worker.blobs,
+                            source,
+                            worker.provider,
                             config.limits.context_characters,
                             Duration::from_millis(config.limits.provider_timeout_ms),
                             config.limits.provider_max_output_tokens,
                             &recap.bus_subject,
                             message.payload.as_ref(),
                         ).await;
-                        publish_outbox(database, &context).await?;
+                        publish_outbox(worker.database, context).await?;
                         Ok::<_, ChannelRecapWorkerError>(disposition)
                     },
                 ).await?;
@@ -192,7 +314,7 @@ async fn consume_once(
                     Disposition::Term => jetstream::AckKind::Term,
                     Disposition::Nak => {
                         let delivered = message.info().map_or(1, |info| info.delivered);
-                        metrics.record_channel_recap_redelivery();
+                        worker.metrics.record_channel_recap_redelivery();
                         jetstream::AckKind::Nak(Some(redelivery_delay(delivered)))
                     }
                 };
