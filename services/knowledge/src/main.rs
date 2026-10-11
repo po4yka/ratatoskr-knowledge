@@ -634,13 +634,13 @@ async fn serve_listeners(
     Ok(())
 }
 
-#[cfg(unix)]
-async fn shutdown_signal() -> Result<(), std::io::Error> {
 /// Resolves once drain begins.
 async fn drained(mut drain: watch::Receiver<bool>) {
     let _ignored = drain.changed().await;
 }
 
+#[cfg(unix)]
+async fn shutdown_signal() -> Result<(), std::io::Error> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = tokio::signal::ctrl_c() => result,

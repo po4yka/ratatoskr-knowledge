@@ -257,9 +257,9 @@ impl Config {
         }
         config.provider.openrouter = draft.finish()?;
         config.provider.embeddings = embeddings_draft.finish()?;
+        validate_listeners(&config)?;
         validate_channel_recap(&config)?;
         validate_ingest(&config)?;
-        validate_listeners(&config)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -461,7 +461,6 @@ fn apply_embeddings_entry(
         "RATATOSKR__PROVIDER__EMBEDDINGS__MODEL" => {
             validate_model_id(key, value)?;
             draft.model = Some(value.to_owned());
-            api: ApiConfig::default(),
         }
         "RATATOSKR__PROVIDER__EMBEDDINGS__BASE_URL" => {
             draft.base_url = Some(value.to_owned());
@@ -617,6 +616,7 @@ impl Default for Config {
             admin: AdminConfig {
                 listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9081),
             },
+            api: ApiConfig::default(),
             storage: StorageConfig {
                 database_url: "postgres://knowledge:knowledge@127.0.0.1:5432/knowledge".to_owned(),
                 blob_root: PathBuf::from("data/blobs"),
