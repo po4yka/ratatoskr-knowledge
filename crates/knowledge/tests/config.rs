@@ -616,3 +616,11 @@ fn scripted_mode_requires_a_loopback_nats_endpoint() -> Result<(), Box<dyn std::
     assert!(!dormant.channel_recap.enabled);
     Ok(())
 }
+
+/// XR-021 CONTRACTS.md R2-05 (d): a prefetched batch must not outlive the 30 second ack wait.
+#[test]
+fn recap_fetch_batch_defaults_to_one() {
+    let defaults = Config::default();
+    assert_eq!(defaults.channel_recap.fetch_batch, 1);
+    assert_eq!(defaults.channel_recap.ack_wait_seconds, 30);
+}

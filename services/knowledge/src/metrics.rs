@@ -17,6 +17,7 @@ pub struct Metrics {
     search_browse: AtomicU64,
     search_lexical: AtomicU64,
     search_hybrid: AtomicU64,
+    channel_recap_redeliveries: AtomicU64,
 }
 
 impl Metrics {
@@ -41,6 +42,12 @@ impl Metrics {
     pub fn record_index_failures(&self, count: usize) {
         self.embedding_index_failures
             .fetch_add(saturate(count), Ordering::Relaxed);
+    }
+
+    /// Records one recap message scheduled for redelivery after a transient failure.
+    pub fn record_channel_recap_redelivery(&self) {
+        self.channel_recap_redeliveries
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records which ranking path served one search request.
@@ -97,6 +104,11 @@ impl Metrics {
             &mut text,
             "search_hybrid_total",
             self.search_hybrid.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut text,
+            "knowledge_channel_recap_redeliveries_total",
+            self.channel_recap_redeliveries.load(Ordering::Relaxed),
         );
         text
     }

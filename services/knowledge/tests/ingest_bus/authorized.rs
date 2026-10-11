@@ -428,6 +428,7 @@ async fn every_knowledge_consumer_runs_and_acknowledges_under_the_pinned_identit
         lifecycle.clone(),
         receiver.clone(),
         Arc::new(RateLimiter::new(Duration::ZERO)),
+        Arc::new(ratatoskr_knowledge_service::Metrics::new()),
     );
     let ingest_worker = spawn_ingest_workers_with_provider(
         config,

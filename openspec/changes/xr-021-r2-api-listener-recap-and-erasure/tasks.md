@@ -10,8 +10,8 @@
 
 ## 3. Recap redelivery, batch size and progress (R2-05 c and d)
 
-- [ ] 3.1 RED: add `services/knowledge/tests/channel_recap_redelivery.rs` (delay table, redelivery with growing gaps and the counter, progress acknowledgement against a 3 second ack wait) and `recap_fetch_batch_defaults_to_one` to `crates/knowledge/tests/config.rs`; run them and confirm the fixed 2 second Nak, batch 32 and redelivery after the ack wait.
-- [ ] 3.2 GREEN: compute the Nak delay from the delivery count, add the counter, default the batch to one and run the handler beside a progress ticker without dropping the handler.
+- [x] 3.1 RED: add `services/knowledge/tests/channel_recap_redelivery.rs` (delay table, redelivery with growing gaps and the counter, progress acknowledgement against a 3 second ack wait) and `recap_fetch_batch_defaults_to_one` to `crates/knowledge/tests/config.rs`; run them and confirm the fixed 2 second Nak, batch 32 and redelivery after the ack wait.
+- [x] 3.2 GREEN: compute the Nak delay from the delivery count, add the counter, default the batch to one and run the handler beside a progress ticker without dropping the handler.
 
 ## 4. Tenant deletion covers the channel recap tables (R2-06)
 

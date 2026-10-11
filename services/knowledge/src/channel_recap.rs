@@ -21,9 +21,10 @@ use ratatoskr_knowledge::{
 };
 use tokio::sync::watch;
 
-use crate::Lifecycle;
 use crate::bus::{self, DurableSpec};
+use crate::channel_recap_delivery::{redelivery_delay, run_with_progress};
 use crate::provider_runtime::{ControlledOpenRouter, openrouter_provider};
+use crate::{Lifecycle, Metrics};
 
 const PRODUCER: &str = "ratatoskr-channel-digests";
 
@@ -63,9 +64,13 @@ pub fn spawn_channel_recap_worker(
     lifecycle: Lifecycle,
     drain: watch::Receiver<bool>,
     limiter: Arc<RateLimiter>,
+    metrics: Arc<Metrics>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        supervise(config, database, blobs, lifecycle, drain, limiter).await;
+        Box::pin(supervise(
+            config, database, blobs, lifecycle, drain, limiter, metrics,
+        ))
+        .await;
     })
 }
 
@@ -76,6 +81,7 @@ async fn supervise(
     lifecycle: Lifecycle,
     mut drain: watch::Receiver<bool>,
     limiter: Arc<RateLimiter>,
+    metrics: Arc<Metrics>,
 ) {
     let provider = match runtime_provider(&config, &database, limiter) {
         Ok(provider) => provider,
@@ -86,7 +92,7 @@ async fn supervise(
     };
     while !*drain.borrow() {
         let result = consume_once(
-            &config, &database, &blobs, &provider, &lifecycle, &mut drain,
+            &config, &database, &blobs, &provider, &lifecycle, &mut drain, &metrics,
         )
         .await;
         lifecycle.set_channel_recap_ready(false);
@@ -119,6 +125,7 @@ async fn consume_once(
     provider: &RuntimeProvider,
     lifecycle: &Lifecycle,
     drain: &mut watch::Receiver<bool>,
+    metrics: &Metrics,
 ) -> Result<(), ChannelRecapWorkerError> {
     let recap = &config.channel_recap;
     let client = connect_bus(recap).await?;
@@ -138,7 +145,7 @@ async fn consume_once(
         .map_err(|_| ChannelRecapWorkerError::Source)?;
     let mut messages = consumer
         .stream()
-        .max_messages_per_batch(usize::try_from(recap.fetch_batch).unwrap_or(32))
+        .max_messages_per_batch(usize::try_from(recap.fetch_batch).unwrap_or(1))
         .messages()
         .await
         .map_err(|_| ChannelRecapWorkerError::Bus)?;
@@ -159,22 +166,35 @@ async fn consume_once(
                     return Err(ChannelRecapWorkerError::Bus);
                 };
                 let message = next.map_err(|_| ChannelRecapWorkerError::Bus)?;
-                let disposition = process_message(
-                    database,
-                    blobs,
-                    &source,
-                    provider,
-                    config.limits.context_characters,
-                    Duration::from_millis(config.limits.provider_timeout_ms),
-                    config.limits.provider_max_output_tokens,
-                    &recap.bus_subject,
-                    message.payload.as_ref(),
-                ).await;
-                publish_outbox(database, &context).await?;
+                // The handler runs to completion beside a progress ticker (never dropped), so a
+                // message that outlasts the ack wait is not redelivered under its own handler.
+                let disposition = run_with_progress(
+                    &message,
+                    Duration::from_secs(recap.ack_wait_seconds),
+                    async {
+                        let disposition = process_message(
+                            database,
+                            blobs,
+                            &source,
+                            provider,
+                            config.limits.context_characters,
+                            Duration::from_millis(config.limits.provider_timeout_ms),
+                            config.limits.provider_max_output_tokens,
+                            &recap.bus_subject,
+                            message.payload.as_ref(),
+                        ).await;
+                        publish_outbox(database, &context).await?;
+                        Ok::<_, ChannelRecapWorkerError>(disposition)
+                    },
+                ).await?;
                 let ack = match disposition {
                     Disposition::Ack => jetstream::AckKind::Ack,
                     Disposition::Term => jetstream::AckKind::Term,
-                    Disposition::Nak => jetstream::AckKind::Nak(Some(Duration::from_secs(2))),
+                    Disposition::Nak => {
+                        let delivered = message.info().map_or(1, |info| info.delivered);
+                        metrics.record_channel_recap_redelivery();
+                        jetstream::AckKind::Nak(Some(redelivery_delay(delivered)))
+                    }
                 };
                 message.ack_with(ack).await.map_err(|_| ChannelRecapWorkerError::Bus)?;
             }
@@ -352,6 +372,10 @@ fn runtime_provider(
     limiter: Arc<RateLimiter>,
 ) -> Result<RuntimeProvider, ChannelRecapWorkerError> {
     if config.channel_recap.provider_mode == ChannelRecapProviderMode::Scripted {
+        tracing::warn!(
+            provider_mode = "scripted",
+            "channel recap answers every request with fixed synthetic text"
+        );
         return Ok(RuntimeProvider::Scripted);
     }
     openrouter_provider(config, database, limiter)
