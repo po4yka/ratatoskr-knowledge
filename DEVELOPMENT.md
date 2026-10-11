@@ -146,7 +146,10 @@ export KNOWLEDGE_TEST_DATABASE_URL=postgres://knowledge:knowledge@127.0.0.1:1543
 ```
 
 A stock `postgres:17` image fails schema application with "extension vector is not available"; that
-error means the image, not the code.
+error means the image, not the code. A deployed host differs in one way: the service role is not a
+superuser and cannot install pgvector, so a PostgreSQL administrator runs `deploy/postgres/role.sql`
+once before the first start (it creates the `ratatoskr_knowledge` role and installs the extension);
+see `deploy/README.md`.
 
 The recap process boot test also expects a disposable JetStream endpoint. Start the digest-pinned
 fixture on the documented local port before the full gate:

@@ -25,5 +25,5 @@
 
 ## 6. Provisioning and documentation (R3-11, R3-19)
 
-- [ ] 6.1 RED: add `services/knowledge/tests/deployment_profile.rs::the_example_names_the_shared_database_and_the_role_file_exists`; run it and confirm the example names another database and the role file is absent.
-- [ ] 6.2 GREEN: add `deploy/postgres/role.sql`, the PostgreSQL paragraphs and the README rewrite. Documentation and provisioning files cannot start from a failing implementation test; the loader test in 6.1 is the check.
+- [x] 6.1 RED: add `services/knowledge/tests/deployment_profile.rs::the_example_names_the_shared_database_and_the_role_file_exists`; run it and confirm the example names another database and the role file is absent.
+- [x] 6.2 GREEN: add `deploy/postgres/role.sql`, the PostgreSQL paragraphs and the README rewrite. Documentation and provisioning files cannot start from a failing implementation test; the loader test in 6.1 is the check.

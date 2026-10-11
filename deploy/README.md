@@ -1,8 +1,14 @@
 # Knowledge deployment
 
+## PostgreSQL
+
+Knowledge connects to the one `ratatoskr` database as its own role, `ratatoskr_knowledge`, with the URL `postgres://ratatoskr_knowledge:CHANGE-ME@127.0.0.1:5432/ratatoskr`. `postgres/role.sql` creates the role without a password, grants it `connect` and `create` on the database and installs the `vector` extension. It must be run by a PostgreSQL administrator (a superuser): pgvector is not a trusted extension, so the unprivileged service role cannot run the `create extension if not exists vector` statement in `schema.sql`, and without this step the first start fails with `permission denied to create extension "vector"`. Installing the extension first makes that statement a no-op. Set the role's password separately with `\password ratatoskr_knowledge`; no credential belongs in this repository.
+
+Start order on a fresh host: Platform's `01-database-and-roles.sql` (creates the `ratatoskr` database), then `postgres/role.sql` as an administrator, then the first Knowledge start, which creates the `knowledge` schema from `schema.sql`.
+
 ## NATS identity
 
-`nats/identity.conf` is the Knowledge stanza of the fleet's single reviewed NATS ACL. It is a byte-equal copy of the `KNOWLEDGE` stanza of `ratatoskr-platform/deploy/nats/ratatoskr.conf`; edit it only together with Platform's copy. One seed, `/etc/ratatoskr/knowledge.nkey`, serves the ingest worker and the channel recap worker.
+`nats/identity.conf` is the Knowledge stanza of the fleet's single reviewed NATS ACL. It is a byte-equal copy of the `KNOWLEDGE` stanza of `ratatoskr-platform/deploy/nats/ratatoskr.conf`; edit it only together with Platform's copy. One seed, `/etc/ratatoskr/knowledge.nkey`, serves the ingest worker and the channel recap worker. The identity may subscribe only to its own inbox prefix, `_INBOX_knowledge`, and every connection the service opens sets that prefix, so no other service's deliveries are readable from here and a build without the prefix cannot complete a JetStream request under this ACL. Reload NATS and deploy the services of one snapshot together.
 
 ## Operator example
 

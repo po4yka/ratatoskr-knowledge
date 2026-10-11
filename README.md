@@ -124,8 +124,12 @@ SHA-256 address.
 
 ## Run the process
 
-The process needs PostgreSQL 17 and a writable blob directory. These settings have finite defaults
-and can be changed with strict environment keys:
+The process needs PostgreSQL 17 with the pgvector extension and a writable blob directory. A
+PostgreSQL administrator provisions the `ratatoskr_knowledge` role and installs the extension once,
+before the first start, with `deploy/postgres/role.sql` (see `deploy/README.md`): pgvector is not a
+trusted extension, so the service role cannot run the `create extension` statement in `schema.sql`
+itself and startup fails with `permission denied to create extension "vector"` without that step.
+These settings have finite defaults and can be changed with strict environment keys:
 
 ```text
 RATATOSKR__ADMIN__LISTEN_ADDRESS
@@ -379,6 +383,15 @@ remains a separate planned change.
 
 ## Workspace integration
 
-The planned `ratatoskr-workspace` topology will pin Knowledge with compatible source contracts and
-producers. No workspace repository pins or cross-service Knowledge integration profile exist yet;
-this repository remains independently buildable and testable.
+`ratatoskr-workspace` pins this repository as `repos/knowledge` (profiles `core`, `social` and
+`ai-archive`) together with the producers and contracts it consumes, and its harness checks the
+parts of this repository that other services depend on: `deploy/nats/identity.conf` against the
+KNOWLEDGE stanza of Platform's ACL, the five durables this service verifies against the table Edge
+provisions, and the ports in `deploy/systemd/knowledge.conf.example` against the deployment target.
+The workspace's Telegram library profile starts Knowledge for search and read-state; it needs Docker
+and has not been run for this snapshot. The only cross-service run of Knowledge so far is the native
+smoke of the channel-digest recap path (Platform Edge, the bus, channel-digests, Knowledge with the
+scripted provider, back to the Edge operation), which passed with Knowledge's bus credential
+removed, so the deployed ACL was not in force for it; ingestion from the extractor, social
+captures, tombstone delivery and the repository analysis loop have no cross-service run. This
+repository remains independently buildable and testable.

@@ -160,3 +160,43 @@ fn secrets_in_the_example_are_placeholders() -> Result<(), String> {
     }
     Ok(())
 }
+
+const ROLE_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../deploy/postgres/role.sql"
+);
+
+/// XR-021 CONTRACTS.md R3-11: every service connects to the one `ratatoskr` database as its own
+/// role, and the checked-in provisioning file creates that role. Knowledge's file also installs
+/// `pgvector`, which only a `PostgreSQL` administrator may do.
+#[test]
+fn the_example_names_the_shared_database_and_the_role_file_exists() -> Result<(), String> {
+    let text = std::fs::read_to_string(EXAMPLE).map_err(|error| error.to_string())?;
+    let entries = parse_environment_file(&text)?;
+    assert_eq!(
+        entries
+            .get("RATATOSKR__STORAGE__DATABASE_URL")
+            .map(String::as_str),
+        Some("postgres://ratatoskr_knowledge:CHANGE-ME@127.0.0.1:5432/ratatoskr")
+    );
+
+    let role = std::fs::read_to_string(ROLE_FILE)
+        .map_err(|error| format!("deploy/postgres/role.sql is missing: {error}"))?;
+    for required in [
+        "ratatoskr_knowledge",
+        "grant connect, create on database ratatoskr",
+        "create extension if not exists vector",
+        "nosuperuser nocreatedb nocreaterole noreplication nobypassrls",
+        "\\connect ratatoskr",
+    ] {
+        assert!(
+            role.contains(required),
+            "role.sql must contain `{required}`"
+        );
+    }
+    assert!(
+        !role.to_lowercase().contains("password '"),
+        "no credential belongs in the role file"
+    );
+    Ok(())
+}
