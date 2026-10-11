@@ -51,9 +51,32 @@ pub fn fixture_request(
     output_language: &str,
     variant: u32,
 ) -> Result<KnowledgeChannelDigestRecapRequested, serde_json::Error> {
+    fixture_request_for(
+        FIXTURE_OWNER,
+        bytes,
+        sources,
+        channels,
+        output_language,
+        variant,
+    )
+}
+
+/// [`fixture_request`] for an explicit owner.
+///
+/// # Errors
+///
+/// Returns a decoding error when the fixture values do not form a valid request.
+pub fn fixture_request_for(
+    owner: &str,
+    bytes: &[u8],
+    sources: usize,
+    channels: usize,
+    output_language: &str,
+    variant: u32,
+) -> Result<KnowledgeChannelDigestRecapRequested, serde_json::Error> {
     serde_json::from_value(serde_json::json!({
         "operation_id": variant_id(201, variant),
-        "owner": FIXTURE_OWNER,
+        "owner": owner,
         "digest_run_id": variant_id(203, variant),
         "window": {
             "start_at": "2026-08-20T10:00:00Z",
@@ -107,6 +130,20 @@ fn order_key(source: &serde_json::Value) -> (String, String, u128, u64) {
 ///
 /// Returns an error when the fixture values cannot be encoded.
 pub fn fixture_manifest_bytes(
+    sources: Vec<serde_json::Value>,
+    output_language: &str,
+    variant: u32,
+) -> Result<(Vec<u8>, KnowledgeChannelDigestRecapRequested), FixtureError> {
+    fixture_manifest_bytes_for(FIXTURE_OWNER, sources, output_language, variant)
+}
+
+/// [`fixture_manifest_bytes`] for an explicit owner.
+///
+/// # Errors
+///
+/// Returns an error when the fixture values cannot be encoded.
+pub fn fixture_manifest_bytes_for(
+    owner: &str,
     mut sources: Vec<serde_json::Value>,
     output_language: &str,
     variant: u32,
@@ -125,7 +162,7 @@ pub fn fixture_manifest_bytes(
     let bytes = serde_json::to_vec(&serde_json::json!({
         "schema": "channel_digest_manifest.v1",
         "manifest_ref": format!("channel-digest-manifest:{}", variant_id(204, variant)),
-        "owner": FIXTURE_OWNER,
+        "owner": owner,
         "digest_run_id": variant_id(203, variant),
         "window": {
             "start_at": "2026-08-20T10:00:00Z",
@@ -133,7 +170,7 @@ pub fn fixture_manifest_bytes(
         },
         "sources": sources
     }))?;
-    let request = fixture_request(&bytes, count, channels, output_language, variant)?;
+    let request = fixture_request_for(owner, &bytes, count, channels, output_language, variant)?;
     Ok((bytes, request))
 }
 
@@ -172,7 +209,22 @@ pub async fn seed_recap_run_variant(
     output_language: &str,
     variant: u32,
 ) -> Result<SeededRecap, FixtureError> {
-    let (bytes, request) = fixture_manifest_bytes(sources, output_language, variant)?;
+    seed_recap_run_for(database, FIXTURE_OWNER, sources, output_language, variant).await
+}
+
+/// [`seed_recap_run_variant`] for an explicit owner, so several tenants can share one database.
+///
+/// # Errors
+///
+/// Returns an error when the fixture cannot be admitted or the run cannot be advanced.
+pub async fn seed_recap_run_for(
+    database: &Database,
+    owner: &str,
+    sources: Vec<serde_json::Value>,
+    output_language: &str,
+    variant: u32,
+) -> Result<SeededRecap, FixtureError> {
+    let (bytes, request) = fixture_manifest_bytes_for(owner, sources, output_language, variant)?;
     let verified = verify_digest_manifest(&request, &bytes)?;
     let envelope: CommandEnvelope = serde_json::from_value(serde_json::json!({
         "command_id": variant_id(502, variant),

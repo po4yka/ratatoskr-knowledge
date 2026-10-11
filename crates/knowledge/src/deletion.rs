@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::blob_store::BlobStore;
 use crate::database::Database;
+use crate::deletion_audit::insert_audit_row;
 use crate::deletion_blobs::{drain_queue, queue_scope_blobs};
+use crate::deletion_recap::{delete_recap_state, recap_state_survivors};
 use crate::deletion_state::{delete_inbox_state, inbox_state_survivors};
 
 /// Scope selector for one deletion operation.
@@ -108,6 +110,8 @@ pub struct DeletionCounts {
     pub ai_archive_tombstones: u64,
     /// Deleted `knowledge.social_tombstones` rows.
     pub social_tombstones: u64,
+    /// Deleted rows of the six `knowledge.channel_recap_*` tables.
+    pub channel_recap_rows: u64,
     /// Deleted `knowledge.event_outbox` rows.
     pub event_outbox: u64,
 }
@@ -338,6 +342,7 @@ async fn run_child_first_deletion(
     let queued = queue_scope_blobs(&mut *transaction, &source_ref_ids, deletion_id).await?;
     let user_content = delete_user_content(&mut *transaction, scope, &source_ref_ids).await?;
     let inbox_state = delete_inbox_state(&mut *transaction, scope).await?;
+    let channel_recap_rows = delete_recap_state(&mut *transaction, scope, deletion_id).await?;
 
     // Child-first order respects the NO ACTION foreign keys:
     // embedding_failures -> embedding_chunks -> search_documents ->
@@ -396,6 +401,7 @@ async fn run_child_first_deletion(
         ai_archive_tombstones: inbox_state.ai_archive_tombstones,
         social_tombstones: inbox_state.social_tombstones,
         event_outbox: inbox_state.event_outbox,
+        channel_recap_rows,
     };
     insert_audit_row(&mut *transaction, deletion_id, scope, &counts).await?;
     Ok(CommittedDeletion {
@@ -618,90 +624,6 @@ async fn delete_by_scope(
         .map(|query_result| query_result.rows_affected())
 }
 
-/// Inserts the audit record inside the deletion's own transaction.
-async fn insert_audit_row(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    deletion_id: Uuid,
-    scope: &DeletionScope,
-    counts: &DeletionCounts,
-) -> Result<(), DeletionError> {
-    sqlx::query(
-        "insert into knowledge.deletion_records (
-             deletion_id, tenant_ref, scope, owner_context, ai_archive_id, source_document_id,
-             source_refs_deleted, analysis_runs_deleted, analysis_attempts_deleted,
-             analysis_outputs_deleted, search_projection_inputs_deleted,
-             search_documents_deleted,
-             embedding_chunks_deleted, embedding_failures_deleted,
-             tags_deleted, taggings_deleted, collections_deleted, collection_items_deleted,
-             analysis_user_states_deleted, highlights_deleted, analysis_feedback_deleted,
-             source_analysis_inbox_deleted, source_analysis_heads_deleted,
-             ai_archive_object_inbox_deleted, repository_analysis_requests_deleted,
-             ai_archive_tombstones_deleted, social_tombstones_deleted, event_outbox_deleted,
-             blob_digests_removed
-         ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, 0)",
-    )
-    .bind(deletion_id)
-    .bind(scope.tenant_ref())
-    .bind(scope.as_str())
-    .bind(scope_owner_context(scope))
-    .bind(scope_ai_archive_id(scope))
-    .bind(scope_source_document_id(scope))
-    .bind(i32_count(counts.source_refs)?)
-    .bind(i32_count(counts.analysis_runs)?)
-    .bind(i32_count(counts.analysis_attempts)?)
-    .bind(i32_count(counts.analysis_outputs)?)
-    .bind(i32_count(counts.search_projection_inputs)?)
-    .bind(i32_count(counts.search_documents)?)
-    .bind(i32_count(counts.embedding_chunks)?)
-    .bind(i32_count(counts.embedding_failures)?)
-    .bind(i32_count(counts.tags)?)
-    .bind(i32_count(counts.taggings)?)
-    .bind(i32_count(counts.collections)?)
-    .bind(i32_count(counts.collection_items)?)
-    .bind(i32_count(counts.analysis_user_states)?)
-    .bind(i32_count(counts.highlights)?)
-    .bind(i32_count(counts.analysis_feedback)?)
-    .bind(i32_count(counts.source_analysis_inbox)?)
-    .bind(i32_count(counts.source_analysis_heads)?)
-    .bind(i32_count(counts.ai_archive_object_inbox)?)
-    .bind(i32_count(counts.repository_analysis_requests)?)
-    .bind(i32_count(counts.ai_archive_tombstones)?)
-    .bind(i32_count(counts.social_tombstones)?)
-    .bind(i32_count(counts.event_outbox)?)
-    .execute(&mut **transaction)
-    .await
-    .map_err(DeletionError::Query)?;
-    Ok(())
-}
-
-fn scope_owner_context(scope: &DeletionScope) -> Option<&str> {
-    match scope {
-        DeletionScope::Tenant { .. } | DeletionScope::Archive { .. } => None,
-        DeletionScope::Source { owner_context, .. } => Some(owner_context),
-    }
-}
-
-fn scope_ai_archive_id(scope: &DeletionScope) -> Option<&str> {
-    match scope {
-        DeletionScope::Archive { ai_archive_id, .. } => Some(ai_archive_id),
-        DeletionScope::Tenant { .. } | DeletionScope::Source { .. } => None,
-    }
-}
-
-fn scope_source_document_id(scope: &DeletionScope) -> Option<&str> {
-    match scope {
-        DeletionScope::Tenant { .. } | DeletionScope::Archive { .. } => None,
-        DeletionScope::Source {
-            source_document_id, ..
-        } => Some(source_document_id),
-    }
-}
-
-fn i32_count(count: u64) -> Result<i32, DeletionError> {
-    i32::try_from(count).map_err(|_| DeletionError::ValueOverflow)
-}
-
 /// Fails loudly when any row of the scope survived the committed deletion.
 ///
 /// # Errors
@@ -714,7 +636,10 @@ pub async fn verify_scope_empty(
 ) -> Result<(), DeletionError> {
     let pool = database.pool();
     let survivors = scope_source_ids(pool, scope).await?;
-    if !survivors.is_empty() || inbox_state_survivors(pool, scope).await? > 0 {
+    if !survivors.is_empty()
+        || inbox_state_survivors(pool, scope).await? > 0
+        || recap_state_survivors(pool, scope).await? > 0
+    {
         return Err(DeletionError::VerificationFailed);
     }
     let DeletionScope::Tenant { tenant_ref } = scope else {

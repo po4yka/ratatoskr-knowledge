@@ -383,7 +383,7 @@ fn print_deletion_receipt(receipt: &DeletionReceipt) {
         stdout,
         "deleted source_refs={} analysis_runs={} analysis_attempts={} \
          analysis_outputs={} search_projection_inputs={} search_documents={} embedding_chunks={} \
-         embedding_failures={}",
+         embedding_failures={} channel_recap_rows={}",
         counts.source_refs,
         counts.analysis_runs,
         counts.analysis_attempts,
@@ -391,7 +391,8 @@ fn print_deletion_receipt(receipt: &DeletionReceipt) {
         counts.search_projection_inputs,
         counts.search_documents,
         counts.embedding_chunks,
-        counts.embedding_failures
+        counts.embedding_failures,
+        counts.channel_recap_rows
     );
     let _ignored = writeln!(
         stdout,

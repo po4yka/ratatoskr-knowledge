@@ -7,11 +7,16 @@ use std::path::{Path, PathBuf};
 use ratatoskr_identifiers::{
     BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, DocumentId, MediaType, TenantRef,
 };
-use ratatoskr_knowledge::test_support::recap::{FIXTURE_OWNER, fixture_source, seed_recap_run};
+use ratatoskr_knowledge::test_support::recap::{
+    FIXTURE_OWNER, SeededRecap, fixture_source, model_output, provider_response, seed_recap_run,
+    seed_recap_run_for,
+};
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
-    BlobStore, DeletionCounts, DeletionScope, SourceReference, collect_pending_blobs,
-    delete_source, delete_tenant, execute_deletion,
+    BlobStore, ChannelRecapContextPolicy, ChannelRecapOutputLanguage, ChannelRecapPipeline,
+    DeletionCounts, DeletionScope, ScriptedProvider, SourceReference,
+    build_channel_recap_provider_request, collect_pending_blobs, delete_source, delete_tenant,
+    execute_deletion, prepare_channel_recap_context, verify_scope_empty,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -359,6 +364,192 @@ async fn delete_source_collects_the_knowledge_owned_snapshot_blob()
         vec![github.digest.hex.to_string()]
     );
     assert!(external.blob_digests_removed.is_empty());
+    database.cleanup().await?;
+    Ok(())
+}
+
+const RECAP_TABLES: [&str; 6] = [
+    "channel_recap_outbox",
+    "channel_recap_results",
+    "channel_recap_attempts",
+    "channel_recap_manifests",
+    "channel_recap_runs",
+    "channel_recap_inbox",
+];
+
+/// Drives one recap through the real pipeline: inbox, run, manifest, attempt with a raw-response
+/// blob, result and outbox row for `owner`.
+async fn complete_recap(
+    database: &TestDatabase,
+    blobs: &BlobStore,
+    owner: &str,
+    variant: u32,
+) -> Result<SeededRecap, Box<dyn std::error::Error>> {
+    let seeded = seed_recap_run_for(
+        &database.database,
+        owner,
+        vec![fixture_source(810, 1, "shared recap fixture")],
+        "en",
+        variant,
+    )
+    .await?;
+    let context = prepare_channel_recap_context(
+        &seeded.verified,
+        ChannelRecapContextPolicy {
+            max_sources: 100,
+            max_channels: 20,
+            max_characters: 100_000,
+        },
+    )?;
+    let request =
+        build_channel_recap_provider_request(&context, ChannelRecapOutputLanguage::En, 2_048)?;
+    let provider = ScriptedProvider::new([Ok(provider_response(
+        &model_output(&context, &[]),
+        "deletion-fixture",
+    )?)]);
+    ChannelRecapPipeline::new(
+        &database.database,
+        &provider,
+        blobs,
+        std::time::Duration::from_secs(30),
+    )
+    .execute(
+        seeded.run_id,
+        request,
+        &context,
+        &seeded.verified.digest_hex,
+        ChannelRecapOutputLanguage::En,
+    )
+    .await?;
+    Ok(seeded)
+}
+
+/// Row counts of the six recap tables for one owner, in [`RECAP_TABLES`] order.
+async fn recap_rows(
+    database: &TestDatabase,
+    owner: &str,
+) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    let mut counts = Vec::new();
+    for table in RECAP_TABLES {
+        let sql = match table {
+            "channel_recap_inbox" | "channel_recap_runs" | "channel_recap_manifests" => {
+                format!("select count(*) from knowledge.{table} where owner_ref = $1")
+            }
+            _ => format!(
+                "select count(*) from knowledge.{table} t
+                 join knowledge.channel_recap_runs r on r.recap_run_id = t.recap_run_id
+                 where r.owner_ref = $1"
+            ),
+        };
+        counts.push(
+            sqlx::query_scalar(&sql)
+                .bind(owner)
+                .fetch_one(database.database.pool())
+                .await?,
+        );
+    }
+    Ok(counts)
+}
+
+/// XR-021 CONTRACTS.md R2-06: tenant deletion removes the channel recap tables of that tenant,
+/// queues its raw-response digests, and leaves every other tenant and every other scope alone.
+#[tokio::test]
+async fn delete_tenant_removes_channel_recap_state_of_that_tenant_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    const TENANT_A: &str = "user:018f0000-0000-7000-8000-0000000000a1";
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+
+    // Both tenants' recaps produced the same model bytes, so one raw-response digest is shared.
+    let run_a = complete_recap(&database, &blobs, TENANT_A, 1).await?;
+    complete_recap(&database, &blobs, FIXTURE_OWNER, 2).await?;
+    let private = blobs.store_raw(b"tenant a repair response").await?;
+    sqlx::query(
+        "insert into knowledge.channel_recap_attempts
+             (recap_run_id, ordinal, reason, provider, model, raw_response,
+              raw_response_digest_hex, outcome, validation_code, duration_ms)
+         values ($1, 2, 'repair', 'scripted_fake', 'fake_default_v1', $2, $3, 'invalid',
+                 'schema', 5)",
+    )
+    .bind(run_a.run_id)
+    .bind(serde_json::to_value(&private)?)
+    .bind(private.digest.hex.as_str())
+    .execute(database.database.pool())
+    .await?;
+    let shared: String = sqlx::query_scalar(
+        "select raw_response -> 'digest' ->> 'hex' from knowledge.channel_recap_attempts
+         where recap_run_id = $1 and ordinal = 1",
+    )
+    .bind(run_a.run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(recap_rows(&database, TENANT_A).await?, [1, 1, 2, 1, 1, 1]);
+    assert_eq!(
+        recap_rows(&database, FIXTURE_OWNER).await?,
+        [1, 1, 1, 1, 1, 1]
+    );
+
+    // Source and archive scope never touch a recap, which is not tied to one source document.
+    delete_source(
+        &database.database,
+        &blobs,
+        FIXTURE_OWNER,
+        "ratatoskr-extractor",
+        "018f0000-0000-7000-8000-0000000000ff",
+    )
+    .await?;
+    let mut transaction = database.database.pool().begin().await?;
+    let archive = execute_deletion(
+        &mut transaction,
+        &DeletionScope::Archive {
+            tenant_ref: TENANT_A.to_owned(),
+            ai_archive_id: "archive-without-sources".to_owned(),
+        },
+    )
+    .await?;
+    transaction.commit().await?;
+    assert_eq!(archive.channel_recap_rows, 0);
+    assert_eq!(recap_rows(&database, TENANT_A).await?, [1, 1, 2, 1, 1, 1]);
+    assert_eq!(
+        recap_rows(&database, FIXTURE_OWNER).await?,
+        [1, 1, 1, 1, 1, 1]
+    );
+
+    let receipt = delete_tenant(&database.database, &blobs, TENANT_A).await?;
+
+    assert_eq!(receipt.counts.channel_recap_rows, 7);
+    assert_eq!(recap_rows(&database, TENANT_A).await?, [0; 6]);
+    assert_eq!(
+        recap_rows(&database, FIXTURE_OWNER).await?,
+        [1, 1, 1, 1, 1, 1],
+        "the other tenant's recap survives"
+    );
+    assert_eq!(
+        receipt.blob_digests_removed,
+        [private.digest.hex.to_string()],
+        "only the digest no remaining row references is erased"
+    );
+    assert!(!exists(root.path(), private.digest.hex.as_str()).await);
+    assert!(
+        exists(root.path(), &shared).await,
+        "the digest the other tenant still references survives"
+    );
+    verify_scope_empty(
+        &database.database,
+        &DeletionScope::Tenant {
+            tenant_ref: TENANT_A.to_owned(),
+        },
+    )
+    .await?;
+    let audited: i32 = sqlx::query_scalar(
+        "select channel_recap_rows_deleted from knowledge.deletion_records
+         where tenant_ref = $1 and scope = 'tenant'",
+    )
+    .bind(TENANT_A)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(audited, 7, "the audit row carries the recap count");
     database.cleanup().await?;
     Ok(())
 }

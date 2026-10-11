@@ -15,8 +15,8 @@
 
 ## 4. Tenant deletion covers the channel recap tables (R2-06)
 
-- [ ] 4.1 RED: add `crates/knowledge/tests/deletion_isolation.rs::delete_tenant_removes_channel_recap_state_of_that_tenant_only`; run it and confirm nothing is deleted.
-- [ ] 4.2 GREEN: add `deletion_recap.rs`, the `channel_recap_rows` count and column, and the verification.
+- [x] 4.1 RED: add `crates/knowledge/tests/deletion_isolation.rs::delete_tenant_removes_channel_recap_state_of_that_tenant_only`; run it and confirm nothing is deleted.
+- [x] 4.2 GREEN: add `deletion_recap.rs`, the `channel_recap_rows` count and column, and the verification.
 
 ## 5. Blob registration and erasure protocol (R2-07)
 
