@@ -97,11 +97,11 @@ pub use channel_digest_recap_store::{
 };
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
 pub use config::{
-    AdminConfig, ChannelRecapConfig, ChannelRecapProviderMode, Config, ConfigError, Limits,
-    StorageConfig,
+    AdminConfig, CHANNEL_RECAP_ACK_WAIT_SECONDS, ChannelRecapConfig, ChannelRecapProviderMode,
+    Config, ConfigError, Limits, StorageConfig,
 };
 pub use config_api::ApiConfig;
-pub use config_ingest::{IngestConfig, IngestProviderMode};
+pub use config_ingest::{INGEST_ACK_WAIT_SECONDS, IngestConfig, IngestProviderMode};
 pub use context::{
     ContextError, GenerationRequest, PreparedContext, build_generation_request, prepare_context,
 };

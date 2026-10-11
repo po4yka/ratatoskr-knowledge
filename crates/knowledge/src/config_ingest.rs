@@ -16,6 +16,15 @@ const ACK_WAIT_SECONDS: &str = "RATATOSKR__INGEST__ACK_WAIT_SECONDS";
 const README_BASE_URL: &str = "RATATOSKR__INGEST__GITHUB_README_BASE_URL";
 const README_SECRET: &str = "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET";
 
+/// The ack wait, in seconds, that Edge fixes on the four ingest durables (XR-021 CONTRACTS.md S04).
+///
+/// The worker verifies the durable against this value and refuses to consume from one that
+/// differs, so the configuration key only states it.
+pub const INGEST_ACK_WAIT_SECONDS: u64 = 120;
+
+const ACK_WAIT_RULE: &str =
+    "must be 120, the ack wait Edge fixes on the ingest durables (XR-021 CONTRACTS.md S04)";
+
 /// Provider selection for the ingest worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +51,8 @@ pub struct IngestConfig {
     /// each message's ack-wait clock when it is delivered, so keep this times the worst-case handler
     /// time below `ack_wait_seconds`; the default of one never prefetches.
     pub fetch_batch: u32,
-    /// Exact durable acknowledgement deadline.
+    /// Exact durable acknowledgement deadline: always [`INGEST_ACK_WAIT_SECONDS`] when loaded from
+    /// the environment.
     pub ack_wait_seconds: u64,
     /// Loopback origin of the GitHub README byte endpoint.
     pub github_readme_base_url: String,
@@ -59,7 +69,7 @@ impl Default for IngestConfig {
             bus_endpoint: "nats://127.0.0.1:4222".to_owned(),
             bus_credentials_file: None,
             fetch_batch: 1,
-            ack_wait_seconds: 120,
+            ack_wait_seconds: INGEST_ACK_WAIT_SECONDS,
             github_readme_base_url: "http://127.0.0.1:8092/".to_owned(),
             github_readme_service_secret: None,
         }
@@ -91,7 +101,13 @@ pub(crate) fn apply_ingest_entry(
         BUS_ENDPOINT => value.clone_into(&mut ingest.bus_endpoint),
         BUS_CREDENTIALS_FILE => ingest.bus_credentials_file = Some(PathBuf::from(value)),
         FETCH_BATCH => ingest.fetch_batch = parse_positive(key, value)?,
-        ACK_WAIT_SECONDS => ingest.ack_wait_seconds = parse_positive(key, value)?,
+        ACK_WAIT_SECONDS => {
+            ingest.ack_wait_seconds = value
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds == INGEST_ACK_WAIT_SECONDS)
+                .ok_or_else(|| ConfigError::new(key, ACK_WAIT_RULE))?;
+        }
         README_BASE_URL => {
             validate_readme_origin(value)?;
             value.clone_into(&mut ingest.github_readme_base_url);
@@ -164,12 +180,6 @@ pub(crate) fn validate_ingest(config: &Config) -> Result<(), ConfigError> {
     }
     if !(1..=256).contains(&ingest.fetch_batch) {
         return Err(ConfigError::new(FETCH_BATCH, "must be between 1 and 256"));
-    }
-    if !(1..=600).contains(&ingest.ack_wait_seconds) {
-        return Err(ConfigError::new(
-            ACK_WAIT_SECONDS,
-            "must be between 1 and 600",
-        ));
     }
     match ingest.provider_mode {
         IngestProviderMode::Fixture if !url_is_loopback(&bus) => {

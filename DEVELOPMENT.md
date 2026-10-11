@@ -184,6 +184,10 @@ RATATOSKR__INGEST__ACK_WAIT_SECONDS=120
 RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET=<the GitHub internal reader secret>
 ```
 
+The two ack-wait keys only state the values Edge fixes on the durables (120 and 30 seconds,
+XR-021 CONTRACTS.md S04): the loader refuses any other value, because `verify_consumer` would
+refuse the durable and the worker would never consume.
+
 `RATATOSKR__INGEST__FETCH_BATCH` defaults to 1. A worker handles one delivery at a time while the broker
 starts each message's ack-wait clock when it delivers it, so a batch above 1 prefetches messages whose
 120 s can run out behind a slow analysis; the expired deliveries come back with a higher delivery count

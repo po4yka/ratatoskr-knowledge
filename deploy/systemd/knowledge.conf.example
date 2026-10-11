@@ -26,6 +26,9 @@ RATATOSKR__INGEST__ENABLED=true
 RATATOSKR__INGEST__PROVIDER_MODE=openrouter
 RATATOSKR__INGEST__BUS_ENDPOINT=nats://127.0.0.1:4222
 RATATOSKR__INGEST__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+# The ack wait Edge fixes on the ingest durables. The key exists only to state it: any other value
+# is refused at startup.
+RATATOSKR__INGEST__ACK_WAIT_SECONDS=120
 # GitHub's loopback README byte endpoint and the credential it expects.
 RATATOSKR__INGEST__GITHUB_README_BASE_URL=http://127.0.0.1:8092/
 RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET=CHANGE-ME
@@ -36,6 +39,8 @@ RATATOSKR__CHANNEL_RECAP__ENABLED=true
 RATATOSKR__CHANNEL_RECAP__PROVIDER_MODE=openrouter
 RATATOSKR__CHANNEL_RECAP__BUS_ENDPOINT=nats://127.0.0.1:4222
 RATATOSKR__CHANNEL_RECAP__BUS_CREDENTIALS_FILE=/etc/ratatoskr/knowledge.nkey
+# The recap durable's ack wait, fixed by Edge; stated here only, any other value is refused.
+RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS=30
 # The channel-digests API that serves manifests, and the credential Knowledge presents to it.
 RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_BASE_URL=http://127.0.0.1:8098/
 RATATOSKR__CHANNEL_RECAP__DIGEST_SOURCE_SERVICE_SECRET=CHANGE-ME

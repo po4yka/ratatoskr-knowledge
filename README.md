@@ -242,8 +242,11 @@ ratatoskr_events / ratatoskr_knowledge_ai_archive          evt.ai_archive.>
 ratatoskr_events / ratatoskr_knowledge_repository_requests evt.knowledge.repository_analysis.requested.v1
 ```
 
-Each durable is explicit-ack, deliver-all, unlimited redelivery, with an ack wait equal to
-`RATATOSKR__INGEST__ACK_WAIT_SECONDS` (120). A delivery from the wrong producer, without a tenant,
+Each durable is explicit-ack, deliver-all, unlimited redelivery, with an ack wait of 120 seconds
+that Edge fixes (XR-021 S04) and that Knowledge verifies. `RATATOSKR__INGEST__ACK_WAIT_SECONDS` and
+`RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS` exist only to state that value (120 and 30); any other
+value stops startup, because a service that disagrees with its durable never starts consuming. A
+delivery from the wrong producer, without a tenant,
 undecodable, of an unsupported type, or whose tenant differs from the payload owner is terminated on
 first delivery, and an AI-archive tombstone for a subject that belongs only to another tenant is
 terminated with the class `foreign_subject`. A failed analysis is redelivered after 2 seconds; the

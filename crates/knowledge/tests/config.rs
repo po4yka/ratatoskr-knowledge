@@ -624,3 +624,52 @@ fn recap_fetch_batch_defaults_to_one() {
     assert_eq!(defaults.channel_recap.fetch_batch, 1);
     assert_eq!(defaults.channel_recap.ack_wait_seconds, 30);
 }
+
+/// XR-021 CONTRACTS.md R3-09 and S04: Edge fixes the ingest durables at 120 seconds, and
+/// `verify_consumer` refuses any other value, so a plausible edit must fail at load and not leave a
+/// service that never starts consuming.
+#[test]
+fn ingest_ack_wait_other_than_120_is_refused() {
+    for value in ["1", "60", "119", "121", "600"] {
+        let diagnostic = Config::from_environment([("RATATOSKR__INGEST__ACK_WAIT_SECONDS", value)])
+            .expect_err("an ingest ack wait other than the Edge constant must fail")
+            .to_string();
+        assert!(
+            diagnostic.contains("RATATOSKR__INGEST__ACK_WAIT_SECONDS"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("120"), "{diagnostic}");
+        assert!(diagnostic.contains("S04"), "{diagnostic}");
+    }
+}
+
+/// The recap durable is fixed at 30 seconds by the same table.
+#[test]
+fn recap_ack_wait_other_than_30_is_refused() {
+    for value in ["1", "29", "31", "120", "600"] {
+        let diagnostic =
+            Config::from_environment([("RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS", value)])
+                .expect_err("a recap ack wait other than the Edge constant must fail")
+                .to_string();
+        assert!(
+            diagnostic.contains("RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("30"), "{diagnostic}");
+        assert!(diagnostic.contains("S04"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn the_default_ack_waits_are_accepted() -> Result<(), Box<dyn std::error::Error>> {
+    let stated = Config::from_environment([
+        ("RATATOSKR__INGEST__ACK_WAIT_SECONDS", "120"),
+        ("RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS", "30"),
+    ])?;
+    assert_eq!(stated.ingest.ack_wait_seconds, 120);
+    assert_eq!(stated.channel_recap.ack_wait_seconds, 30);
+    let defaults = Config::default();
+    assert_eq!(defaults.ingest.ack_wait_seconds, 120);
+    assert_eq!(defaults.channel_recap.ack_wait_seconds, 30);
+    Ok(())
+}

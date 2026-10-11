@@ -77,9 +77,14 @@ pub struct ChannelRecapConfig {
     pub bus_credentials_file: Option<PathBuf>,
     /// Maximum messages pulled per batch.
     pub fetch_batch: u32,
-    /// Exact durable acknowledgement deadline.
+    /// Exact durable acknowledgement deadline: always [`CHANNEL_RECAP_ACK_WAIT_SECONDS`] when
+    /// loaded from the environment.
     pub ack_wait_seconds: u64,
 }
+
+/// The ack wait, in seconds, that Edge fixes on the channel recap durable (XR-021 CONTRACTS.md
+/// S04). The worker verifies the durable against it, so the configuration key only states it.
+pub const CHANNEL_RECAP_ACK_WAIT_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize)]
 /// Loopback-only operator listener configuration.
@@ -664,7 +669,7 @@ impl Default for Config {
                 bus_subject: "cmd.knowledge.channel_digest_recap.requested.v1".to_owned(),
                 bus_credentials_file: None,
                 fetch_batch: 1,
-                ack_wait_seconds: 30,
+                ack_wait_seconds: CHANNEL_RECAP_ACK_WAIT_SECONDS,
             },
             ingest: IngestConfig::default(),
         }

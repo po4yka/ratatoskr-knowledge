@@ -15,6 +15,8 @@
 
 Every secret in the file is the placeholder `CHANGE-ME`. Replace each one before starting the unit; the configuration loader refuses an enabled flow whose secret is absent but does not recognise a placeholder, so a left-over `CHANGE-ME` is a credential the peer will refuse, not a safe default. `services/knowledge/tests/deployment_profile.rs` loads the file through the service's own configuration loader and fails when a key is renamed or a flow stops being enabled, and the workspace `port_allocation.rs` checks its binds against `docs/DEPLOYMENT_TARGET.md`.
 
+The ack waits are not tunable: `RATATOSKR__INGEST__ACK_WAIT_SECONDS` must be 120 and `RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS` must be 30, the values Edge fixes on the durables; the keys exist only to state them, and the example states them.
+
 The channel-digests API being down does not make `/ready` fail: it flips the gauge `knowledge_channel_recap_source_up` to 0 and the recap commands wait on the durable until the source answers again.
 
 Start order on a fresh broker: reload NATS with the new ACL, start Edge (it provisions the durables), then Knowledge.

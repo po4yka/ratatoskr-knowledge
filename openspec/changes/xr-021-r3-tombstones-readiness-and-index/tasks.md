@@ -15,8 +15,8 @@
 
 ## 4. Ack-wait validation (R3-09)
 
-- [ ] 4.1 RED: add the three scenarios to `crates/knowledge/tests/config.rs`; run them and confirm any value from 1 to 600 loads today.
-- [ ] 4.2 GREEN: validate against the shared constants and update the example and the README.
+- [x] 4.1 RED: add the three scenarios to `crates/knowledge/tests/config.rs`; run them and confirm any value from 1 to 600 loads today.
+- [x] 4.2 GREEN: validate against the shared constants and update the example and the README.
 
 ## 5. Conversation text (R3-09)
 

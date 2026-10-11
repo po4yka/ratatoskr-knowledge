@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use crate::Config;
 use crate::config::{
-    ChannelRecapConfig, ChannelRecapProviderMode, ConfigError, parse_positive, url_is_loopback,
+    CHANNEL_RECAP_ACK_WAIT_SECONDS, ChannelRecapConfig, ChannelRecapProviderMode, ConfigError,
+    parse_positive, url_is_loopback,
 };
 use crate::result_reader_secret::ResultReaderSecret;
 
@@ -56,7 +57,16 @@ pub(crate) fn apply_channel_recap_entry(
             recap.fetch_batch = parse_positive(key, value)?;
         }
         "RATATOSKR__CHANNEL_RECAP__ACK_WAIT_SECONDS" => {
-            recap.ack_wait_seconds = parse_positive(key, value)?;
+            recap.ack_wait_seconds = value
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds == CHANNEL_RECAP_ACK_WAIT_SECONDS)
+                .ok_or_else(|| {
+                    ConfigError::new(
+                        key,
+                        "must be 30, the ack wait Edge fixes on the channel recap durable (XR-021 CONTRACTS.md S04)",
+                    )
+                })?;
         }
         _ => return Err(ConfigError::new(key, "is not recognized")),
     }
@@ -100,10 +110,10 @@ pub(crate) fn validate_channel_recap(config: &Config) -> Result<(), ConfigError>
             ));
         }
     }
-    if !(1..=256).contains(&recap.fetch_batch) || !(1..=600).contains(&recap.ack_wait_seconds) {
+    if !(1..=256).contains(&recap.fetch_batch) {
         return Err(ConfigError::new(
             "RATATOSKR__CHANNEL_RECAP__FETCH_BATCH",
-            "fetch and acknowledgement limits are invalid",
+            "must be between 1 and 256",
         ));
     }
     validate_provider_mode(config, &bus)
