@@ -20,8 +20,8 @@
 
 ## 5. Conversation text (R3-09)
 
-- [ ] 5.1 RED: add `crates/knowledge/tests/family_pipeline.rs::a_conversation_is_indexed_without_prompt_scaffolding`; run it and confirm the scaffold tokens are searchable.
-- [ ] 5.2 GREEN: build the search fields from the title and the message text.
+- [x] 5.1 RED: add `crates/knowledge/tests/family_pipeline.rs::a_conversation_is_indexed_without_prompt_scaffolding`; run it and confirm the scaffold tokens are searchable.
+- [x] 5.2 GREEN: build the search fields from the title and the message text.
 
 ## 6. Provisioning and documentation (R3-11, R3-19)
 

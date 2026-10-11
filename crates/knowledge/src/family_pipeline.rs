@@ -304,22 +304,15 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             || "AI conversation".to_owned(),
             |title| title.as_str().to_owned(),
         );
-        let body = crate::archive_context(conversation);
+        // The prompt context (`archive_context`) is evidence for the model; the search document is
+        // the conversation's own text.
+        let (lead, body) = crate::family_analysis::archive_search_text(conversation);
         let value = self
-            .execute_value(
-                run,
-                request,
-                SearchFields {
-                    title,
-                    lead: String::new(),
-                    body,
-                },
-                |value| {
-                    validate_archive_analysis(value, conversation).and_then(|analysis| {
-                        serde_json::to_value(analysis).map_err(|_| FamilyValidationError::Decode)
-                    })
-                },
-            )
+            .execute_value(run, request, SearchFields { title, lead, body }, |value| {
+                validate_archive_analysis(value, conversation).and_then(|analysis| {
+                    serde_json::to_value(analysis).map_err(|_| FamilyValidationError::Decode)
+                })
+            })
             .await?;
         serde_json::from_value(value).map_err(FamilyPipelineError::Contract)
     }

@@ -1,6 +1,8 @@
 //! Family-specific contracts and deterministic contexts for social and AI-archive analysis.
 
-use ratatoskr_ai_archive_contracts::{AiAuthorRole, AiContentPart, AiConversation, AiProject};
+use ratatoskr_ai_archive_contracts::{
+    AiAuthorRole, AiContentPart, AiConversation, AiMessage, AiProject,
+};
 use ratatoskr_github_contracts::{RepositoryAnalysisAttributes, RepositoryAnalysisRequested};
 use ratatoskr_social_contracts::SocialSourceSnapshot;
 
@@ -178,6 +180,42 @@ pub fn archive_context(conversation: &AiConversation) -> String {
         }
     }
     result
+}
+
+/// The longest `lead` of a conversation's search document, in characters.
+const ARCHIVE_LEAD_CHARACTERS: usize = 280;
+
+/// The plain text of one message: its text and markdown parts joined by newlines.
+fn message_text(message: &AiMessage) -> String {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            AiContentPart::Text { text } => Some(text.as_str()),
+            AiContentPart::Markdown { markdown } => Some(markdown.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `lead` and `body` of a conversation's search document: what a person wrote and read, with
+/// no identifiers, role labels or prompt scaffold (XR-021 CONTRACTS.md R3-09).
+///
+/// The body is the text of every message that has any, one message per line; the lead is the first
+/// of those messages cut at [`ARCHIVE_LEAD_CHARACTERS`] characters.
+pub(crate) fn archive_search_text(conversation: &AiConversation) -> (String, String) {
+    let texts: Vec<String> = conversation
+        .messages
+        .iter()
+        .map(message_text)
+        .filter(|text| !text.is_empty())
+        .collect();
+    let lead = texts
+        .first()
+        .map(|text| text.chars().take(ARCHIVE_LEAD_CHARACTERS).collect())
+        .unwrap_or_default();
+    (lead, texts.join("\n"))
 }
 
 /// Builds deterministic project evidence from normalized provider-authored fields.

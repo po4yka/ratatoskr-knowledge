@@ -26,8 +26,8 @@ use ratatoskr_knowledge::test_support::archive::conversation_from_json;
 use ratatoskr_knowledge::{
     BlobStore, BudgetLedger, BudgetLimits, ControlledProvider, EventCause, FamilyPipeline,
     FamilyPipelineError, ProviderError, ProviderResponse, ProviderUsage, RateLimiter,
-    RepositoryReadmeError, RepositoryReadmeResolver, ScriptedProvider, SourceInbox, SpendControls,
-    TokenPrices,
+    RepositoryReadmeError, RepositoryReadmeResolver, ScriptedProvider, SearchQuery, SourceInbox,
+    SpendControls, TokenPrices, search_page,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -147,6 +147,96 @@ async fn archive_event_produces_grounded_analysis_and_search_document()
     );
     assert_eq!(execution.completion.ai_archive_id, provenance.ai_archive_id);
     assert_eq!(search_document_count(&database).await?, 1);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R3-09: the search document of a conversation is its text. The prompt
+/// scaffold (`family:`, `conversation_id:`, `message_id:`, `role:`) is evidence for the model, not
+/// something a user searched for or should see in a snippet.
+#[tokio::test]
+async fn a_conversation_is_indexed_without_prompt_scaffolding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let first = format!(
+        "Explain zanzibar borrow errors. {}",
+        "Then keep going. ".repeat(30)
+    );
+    let reply = "A borrow error means a reference outlives its owner.";
+    let conversation = conversation_from_json(
+        &serde_json::json!({
+            "ai_conversation_id": "018f0000-0000-7000-8000-000000000403",
+            "provider": "chatgpt",
+            "owner": "user:018f0000-0000-7000-8000-000000000005",
+            "title": "Borrow checker notes",
+            "messages": [
+                {"external_message_id": "msg-0001", "author_role": "user",
+                 "parts": [{"part_kind": "text", "text": first}],
+                 "parser_name": "chatgpt_export", "parser_version": "2026.08.1"},
+                {"external_message_id": "msg-0002", "author_role": "assistant",
+                 "parts": [{"part_kind": "markdown", "markdown": reply}],
+                 "parser_name": "chatgpt_export", "parser_version": "2026.08.1"}
+            ],
+            "content_digest": {"algorithm": "sha256", "hex": "0".repeat(64)},
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        })
+        .to_string(),
+    )?;
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
+    let inbox = SourceInbox::new(&database.database);
+    let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000812")?;
+    inbox
+        .accept_ai_conversation(
+            event_id,
+            "ai_archive.conversation.added.v1",
+            &provenance,
+            &conversation,
+        )
+        .await?;
+    let store = BlobStore::new(temp_root("archive-text"), 32_768);
+    let provider = ScriptedProvider::new([Ok(response(
+        r#"{"summary":"The user requested an explanation.","summary_message_ids":["msg-0001"],"decisions":[{"text":"Keep the explanation concise.","message_id":"msg-0001"}]}"#,
+    ))]);
+    FamilyPipeline::new(
+        &database.database,
+        &provider,
+        &store,
+        Duration::from_secs(1),
+    )
+    .execute_archive_event(&inbox, event_id)
+    .await?;
+
+    let tenant = conversation.owner.to_string();
+    for scaffold in ["conversation_id", "message_id", "family", "role"] {
+        let page = search_page(
+            database.database.pool(),
+            &SearchQuery::new(tenant.clone(), scaffold, 10, 0)?,
+        )
+        .await?;
+        assert!(
+            page.results.is_empty(),
+            "`{scaffold}` is prompt scaffolding and must not find the conversation"
+        );
+    }
+    let page = search_page(
+        database.database.pool(),
+        &SearchQuery::new(tenant, "zanzibar", 10, 0)?,
+    )
+    .await?;
+    assert_eq!(page.results.len(), 1, "a word from a message finds it");
+    let snippet = page.results[0].snippet.clone().unwrap_or_default();
+    assert!(snippet.contains("zanzibar"), "{snippet}");
+    for scaffold in ["family:", "message_id:", "role:", "conversation_id"] {
+        assert!(!snippet.contains(scaffold), "{snippet}");
+    }
+
+    let (title, lead, body): (String, String, String) =
+        sqlx::query_as("select title, lead, body from knowledge.search_documents")
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(title, "Borrow checker notes");
+    assert_eq!(lead, first.chars().take(280).collect::<String>());
+    assert_eq!(body, format!("{first}\n{reply}"));
     database.cleanup().await?;
     Ok(())
 }
