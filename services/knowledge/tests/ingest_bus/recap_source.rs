@@ -40,7 +40,9 @@ async fn provision_commands(
     let commands = context
         .create_stream(stream::Config {
             name: COMMANDS_STREAM.to_owned(),
-            subjects: vec!["cmd.>".to_owned()],
+            // Only the recap subject: another test of this workspace creates a stream under `cmd.`
+            // on the same broker, and overlapping subjects are refused.
+            subjects: vec![RECAP_SUBJECT.to_owned()],
             ..stream::Config::default()
         })
         .await?;
@@ -201,6 +203,7 @@ async fn knowledge_is_ready_while_the_digest_source_is_down() -> TestResult {
     assert_eq!(process.ready_status().await?, StatusCode::OK);
     assert_eq!(process.source_up(), Some(0));
     process.stop().await?;
+    harness.context().delete_stream(COMMANDS_STREAM).await?;
     harness.database.cleanup().await?;
     Ok(())
 }
@@ -245,6 +248,7 @@ async fn the_recap_resumes_when_the_source_appears() -> TestResult {
     assert_eq!(source.hits(&command.manifest_path), 1);
     assert_eq!(process.ready_status().await?, StatusCode::OK);
     process.stop().await?;
+    harness.context().delete_stream(COMMANDS_STREAM).await?;
     harness.database.cleanup().await?;
     Ok(())
 }
@@ -284,6 +288,7 @@ async fn an_unreachable_source_is_logged_once_per_change() -> TestResult {
         logs.text()
     );
     process.stop().await?;
+    harness.context().delete_stream(COMMANDS_STREAM).await?;
     harness.database.cleanup().await?;
     Ok(())
 }
@@ -311,6 +316,7 @@ async fn a_missing_recap_durable_still_makes_knowledge_unready() -> TestResult {
     })
     .await?;
     process.stop().await?;
+    harness.context().delete_stream(COMMANDS_STREAM).await?;
     harness.database.cleanup().await?;
     Ok(())
 }
