@@ -35,6 +35,9 @@ pub enum PersistenceError {
     /// A contract value could not be encoded for owned storage.
     #[error("a contract value could not be encoded")]
     Encode(#[source] serde_json::Error),
+    /// A Knowledge-owned blob a row would reference is missing and could not be stored again.
+    #[error("the blob a row would reference is not available")]
+    Blob(#[source] crate::BlobError),
 }
 
 impl PersistenceError {

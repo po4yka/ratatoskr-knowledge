@@ -2,6 +2,7 @@ use ratatoskr_document_contracts::Document;
 use ratatoskr_identifiers::BlobRef;
 use uuid::Uuid;
 
+use crate::blob_registry::lock_and_verify;
 use crate::run_driver::{DriveFailure, Rejected, RunDriver};
 use crate::search::{
     SearchDocumentProjection, extract_search_text, record_search_document,
@@ -115,13 +116,14 @@ impl<'a, P: LlmProvider> ArticlePipeline<'a, P> {
         reference: BlobRef,
         document: &Document,
     ) -> Result<(), DriveFailure> {
-        let raw_response = serde_json::to_value(reference).map_err(PersistenceError::Encode)?;
+        let raw_response = serde_json::to_value(&reference).map_err(PersistenceError::Encode)?;
         let mut transaction = self
             .database
             .pool()
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
+        lock_and_verify(&mut transaction, self.blobs, &reference, None).await?;
         let output_id = Uuid::now_v7();
         sqlx::query(
             "insert into knowledge.analysis_outputs (

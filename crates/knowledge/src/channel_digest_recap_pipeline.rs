@@ -13,7 +13,7 @@ use ratatoskr_channel_digest_contracts::{
 use ratatoskr_identifiers::{BlobRef, WireTimestamp};
 use sha2::{Digest as _, Sha256};
 
-use crate::run_lock::RunLock;
+use crate::{blob_registry::lock_and_verify, run_lock::RunLock};
 
 const REPAIR_INSTRUCTION: &str = "\nRepair validation code: channel_recap_schema.";
 
@@ -525,13 +525,13 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
     ) -> Result<(), ChannelRecapPipelineError> {
         let raw = self.blobs.store_raw(&response.bytes).await?;
         let raw_value = serde_json::to_value(&raw)?;
-        let raw_digest_hex = format!("{:x}", Sha256::digest(&response.bytes));
         let mut transaction = self
             .database
             .pool()
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
+        lock_and_verify(&mut transaction, self.blobs, &raw, Some(&response.bytes)).await?;
         let changed = sqlx::query(
             "update knowledge.channel_recap_attempts
              set provider_request_id = $3, raw_response = $4, raw_response_digest_hex = $5,
@@ -543,7 +543,7 @@ impl<'a, P: LlmProvider> ChannelRecapPipeline<'a, P> {
         .bind(ordinal)
         .bind(response.request_id.as_deref())
         .bind(raw_value)
-        .bind(raw_digest_hex)
+        .bind(raw.digest.hex.as_str())
         .bind(i64::try_from(response.usage.input_tokens).unwrap_or(i64::MAX))
         .bind(i64::try_from(response.usage.output_tokens).unwrap_or(i64::MAX))
         .bind(duration_ms)

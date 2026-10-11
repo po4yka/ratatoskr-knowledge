@@ -90,6 +90,20 @@ impl BlobStore {
         })
     }
 
+    /// Whether the bytes of `digest_hex` are on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlobError`] for an invalid digest or a filesystem failure other than absence.
+    pub async fn exists(&self, digest_hex: &str) -> Result<bool, BlobError> {
+        if !is_digest_hex(digest_hex) {
+            return Err(BlobError::InvalidReference);
+        }
+        tokio::fs::try_exists(self.path(digest_hex)?)
+            .await
+            .map_err(BlobError::Io)
+    }
+
     /// Reads owned bytes by reference for authorized internal use.
     ///
     /// # Errors

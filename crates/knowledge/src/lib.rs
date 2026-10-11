@@ -5,6 +5,7 @@
 
 mod archive_events;
 mod article;
+mod blob_registry;
 mod blob_store;
 mod budget;
 mod channel_digest_recap;

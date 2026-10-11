@@ -17,6 +17,7 @@ use ratatoskr_social_contracts::SocialSourceSnapshot;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+use crate::blob_registry::lock_and_verify;
 use crate::run_driver::{DriveFailure, Rejected, RunDriver};
 use crate::search::{
     SearchDocumentProjection, record_search_document, record_search_projection_input,
@@ -473,15 +474,23 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
     ) -> Result<Uuid, FamilyPipelineError> {
         let bytes = serde_json::to_vec(snapshot)?;
         let blob = self.blobs.store_raw(&bytes).await?;
-        self.register_source(
-            tenant,
-            source_id,
-            digest,
-            "ratatoskr-knowledge",
-            ai_archive_id,
-            blob,
-        )
-        .await
+        let document_id = DocumentId::parse(source_id).map_err(|_| FamilyPipelineError::Source)?;
+        Ok(self
+            .database
+            .register_snapshot_source(
+                &SourceReference {
+                    tenant,
+                    owner_context: "ratatoskr-knowledge".to_owned(),
+                    ai_archive_id: ai_archive_id.to_owned(),
+                    document_id,
+                    content_digest: digest,
+                    source_blob: blob,
+                },
+                self.blobs,
+                &bytes,
+            )
+            .await?
+            .id)
     }
 
     async fn external_source(
@@ -584,16 +593,17 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         raw: BlobRef,
         fields: &SearchFields,
     ) -> Result<(), DriveFailure> {
-        let raw = serde_json::to_value(raw).map_err(PersistenceError::Encode)?;
+        let raw_value = serde_json::to_value(&raw).map_err(PersistenceError::Encode)?;
         let mut tx = self
             .database
             .pool()
             .begin()
             .await
             .map_err(PersistenceError::Query)?;
+        lock_and_verify(&mut tx, self.blobs, &raw, None).await?;
         let output_id = Uuid::now_v7();
         sqlx::query("insert into knowledge.analysis_outputs (output_id, run_id, result, raw_response) values ($1, $2, $3, $4)")
-            .bind(output_id).bind(run_id).bind(result).bind(raw).execute(&mut *tx).await.map_err(PersistenceError::Query)?;
+            .bind(output_id).bind(run_id).bind(result).bind(raw_value).execute(&mut *tx).await.map_err(PersistenceError::Query)?;
         let changed = sqlx::query("update knowledge.analysis_runs set state = 'persisted', updated_at = now() where run_id = $1 and state = 'schema_validated'")
             .bind(run_id).execute(&mut *tx).await.map_err(PersistenceError::Query)?;
         if changed.rows_affected() != 1 {

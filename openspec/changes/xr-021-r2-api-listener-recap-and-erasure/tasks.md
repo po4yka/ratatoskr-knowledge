@@ -20,8 +20,8 @@
 
 ## 5. Blob registration and erasure protocol (R2-07)
 
-- [ ] 5.1 RED: add `crates/knowledge/tests/deletion_blob_race.rs` with the three interleavings; run it and confirm a dangling reference is committed today.
-- [ ] 5.2 GREEN: add `blob_lock`, hold it through erasure and take it at every registration path with a presence check and re-store.
+- [x] 5.1 RED: add `crates/knowledge/tests/deletion_blob_race.rs` with the three interleavings; run it and confirm a dangling reference is committed today.
+- [x] 5.2 GREEN: add `blob_lock`, hold it through erasure and take it at every registration path with a presence check and re-store.
 
 ## 6. Operator example and documentation (R2-10)
 

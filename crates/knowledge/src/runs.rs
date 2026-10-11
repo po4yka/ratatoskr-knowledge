@@ -3,7 +3,8 @@ use ratatoskr_identifiers::{
 };
 use uuid::Uuid;
 
-use crate::{Database, PersistenceError};
+use crate::blob_registry::lock_and_verify;
+use crate::{BlobStore, Database, PersistenceError};
 
 /// Provider calls one run may record over all of its deliveries.
 ///
@@ -14,6 +15,10 @@ pub(crate) const MAX_RUN_ATTEMPTS: i16 = 10;
 
 pub(crate) struct AttemptUpdate<'a> {
     pub raw_response: &'a BlobRef,
+    /// The store the reference points into and the bytes the caller still holds, so registering
+    /// the reference can restore a blob an eraser removed (`blob_registry`).
+    pub blobs: &'a BlobStore,
+    pub held_bytes: &'a [u8],
     pub request_id: Option<&'a str>,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -239,6 +244,14 @@ impl Database {
             i64::try_from(update.input_tokens).map_err(|_| PersistenceError::ValueOverflow)?;
         let output_tokens =
             i64::try_from(update.output_tokens).map_err(|_| PersistenceError::ValueOverflow)?;
+        let mut transaction = self.pool().begin().await.map_err(PersistenceError::Query)?;
+        lock_and_verify(
+            &mut transaction,
+            update.blobs,
+            update.raw_response,
+            Some(update.held_bytes),
+        )
+        .await?;
         let result = sqlx::query(
             "update knowledge.analysis_attempts
              set provider_request_id = $3, raw_response = $4,
@@ -255,14 +268,13 @@ impl Database {
         .bind(update.outcome.as_str())
         .bind(update.validation_code)
         .bind(update.duration_ms)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(PersistenceError::Query)?;
-        if result.rows_affected() == 1 {
-            Ok(())
-        } else {
-            Err(PersistenceError::InvalidAnalysisIdentity)
+        if result.rows_affected() != 1 {
+            return Err(PersistenceError::InvalidAnalysisIdentity);
         }
+        transaction.commit().await.map_err(PersistenceError::Query)
     }
 
     /// Persists the next attempt ordinal and its safe metadata.
@@ -463,7 +475,10 @@ impl Database {
         Ok(AnalysisRun { id: stored_id })
     }
 
-    /// Registers an immutable source revision.
+    /// Registers an immutable source revision whose blob another service owns.
+    ///
+    /// A Knowledge-owned snapshot goes through [`Database::register_snapshot_source`], which
+    /// follows the digest-lock protocol of `blob_registry`.
     ///
     /// # Errors
     ///
@@ -471,6 +486,30 @@ impl Database {
     pub async fn register_source(
         &self,
         source: &SourceReference,
+    ) -> Result<SourceRevision, PersistenceError> {
+        self.insert_source(source, None).await
+    }
+
+    /// Registers an immutable source revision whose Knowledge-owned snapshot the caller stored
+    /// and still holds, under the digest lock: if an eraser removed the blob in between, `bytes`
+    /// are stored again before the reference commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PersistenceError`] when persistence fails or the blob cannot be made present.
+    pub(crate) async fn register_snapshot_source(
+        &self,
+        source: &SourceReference,
+        blobs: &BlobStore,
+        bytes: &[u8],
+    ) -> Result<SourceRevision, PersistenceError> {
+        self.insert_source(source, Some((blobs, bytes))).await
+    }
+
+    async fn insert_source(
+        &self,
+        source: &SourceReference,
+        held: Option<(&BlobStore, &[u8])>,
     ) -> Result<SourceRevision, PersistenceError> {
         let owner =
             BlobOwner::parse(&source.owner_context).map_err(|_| PersistenceError::InvalidSource)?;
@@ -483,6 +522,10 @@ impl Database {
         };
         let blob = serde_json::to_value(&source.source_blob).map_err(PersistenceError::Encode)?;
         let id = Uuid::now_v7();
+        let mut transaction = self.pool().begin().await.map_err(PersistenceError::Query)?;
+        if let Some((blobs, bytes)) = held {
+            lock_and_verify(&mut transaction, blobs, &source.source_blob, Some(bytes)).await?;
+        }
         let stored_id = sqlx::query_scalar(
             "insert into knowledge.source_refs (
                 source_ref_id, tenant_ref, owner_context, ai_archive_id, source_document_id,
@@ -502,9 +545,13 @@ impl Database {
         .bind(algorithm)
         .bind(source.content_digest.hex.as_str())
         .bind(blob)
-        .fetch_one(self.pool())
+        .fetch_one(&mut *transaction)
         .await
         .map_err(PersistenceError::Query)?;
+        transaction
+            .commit()
+            .await
+            .map_err(PersistenceError::Query)?;
         Ok(SourceRevision { id: stored_id })
     }
 }

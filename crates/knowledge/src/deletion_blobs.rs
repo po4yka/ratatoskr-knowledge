@@ -7,11 +7,17 @@
 //! any more. A crash between the commit and the drain therefore leaves a queue row, never an
 //! orphaned or wrongly deleted file, and bytes that were stored before their row was registered
 //! are not on the queue and are never touched.
+//!
+//! The re-check and the erase run under the per-digest lock of `blob_registry`, which every
+//! registrar of a Knowledge-owned blob reference takes too, so a reference registered while a
+//! digest is being collected either commits first (and the digest is kept) or waits, finds the
+//! bytes gone and stores them again.
 
 use std::collections::HashSet;
 
 use uuid::Uuid;
 
+use crate::blob_registry::blob_lock;
 use crate::{BlobStore, Database, DeletionError};
 
 const KNOWLEDGE_OWNER: &str = "ratatoskr-knowledge";
@@ -112,10 +118,11 @@ pub(crate) async fn referenced_owned_digests(
 
 /// Removes every queued digest that no remaining row references.
 ///
-/// Each digest is handled in its own transaction: the queue row is locked, a digest a surviving
-/// row still references is only dropped from the queue, and any other digest is removed from the
-/// blob root (idempotently) and then from the queue. Safe to run at any time and from several
-/// processes. Returns the removed digests.
+/// Each digest is handled in its own transaction: the digest lock is taken, the queue row is
+/// locked, a digest a surviving row still references is only dropped from the queue, and any other
+/// digest is removed from the blob root (idempotently) and then from the queue, all before the
+/// commit releases the digest lock. Safe to run at any time and from several processes. Returns
+/// the removed digests.
 ///
 /// # Errors
 ///
@@ -147,6 +154,9 @@ pub(crate) async fn drain_queue(
         let mut transaction = database
             .pool()
             .begin()
+            .await
+            .map_err(DeletionError::Query)?;
+        blob_lock(&mut transaction, &digest)
             .await
             .map_err(DeletionError::Query)?;
         let locked: Option<Uuid> = sqlx::query_scalar(

@@ -438,6 +438,8 @@ impl<P: LlmProvider> RunDriver<'_, P> {
                 call.ordinal,
                 &AttemptUpdate {
                     raw_response: raw,
+                    blobs: self.blobs,
+                    held_bytes: &response.bytes,
                     request_id: response.request_id.as_deref(),
                     input_tokens: response.usage.input_tokens,
                     output_tokens: response.usage.output_tokens,
