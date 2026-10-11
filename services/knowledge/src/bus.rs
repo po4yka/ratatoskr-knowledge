@@ -31,9 +31,15 @@ pub(crate) struct DurableSpec<'a> {
     pub(crate) max_deliver: Option<i64>,
 }
 
+/// The inbox prefix of every connection this service opens (XR-021 CONTRACTS.md R3-01).
+///
+/// The Knowledge identity may subscribe to this prefix and nothing else, so another service's
+/// deliveries are never readable from here; `deploy/nats/identity.conf` carries the same literal.
+const INBOX_PREFIX: &str = "_INBOX_knowledge";
+
 /// Connects with the `NKey` seed read from `credentials`, or anonymously when it is absent.
 ///
-/// The seed is read once and never logged.
+/// The seed is read once and never logged. Both branches use [`INBOX_PREFIX`].
 pub(crate) async fn connect(
     endpoint: &str,
     credentials: Option<&Path>,
@@ -43,11 +49,14 @@ pub(crate) async fn connect(
             .await
             .map_err(|_| BusFailure::Unavailable)?;
         async_nats::ConnectOptions::with_nkey(seed.trim().to_owned())
+            .custom_inbox_prefix(INBOX_PREFIX)
             .connect(endpoint)
             .await
             .map_err(|_| BusFailure::Unavailable)
     } else {
-        async_nats::connect(endpoint)
+        async_nats::ConnectOptions::new()
+            .custom_inbox_prefix(INBOX_PREFIX)
+            .connect(endpoint)
             .await
             .map_err(|_| BusFailure::Unavailable)
     }

@@ -491,6 +491,7 @@ async fn the_knowledge_identity_cannot_publish_or_inspect_outside_its_allowlist(
     let fabric = Authorized::boot().await?;
     let own = jetstream::new(
         async_nats::ConnectOptions::with_nkey(fabric.knowledge.seed()?)
+            .custom_inbox_prefix(KNOWLEDGE_INBOX)
             .connect(&fabric.url)
             .await?,
     );
@@ -530,5 +531,103 @@ async fn the_knowledge_identity_cannot_publish_or_inspect_outside_its_allowlist(
         !matches!(denied_inspection, Ok(Ok(_))),
         "another service's durable must not be inspectable"
     );
+    Ok(())
+}
+
+/// The inbox prefix the Knowledge stanza lets the identity subscribe to (XR-021 CONTRACTS.md R3-01).
+const KNOWLEDGE_INBOX: &str = "_INBOX_knowledge";
+
+#[tokio::test]
+async fn knowledge_workers_complete_jetstream_requests_under_their_inbox_prefix() -> TestResult {
+    let fabric = Authorized::boot().await?;
+    // Control: a client that names the stanza's prefix reaches its durable, a client on the
+    // default `_INBOX` prefix gets no reply because it may not subscribe there.
+    let prefixed = jetstream::new(
+        async_nats::ConnectOptions::with_nkey(fabric.knowledge.seed()?)
+            .custom_inbox_prefix(KNOWLEDGE_INBOX)
+            .connect(&fabric.url)
+            .await?,
+    );
+    prefixed
+        .get_consumer_from_stream::<pull::Config, _, _>(
+            IngestFamily::Documents.durable(),
+            EVENTS_STREAM,
+        )
+        .await?;
+    let default_prefix = jetstream::new(
+        async_nats::ConnectOptions::with_nkey(fabric.knowledge.seed()?)
+            .connect(&fabric.url)
+            .await?,
+    );
+    let unprefixed = tokio::time::timeout(
+        Duration::from_secs(3),
+        default_prefix.get_consumer_from_stream::<pull::Config, _, _>(
+            IngestFamily::Documents.durable(),
+            EVENTS_STREAM,
+        ),
+    )
+    .await;
+    assert!(
+        !matches!(unprefixed, Ok(Ok(_))),
+        "a request on the default inbox prefix must not complete under the Knowledge stanza"
+    );
+
+    let database = TestDatabase::create().await?;
+    let blobs_root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(blobs_root.path(), 1_048_576);
+    let digest_source = HttpStub::start(vec![("/ready".to_owned(), 200, Vec::new())]).await?;
+    let config = fabric.config(digest_source.address());
+    let lifecycle = Lifecycle::starting_with_channel_recap();
+    lifecycle.require_ingest();
+    lifecycle.mark_listener_bound(ratatoskr_knowledge_service::Listener::Operator);
+    lifecycle.mark_listener_bound(ratatoskr_knowledge_service::Listener::Api);
+    lifecycle.mark_ready();
+    let (drain, receiver) = watch::channel(false);
+    let recap_worker = spawn_channel_recap_worker(
+        config.clone(),
+        database.database.clone(),
+        blobs.clone(),
+        lifecycle.clone(),
+        receiver.clone(),
+        Arc::new(RateLimiter::new(Duration::ZERO)),
+        Arc::new(ratatoskr_knowledge_service::Metrics::new()),
+    );
+    let ingest_worker = spawn_ingest_workers_with_provider(
+        config,
+        database.database.clone(),
+        blobs,
+        lifecycle.clone(),
+        receiver,
+        routed(&[("article_prompt_v1", ARTICLE_ANALYSIS)]),
+    );
+    eventually(
+        "both workers verify their durables under the prefix",
+        || async { Ok(lifecycle.is_ready()) },
+    )
+    .await?;
+    fabric
+        .publish(
+            "evt.content.document.extracted.v1",
+            envelope(
+                EVENT_A,
+                "content.document.extracted.v1",
+                "ratatoskr-extractor",
+                Some(OWNER),
+                &extracted_document()?,
+            ),
+        )
+        .await?;
+    eventually("the documents durable pulled and acknowledged", || async {
+        Ok(fabric
+            .durable(EVENTS_STREAM, IngestFamily::Documents.durable())
+            .await?
+            == (0, 0, 1))
+    })
+    .await?;
+
+    let _ignored = drain.send(true);
+    tokio::time::timeout(Duration::from_secs(10), recap_worker).await??;
+    tokio::time::timeout(Duration::from_secs(10), ingest_worker).await??;
+    database.cleanup().await?;
     Ok(())
 }
