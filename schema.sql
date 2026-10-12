@@ -744,7 +744,8 @@ create table if not exists knowledge.event_outbox (
         'knowledge.analysis.completed.v1',
         'knowledge.ai_archive_analysis.completed.v1',
         'knowledge.repository_analysis.completed.v1',
-        'knowledge.repository_analysis.failed.v1'
+        'knowledge.repository_analysis.failed.v1',
+        'knowledge.deletion.acknowledged.v1'
     )),
     constraint event_outbox_payload_object_check check (jsonb_typeof(payload) = 'object'),
     constraint event_outbox_dedupe_key unique (dedupe_key)

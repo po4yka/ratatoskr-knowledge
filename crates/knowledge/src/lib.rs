@@ -24,6 +24,7 @@ mod context;
 mod controlled;
 mod database;
 mod deletion;
+mod deletion_ack;
 mod deletion_audit;
 mod deletion_blobs;
 mod deletion_recap;
@@ -111,6 +112,7 @@ pub use deletion::{
     DeletionCounts, DeletionError, DeletionReceipt, DeletionScope, delete_source, delete_tenant,
     execute_deletion, verify_scope_empty,
 };
+pub use deletion_ack::{DELETION_ACK_REARM_AFTER, DeletionAcknowledgement};
 pub use deletion_blobs::collect_pending_blobs;
 pub use deterministic_provider::ExtractiveArticleProvider;
 pub use document_intake::{DocumentIntake, DocumentIntakeError, DocumentIntakeOutcome};
@@ -125,7 +127,7 @@ pub use evaluation::{
     run_committed_evaluation, run_offline, score_case, score_response_sets,
 };
 pub use event_outbox::{
-    EventCause, EventOutbox, EventOutboxError, OutboxFact, OutboxRow, OutboxSubject,
+    EnqueueOutcome, EventCause, EventOutbox, EventOutboxError, OutboxFact, OutboxRow, OutboxSubject,
 };
 pub use family_analysis::{
     ArchiveAnalysis, ArchiveDecision, ArchiveProjectAnalysis, FamilyValidationError,

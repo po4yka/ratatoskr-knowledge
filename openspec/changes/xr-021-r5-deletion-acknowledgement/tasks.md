@@ -1,7 +1,7 @@
 ## 1. Plumbing (R5-11 rules 1 and 2)
 
-- [ ] 1.1 RED: add `crates/knowledge/tests/event_outbox.rs` cases: the subject `knowledge.deletion.acknowledged.v1` is accepted by `OutboxSubject::parse`, the schema CHECK and the publisher's envelope builder (event type, producer `ratatoskr-knowledge`, `aggregate_id` the subject, `causation_id` `event:<acknowledged id>`, `tenant_id` the owner, payload validates); `EventOutbox::enqueue_rearm_in` inserts a new row, re-arms a row published more than one minute ago (`Rearmed`) and changes nothing for a younger or an unpublished one (`Unchanged`). Add the variant and the function as stubs and confirm the failures are on assertions.
-- [ ] 1.2 GREEN: `OutboxSubject::DeletionAcknowledged`, the schema CHECK, `enqueue_rearm_in`, the envelope builder, the publisher's allowed subject and the ACL stanza in `deploy/nats/identity.conf`.
+- [x] 1.1 RED: add `crates/knowledge/tests/event_outbox.rs` cases: the subject `knowledge.deletion.acknowledged.v1` is accepted by `OutboxSubject::parse`, the schema CHECK and the publisher's envelope builder (event type, producer `ratatoskr-knowledge`, `aggregate_id` the subject, `causation_id` `event:<acknowledged id>`, `tenant_id` the owner, payload validates); `EventOutbox::enqueue_rearm_in` inserts a new row, re-arms a row published more than one minute ago (`Rearmed`) and changes nothing for a younger or an unpublished one (`Unchanged`). Add the variant and the function as stubs and confirm the failures are on assertions.
+- [x] 1.2 GREEN: `OutboxSubject::DeletionAcknowledged`, the schema CHECK, `enqueue_rearm_in`, the envelope builder, the publisher's allowed subject and the ACL stanza in `deploy/nats/identity.conf`.
 
 ## 2. Handlers (R5-11 rule 2)
 

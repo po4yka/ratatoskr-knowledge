@@ -4,7 +4,7 @@
 //! after the change cannot lose the fact, and published afterwards by the ingest worker. The
 //! unique dedupe key makes enqueueing a redelivery idempotent.
 
-use ratatoskr_event_envelope::EventEnvelope;
+use ratatoskr_event_envelope::{EnvelopeSchemaVersion, EventEnvelope};
 use ratatoskr_identifiers::{EntityRef, TenantRef, WireTimestamp};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
@@ -55,6 +55,9 @@ pub enum OutboxSubject {
     RepositoryAnalysisCompleted,
     /// `knowledge.repository_analysis.failed.v1`: a repository request failed.
     RepositoryAnalysisFailed,
+    /// `knowledge.deletion.acknowledged.v1`: a deletion fact was applied or refused (XR-021
+    /// CONTRACTS.md R5-11).
+    DeletionAcknowledged,
 }
 
 impl OutboxSubject {
@@ -66,19 +69,34 @@ impl OutboxSubject {
             Self::AiArchiveAnalysisCompleted => "knowledge.ai_archive_analysis.completed.v1",
             Self::RepositoryAnalysisCompleted => "knowledge.repository_analysis.completed.v1",
             Self::RepositoryAnalysisFailed => "knowledge.repository_analysis.failed.v1",
+            Self::DeletionAcknowledged => "knowledge.deletion.acknowledged.v1",
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    /// The subject spelled `value`, if it is one Knowledge publishes.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
         [
             Self::AnalysisCompleted,
             Self::AiArchiveAnalysisCompleted,
             Self::RepositoryAnalysisCompleted,
             Self::RepositoryAnalysisFailed,
+            Self::DeletionAcknowledged,
         ]
         .into_iter()
         .find(|subject| subject.as_str() == value)
     }
+}
+
+/// What queueing a fact that may already exist did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// The dedupe key was new and the fact was inserted.
+    Inserted,
+    /// The fact had been published long enough ago to be published again.
+    Rearmed,
+    /// The fact exists and was left as it was.
+    Unchanged,
 }
 
 /// One fact to publish, as the producing transaction knows it.
@@ -119,6 +137,35 @@ pub struct OutboxRow {
     pub payload: serde_json::Value,
     /// When the fact was committed.
     pub created_at: WireTimestamp,
+}
+
+impl OutboxRow {
+    /// The envelope this fact is published as.
+    ///
+    /// The envelope's event id is the outbox id, so a republish after a crash between the
+    /// broker's acknowledgement and the `published_at` update carries the same `Nats-Msg-Id` and
+    /// the broker drops it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventOutboxError::InvalidRow`] when the stored row does not form an envelope.
+    pub fn envelope(&self) -> Result<EventEnvelope, EventOutboxError> {
+        let mut value = serde_json::json!({
+            "event_id": self.outbox_id,
+            "event_type": self.subject.as_str(),
+            "occurred_at": self.created_at,
+            "producer": "ratatoskr-knowledge",
+            "aggregate_id": self.aggregate_id,
+            "correlation_id": self.correlation_id,
+            "tenant_id": self.tenant,
+            "schema_version": EnvelopeSchemaVersion::CURRENT,
+            "payload": self.payload,
+        });
+        if let (Some(causation), Some(object)) = (&self.causation_id, value.as_object_mut()) {
+            object.insert("causation_id".to_owned(), serde_json::json!(causation));
+        }
+        serde_json::from_value(value).map_err(|_| EventOutboxError::InvalidRow)
+    }
 }
 
 /// Safe outbox failure.
@@ -191,6 +238,74 @@ impl<'a> EventOutbox<'a> {
         .await
         .map_err(PersistenceError::Query)?;
         Ok(inserted.is_some())
+    }
+
+    /// Inserts `fact`, or produces it again when it was published more than `rearm_after` ago.
+    ///
+    /// A fact whose dedupe key is new is inserted. A repeat of a fact that was published longer
+    /// ago than `rearm_after` is set back to unpublished, so the publisher sends it again (the
+    /// row has the same id, hence the same `Nats-Msg-Id`); a repeat of one that is unpublished or
+    /// was published more recently changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventOutboxError`] when the fact is not an object or the write fails.
+    pub async fn enqueue_rearm_in(
+        transaction: &mut Transaction<'_, Postgres>,
+        fact: &OutboxFact,
+        rearm_after: std::time::Duration,
+    ) -> Result<EnqueueOutcome, EventOutboxError> {
+        if !fact.payload.is_object() {
+            return Err(EventOutboxError::InvalidRow);
+        }
+        // `xmax = 0` is true for a row this statement inserted and false for one it updated; a
+        // repeat that does not meet the `where` returns no row at all.
+        let written: Option<bool> = sqlx::query_scalar(
+            "insert into knowledge.event_outbox
+                 (outbox_id, subject, tenant_ref, aggregate_id, correlation_id, causation_id,
+                  payload, dedupe_key)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             on conflict (dedupe_key) do update set published_at = null
+                 where knowledge.event_outbox.published_at
+                       < now() - make_interval(secs => $9::double precision)
+             returning (xmax = 0)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(fact.subject.as_str())
+        .bind(fact.tenant.to_string())
+        .bind(fact.aggregate_id.to_wire())
+        .bind(fact.correlation_id.to_wire())
+        .bind(fact.causation_id.as_ref().map(EntityRef::to_wire))
+        .bind(&fact.payload)
+        .bind(&fact.dedupe_key)
+        .bind(rearm_after.as_secs_f64())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+        Ok(match written {
+            Some(true) => EnqueueOutcome::Inserted,
+            Some(false) => EnqueueOutcome::Rearmed,
+            None => EnqueueOutcome::Unchanged,
+        })
+    }
+
+    pub(crate) async fn begin(&self) -> Result<Transaction<'static, Postgres>, EventOutboxError> {
+        Ok(self
+            .database
+            .pool()
+            .begin()
+            .await
+            .map_err(PersistenceError::Query)?)
+    }
+
+    pub(crate) async fn commit(
+        &self,
+        transaction: Transaction<'static, Postgres>,
+    ) -> Result<(), EventOutboxError> {
+        Ok(transaction
+            .commit()
+            .await
+            .map_err(PersistenceError::Query)?)
     }
 
     /// Inserts `fact` in its own transaction.

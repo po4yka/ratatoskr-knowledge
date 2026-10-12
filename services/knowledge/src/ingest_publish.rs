@@ -3,10 +3,8 @@
 use std::time::Duration;
 
 use async_nats::jetstream;
-use ratatoskr_event_envelope::{EnvelopeSchemaVersion, EventEnvelope};
-use ratatoskr_knowledge::{Database, EventOutbox, OutboxRow};
+use ratatoskr_knowledge::{Database, EventOutbox};
 
-const PRODUCER: &str = "ratatoskr-knowledge";
 const BATCH: i64 = 32;
 const PUBLISH_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -28,29 +26,6 @@ pub enum PublishFailure {
     Encode,
 }
 
-/// The envelope a stored fact is published as.
-///
-/// The envelope's event id is the outbox id, so a republish after a crash between the broker's
-/// acknowledgement and the `published_at` update carries the same `Nats-Msg-Id` and the broker
-/// drops it.
-fn envelope_for(row: &OutboxRow) -> Result<EventEnvelope, PublishFailure> {
-    let mut value = serde_json::json!({
-        "event_id": row.outbox_id,
-        "event_type": row.subject.as_str(),
-        "occurred_at": row.created_at,
-        "producer": PRODUCER,
-        "aggregate_id": row.aggregate_id,
-        "correlation_id": row.correlation_id,
-        "tenant_id": row.tenant,
-        "schema_version": EnvelopeSchemaVersion::CURRENT,
-        "payload": row.payload,
-    });
-    if let (Some(causation), Some(object)) = (&row.causation_id, value.as_object_mut()) {
-        object.insert("causation_id".to_owned(), serde_json::json!(causation));
-    }
-    serde_json::from_value(value).map_err(|_| PublishFailure::Encode)
-}
-
 /// Publishes up to a batch of unpublished facts and marks each after its acknowledgement.
 ///
 /// Returns the number published.
@@ -70,7 +45,7 @@ pub async fn publish_event_outbox(
         .map_err(|_| PublishFailure::Outbox)?;
     let mut published = 0;
     for row in rows {
-        let envelope = envelope_for(&row)?;
+        let envelope = row.envelope().map_err(|_| PublishFailure::Encode)?;
         let bytes = serde_json::to_vec(&envelope).map_err(|_| PublishFailure::Encode)?;
         let mut headers = async_nats::HeaderMap::new();
         headers.insert("Nats-Msg-Id", row.outbox_id.to_string());
