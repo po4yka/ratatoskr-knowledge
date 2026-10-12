@@ -21,6 +21,7 @@ use crate::blob_registry::lock_and_verify;
 use crate::run_driver::{DriveFailure, Rejected, RunDriver};
 use crate::search::{
     SearchDocumentProjection, record_search_document, record_search_projection_input,
+    retire_superseded_projections,
 };
 use crate::{
     AnalysisIdentity, BlobError, BlobStore, Database, EventCause, EventOutboxError,
@@ -652,6 +653,9 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             .await
             .map_err(PersistenceError::Query)?;
         record_search_document(&mut *tx, &projection)
+            .await
+            .map_err(PersistenceError::Query)?;
+        retire_superseded_projections(&mut tx, source_ref_id)
             .await
             .map_err(PersistenceError::Query)?;
         tx.commit().await.map_err(PersistenceError::Query)?;

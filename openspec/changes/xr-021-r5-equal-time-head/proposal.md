@@ -6,7 +6,8 @@ Round 5 of changeset XR-021 (CONTRACTS.md R5-08 rule 2) verified that `SourceInb
 
 - The head moves when `observed_at` is later, or when it is equal and the inbox event id is greater (UUID comparison; event ids are UUIDv7, so time ordered).
 - `accept` keeps its admission vocabulary: `AcceptedCurrent` for such a delivery, `AcceptedHistorical` for a strictly older one or an equal one with a smaller event id, `Duplicate` for a repeated event.
-- The head rule is described in `DEVELOPMENT.md` and `docs/`.
+- A source is searchable as its head only: when a head revision is analysed, the search documents and projection inputs of its superseded revisions leave the index in the same transaction (found while replaying the survivor sequence: the replaced head's text stayed searchable). The analyses stay as history.
+- The head rule is described in `README.md` and `docs/`.
 
 ## Capabilities
 

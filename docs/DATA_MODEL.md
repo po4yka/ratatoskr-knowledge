@@ -30,7 +30,9 @@ only `knowledge.*` objects:
   A recap attempt may end `interrupted` when the process stopped while its provider call was in
   flight.
 - `source_analysis_inbox` and `source_analysis_heads` claim social and AI-archive deliveries and keep
-  the head of each source; `ai_archive_object_inbox` keeps import, project and artifact receipts;
+  the head of each source (the delivery with the greatest `(observed_at, event id)`; superseded
+  revisions keep their analyses but leave `search_documents` and `search_projection_inputs` when the
+  head revision is analysed); `ai_archive_object_inbox` keeps import, project and artifact receipts;
   `ai_archive_tombstones` and `social_tombstones` are the ordering guards that stop a delayed older
   delivery from resurrecting a deleted source;
 - `repository_analysis_requests` keeps one pending request per idempotency digest together with the

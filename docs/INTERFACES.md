@@ -83,7 +83,8 @@ read-through boundary for the channel-digest service, not a public analysis API.
   its durable state; a run held by another executor is a `State` conflict.
 - `SourceInbox` claims social and AI-archive deliveries; `accept_social_removed` records a tombstone,
   drops the source head and snapshots and deletes the derived rows in one transaction, and
-  `is_current_head` tells a redelivery whether its analysis is still owed.
+  `is_current_head` tells a redelivery whether its analysis is still owed. A delivery replaces the
+  head when its `observed_at` is later, or equal with a greater event id.
 - `DocumentIntake` registers an extracted document under the extractor's context with the
   extractor-owned Document IR blob as provenance, creates the run once and analyses it with the
   article pipeline.

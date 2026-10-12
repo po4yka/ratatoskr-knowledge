@@ -275,7 +275,17 @@ so the requester is told. A redelivered tombstone also drains the blob erasure q
 before it is acknowledged, so a delivery that committed the row deletion and then failed finishes
 the byte erasure. A redelivery whose inbox
 row was committed before the analysis ran resumes the analysis when that delivery is still the head
-of its source; a delayed older delivery is kept as a receipt and never regresses the head.
+of its source; a delayed older delivery is kept as a receipt and never regresses the head. Deliveries
+of one source are ordered by `(observed_at, event id)`: a delivery replaces the head when its
+`observed_at` is later, or equal with a greater event id (UUIDv7, so time ordered), which is what
+lets the re-announcement of a conversation after a privacy deletion, minted under the retained
+archive's original `imported_at`, replace the stale head (XR-021 CONTRACTS.md R5-08 rule 2). A
+strictly older delivery, or an equal one with a smaller event id, is kept as historical. The
+analysis revision is keyed by the content digest, so a changed digest is analysed again and an
+unchanged one is not. A source is searchable as its head only: when the head revision is analysed,
+the search documents and projection inputs of its superseded revisions are removed in the same
+transaction (the analyses themselves stay as history), so the text a deleted export wrote stops
+being served.
 
 The provider failure classes recorded on an attempt, and what the ingest worker does with each:
 

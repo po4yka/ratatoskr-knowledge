@@ -597,7 +597,9 @@ impl<'a> SourceInbox<'a> {
              on conflict (family, tenant_ref, source_id) do update set
                  content_digest_hex = excluded.content_digest_hex, observed_at = excluded.observed_at,
                  inbox_event_id = excluded.inbox_event_id
-             where excluded.observed_at > knowledge.source_analysis_heads.observed_at",
+             where excluded.observed_at > knowledge.source_analysis_heads.observed_at
+                or (excluded.observed_at = knowledge.source_analysis_heads.observed_at
+                    and excluded.inbox_event_id > knowledge.source_analysis_heads.inbox_event_id)",
         )
         .bind(delivery.family).bind(&delivery.tenant_ref).bind(&delivery.source_id).bind(&delivery.content_digest_hex)
         .bind(delivery.observed_at.to_string()).bind(delivery.event_id)

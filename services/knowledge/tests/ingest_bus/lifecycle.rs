@@ -15,8 +15,9 @@ use ratatoskr_social_contracts::{SocialSourceAnalysisCompleted, SocialSourceSnap
 
 use crate::fixtures::{
     ARCHIVE_ANALYSIS, ARTICLE_ANALYSIS, CAPTURED, CONTRACT_CONVERSATION, CONTRACT_TOMBSTONE,
-    EVENT_A, EVENT_B, OWNER, SOCIAL_ANALYSIS, envelope, extracted_document, removal_payload,
-    response, routed, social_payload,
+    CONVERSATION_ADDED, EVENT_A, EVENT_B, EVENT_C, OWNER, SOCIAL_ANALYSIS, archive_tombstone,
+    envelope, extracted_document, presented_conversation, removal_payload, response, routed,
+    social_payload,
 };
 use crate::harness::{BROKER, Harness};
 use crate::ingest_support::{TestResult, eventually};
@@ -159,6 +160,112 @@ async fn ai_archive_conversation_is_indexed_and_tombstone_removes_it() -> TestRe
     })
     .await?;
     harness.settled(IngestFamily::AiArchive, 2).await?;
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R5-08 rule 2, replaying the survivor sequence of ChatGPT and Claude after
+/// a privacy deletion. The retained archive presented the conversation at one instant and its
+/// fact carries a part (`zanzibar`) that only the deleted export wrote. The deletion tombstones
+/// the deleted archive, and the retained archive re-announces the conversation without the part
+/// under its original `imported_at`, the same instant as the stale fact but with a later event
+/// id. Knowledge must take the re-announcement as the head, analyse it, and stop serving the
+/// part.
+#[tokio::test]
+async fn a_survivor_re_announcement_under_the_same_instant_removes_the_deleted_part() -> TestResult
+{
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start().await?;
+    let worker = harness.spawn(Arc::new(ScriptedProvider::new([
+        Ok(response(ARCHIVE_ANALYSIS)),
+        Ok(response(ARCHIVE_ANALYSIS)),
+    ])));
+    const RETAINED: &str = "018f0000-0000-7000-8000-000000000e01";
+    const DELETED: &str = "018f0000-0000-7000-8000-000000000e02";
+    const IMPORTED: &str = "2026-08-18T11:30:00Z";
+    let search = |term: &'static str| {
+        let harness = &harness;
+        async move {
+            let page = ratatoskr_knowledge::search_page(
+                harness.database.database.pool(),
+                &ratatoskr_knowledge::SearchQuery::new(OWNER.to_owned(), term, 10, 0)?,
+            )
+            .await?;
+            Ok::<usize, Box<dyn std::error::Error>>(page.results.len())
+        }
+    };
+    let publish_conversation = |event_id: &'static str, payload: serde_json::Value| {
+        let harness = &harness;
+        async move {
+            harness
+                .publish(
+                    "evt.ai_archive.conversation.added.v1",
+                    event_id,
+                    envelope(
+                        event_id,
+                        CONVERSATION_ADDED,
+                        "ratatoskr-claude",
+                        Some(OWNER),
+                        &payload,
+                    ),
+                )
+                .await
+        }
+    };
+
+    // The retained archive's fact carries the part the deleted export wrote.
+    publish_conversation(
+        EVENT_A,
+        presented_conversation(
+            RETAINED,
+            IMPORTED,
+            &[
+                "Explain E0597.",
+                "A zanzibar example of a borrow that is too short.",
+            ],
+        )?,
+    )
+    .await?;
+    eventually("the conversation with the part is searchable", || async {
+        Ok(search("zanzibar").await? == 1)
+    })
+    .await?;
+
+    // The deleted archive is tombstoned; nothing of it is held, so the part stays where it is.
+    harness
+        .publish(
+            "evt.ai_archive.subject.tombstoned.v1",
+            EVENT_B,
+            envelope(
+                EVENT_B,
+                "ai_archive.subject.tombstoned.v1",
+                "ratatoskr-claude",
+                Some(OWNER),
+                &archive_tombstone(DELETED, "2026-08-27T06:00:00Z")?,
+            ),
+        )
+        .await?;
+    harness.settled(IngestFamily::AiArchive, 2).await?;
+    assert_eq!(search("zanzibar").await?, 1);
+
+    // The survivor fact: the retained archive, the same instant, no part, a later event id.
+    publish_conversation(
+        EVENT_C,
+        presented_conversation(RETAINED, IMPORTED, &["Explain E0597."])?,
+    )
+    .await?;
+    harness.settled(IngestFamily::AiArchive, 3).await?;
+    assert_eq!(
+        search("zanzibar").await?,
+        0,
+        "the part only the deleted export wrote is no longer searchable"
+    );
+    assert_eq!(
+        search("E0597").await?,
+        1,
+        "the conversation itself still is"
+    );
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

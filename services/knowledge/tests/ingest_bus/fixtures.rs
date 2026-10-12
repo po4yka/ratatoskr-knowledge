@@ -429,3 +429,60 @@ pub(crate) fn large_conversation_payload(
         "conversation": serde_json::to_value(&conversation)?,
     }))
 }
+
+/// A `conversation.added` payload of the one fixture conversation, presented by archive
+/// `archive_id` imported at `imported_at`, whose messages are `texts` in order. The content digest
+/// is the one the contract computes for those messages.
+pub(crate) fn presented_conversation(
+    archive_id: &str,
+    imported_at: &str,
+    texts: &[&str],
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let template: serde_json::Value = serde_json::from_str(CONTRACT_CONVERSATION)?;
+    let messages: Vec<serde_json::Value> = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            serde_json::json!({
+                "external_message_id": format!("msg-{:04}", index + 1),
+                "author_role": if index % 2 == 0 { "user" } else { "assistant" },
+                "parts": [{"part_kind": "text", "text": text}],
+                "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+            })
+        })
+        .collect();
+    let conversation = ratatoskr_knowledge::test_support::archive::conversation_from_json(
+        &serde_json::json!({
+            "ai_conversation_id": "018f0000-0000-7000-8000-000000000403",
+            "provider": "chatgpt",
+            "owner": OWNER,
+            "title": "Survivor fixture",
+            "messages": messages,
+            "content_digest": {"algorithm": "sha256", "hex": "0".repeat(64)},
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        })
+        .to_string(),
+    )?;
+    let mut provenance = template
+        .get("import_provenance")
+        .cloned()
+        .ok_or("no provenance")?;
+    provenance["ai_archive_id"] = serde_json::json!(archive_id);
+    provenance["imported_at"] = serde_json::json!(imported_at);
+    Ok(serde_json::json!({
+        "import_provenance": provenance,
+        "conversation": serde_json::to_value(&conversation)?,
+    }))
+}
+
+/// A tombstone of a whole archive, observed at `observed_at`.
+pub(crate) fn archive_tombstone(
+    archive_id: &str,
+    observed_at: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut tombstone: serde_json::Value = serde_json::from_str(CONTRACT_TOMBSTONE)?;
+    tombstone["ai_archive_id"] = serde_json::json!(archive_id);
+    tombstone["subject"] = serde_json::json!({"subject_kind": "archive"});
+    tombstone["observed_at"] = serde_json::json!(observed_at);
+    Ok(tombstone)
+}

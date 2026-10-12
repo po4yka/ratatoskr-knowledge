@@ -1,11 +1,13 @@
 //! Deterministic search-document text extracted from canonical Document IR.
 
 mod sql;
+mod supersession;
 mod text_bound;
 
 use ratatoskr_document_contracts::{Document, DocumentBlock};
 
 use self::sql::HYBRID_SEARCH_SQL;
+pub(crate) use self::supersession::retire_superseded_projections;
 pub use self::text_bound::SEARCH_TEXT_MAX_BYTES;
 use crate::ReadState;
 
