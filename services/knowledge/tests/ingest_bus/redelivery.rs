@@ -14,7 +14,11 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt as _;
-use ratatoskr_knowledge::{ProviderError, ScriptedProvider};
+use ratatoskr_knowledge::test_support::{FakeReply, FakeTransport};
+use ratatoskr_knowledge::{
+    OpenRouterProvider, OpenRouterSettings, ProviderError, ProviderSecret, RetryPolicy,
+    ScriptedProvider,
+};
 use ratatoskr_knowledge_service::{IngestFamily, Lifecycle, admin_router};
 use tower::ServiceExt as _;
 
@@ -576,6 +580,171 @@ async fn a_redelivery_from_the_second_on_logs_family_class_and_count_without_con
     );
     assert_eq!(logs.lines_containing("A useful post"), 0, "no content");
     assert_eq!(logs.lines_containing(OWNER), 0, "no tenant");
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// A real adapter over a loopback transport that answers `status` to the first `rejected`
+/// requests and then a chat completion carrying `content`: the failure is classified by
+/// `classify_error`, not scripted.
+async fn rejecting_provider(
+    status: u16,
+    rejected: usize,
+    content: &str,
+) -> Result<(FakeTransport, Arc<OpenRouterProvider>), Box<dyn std::error::Error>> {
+    let success = serde_json::json!({
+        "id": "gen-r5-operator-action",
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+    });
+    let mut replies: Vec<FakeReply> = (0..rejected)
+        .map(|_| FakeReply::bytes(status, br#"{"error":{"message":"refused"}}"#.to_vec()))
+        .collect();
+    replies.push(FakeReply::bytes(200, serde_json::to_vec(&success)?));
+    let transport = FakeTransport::start(replies).await?;
+    let provider = OpenRouterProvider::new(OpenRouterSettings {
+        base_url: format!("http://{}/api/v1", transport.local_addr()),
+        model: "openai/gpt-oss-20b".to_owned(),
+        credential: ProviderSecret::new("sk-or-v1-LEAKME".to_owned()),
+        max_output_tokens: 2_048,
+        response_byte_cap: 65_536,
+        call_deadline: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(2),
+        retry: RetryPolicy::new(1, 0, 0),
+    })?;
+    Ok((transport, Arc::new(provider)))
+}
+
+/// One fact of `family` whose provider answers 401 for the first eight deliveries: it is applied
+/// once the credential works, none of its deliveries is terminated, and the counter and the log
+/// say so without content (XR-021 CONTRACTS.md R5-08 rule 1).
+async fn survives_a_rejected_credential(
+    family: IngestFamily,
+    subject: &str,
+    event_type: &str,
+    producer: &str,
+    payload: &serde_json::Value,
+    answer: &str,
+) -> TestResult {
+    let _serial = BROKER.lock().await;
+    let (logs, _guard) = capture();
+    let harness = Harness::start_fast().await?;
+    let (transport, provider) = rejecting_provider(
+        401,
+        usize::try_from(DELIVERIES_PAST_THE_OLD_BUDGET)?,
+        answer,
+    )
+    .await?;
+    let worker = harness.spawn(provider);
+    harness
+        .publish(
+            subject,
+            EVENT_A,
+            envelope(EVENT_A, event_type, producer, Some(OWNER), payload),
+        )
+        .await?;
+
+    redelivered_until(&harness, family, DELIVERIES_PAST_THE_OLD_BUDGET).await?;
+    eventually("the fact is analysed once the credential works", || async {
+        Ok(harness.search_documents().await? == 1)
+    })
+    .await?;
+    quiet(&harness, family).await?;
+    assert_eq!(
+        transport.request_count()?,
+        9,
+        "eight rejections, one answer"
+    );
+    assert_eq!(
+        harness
+            .rows_in(&["analysis_runs", "analysis_outputs"])
+            .await?,
+        2
+    );
+    assert_counted(&harness).await?;
+    let warnings: Vec<String> = logs
+        .text()
+        .lines()
+        .filter(|line| line.contains("will be redelivered"))
+        .map(str::to_owned)
+        .collect();
+    for delivered in 2..=DELIVERIES_PAST_THE_OLD_BUDGET {
+        assert!(
+            warnings.iter().any(|line| {
+                line.contains(&format!("family=\"{}\"", family.label()))
+                    && line.contains("class=\"provider_operator_action\"")
+                    && line.contains(&format!("delivered={delivered}"))
+            }),
+            "delivery {delivered} is logged with its family and class: {warnings:?}"
+        );
+    }
+    assert!(
+        !warnings.iter().any(|line| line.contains("delivered=1")),
+        "the first failure is not a redelivery"
+    );
+    assert_eq!(logs.lines_containing("sk-or-v1-LEAKME"), 0, "no credential");
+    assert_eq!(logs.lines_containing("A useful post"), 0, "no content");
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rejected_credential_does_not_lose_a_document() -> TestResult {
+    survives_a_rejected_credential(
+        IngestFamily::Documents,
+        "evt.content.document.extracted.v1",
+        "content.document.extracted.v1",
+        "ratatoskr-extractor",
+        &extracted_document()?,
+        ARTICLE_ANALYSIS,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_rejected_credential_does_not_lose_a_social_capture() -> TestResult {
+    survives_a_rejected_credential(
+        IngestFamily::Social,
+        "evt.social.source.captured.v1",
+        CAPTURED,
+        "ratatoskr-x",
+        &social_payload("2026-08-17T10:00:00Z")?,
+        SOCIAL_ANALYSIS,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_rejected_credential_does_not_lose_an_ai_conversation() -> TestResult {
+    survives_a_rejected_credential(
+        IngestFamily::AiArchive,
+        "evt.ai_archive.conversation.added.v1",
+        "ai_archive.conversation.added.v1",
+        "ratatoskr-chatgpt",
+        &serde_json::from_str(CONTRACT_CONVERSATION)?,
+        ARCHIVE_ANALYSIS,
+    )
+    .await
+}
+
+/// A malformed request is the provider's verdict on the delivery itself: 400 is terminated at
+/// the first delivery, as before.
+#[tokio::test]
+async fn a_provider_400_is_still_rejected_at_the_first_delivery() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start_fast().await?;
+    let (transport, provider) = rejecting_provider(400, 4, SOCIAL_ANALYSIS).await?;
+    let worker = harness.spawn(provider);
+    publish_capture(&harness).await?;
+
+    harness.settled(IngestFamily::Social, 1).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    harness.settled(IngestFamily::Social, 1).await?;
+    assert_eq!(transport.request_count()?, 1);
+    assert_eq!(operator_redeliveries(&harness).await?, 0);
+    assert_eq!(harness.search_documents().await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

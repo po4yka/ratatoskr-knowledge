@@ -6,10 +6,12 @@
 //! has already advanced:
 //!
 //! - a run at `persisted`, `indexed` or `completed` returns its accepted output;
-//! - a run at `failed` whose last call failed transiently, or was refused by the provider spend
-//!   budget, is reopened to `queued`, within the per-run budget of spent calls
-//!   [`MAX_RUN_ATTEMPTS`] (neither is spent, so a provider outage or a budget window never
-//!   exhausts it); any other failed run reports its terminal cause;
+//! - a run at `failed` whose last call failed transiently, was refused by the provider spend
+//!   budget, or was refused for a reason an operator can fix (a rejected credential, an empty
+//!   balance, a withdrawn model), is reopened to `queued`, within the per-run budget of spent
+//!   calls [`MAX_RUN_ATTEMPTS`] (none of the three is spent, so a provider outage, a budget
+//!   window or a wait for the operator never exhausts it); any other failed run reports its
+//!   terminal cause;
 //! - a run at `model_requested` had a call in flight or between calls: an unfinished call is
 //!   recorded as interrupted and the next call continues the run, and a run whose calls were
 //!   abandoned twice is failed rather than tried a third time;

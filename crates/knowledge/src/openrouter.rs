@@ -115,23 +115,33 @@ pub fn parse_success_envelope(bytes: &[u8]) -> Result<ProviderResponse, OpenRout
 
 /// Classifies one failed HTTP response status into bounded failure facts.
 ///
-/// Rate-limit, server-fault, and deadline statuses are retryable inside the
-/// pipeline's shared call budget; authorization and invalid-request failures
-/// are permanent.
+/// Rate-limit, server-fault, and deadline statuses are retryable inside the pipeline's shared
+/// call budget. A rejected credential (401, 403), an exhausted balance (402) and a withdrawn
+/// model (404) are fixed by an operator, so they are not permanent: the delivery is redelivered
+/// until the fault clears (XR-021 CONTRACTS.md R5-08 rule 1). Any other client error is a
+/// verdict on the request itself and stays permanent.
 #[must_use]
 pub const fn classify_error(status: u16) -> ProviderFailure {
-    let class = match status {
-        408 => ProviderFailureClass::Timeout,
-        429 => ProviderFailureClass::RateLimited,
-        500..=599 => ProviderFailureClass::ServerError,
-        401 | 403 => ProviderFailureClass::AuthError,
-        _ => ProviderFailureClass::RequestInvalid,
-    };
-    let error = match class {
-        ProviderFailureClass::Timeout
-        | ProviderFailureClass::RateLimited
-        | ProviderFailureClass::ServerError => ProviderError::Transient,
-        _ => ProviderError::Permanent,
+    let (error, class) = match status {
+        408 => (ProviderError::Transient, ProviderFailureClass::Timeout),
+        429 => (ProviderError::Transient, ProviderFailureClass::RateLimited),
+        500..=599 => (ProviderError::Transient, ProviderFailureClass::ServerError),
+        401 | 403 => (
+            ProviderError::OperatorAction,
+            ProviderFailureClass::AuthError,
+        ),
+        402 => (
+            ProviderError::OperatorAction,
+            ProviderFailureClass::PaymentRequired,
+        ),
+        404 => (
+            ProviderError::OperatorAction,
+            ProviderFailureClass::ModelUnavailable,
+        ),
+        _ => (
+            ProviderError::Permanent,
+            ProviderFailureClass::RequestInvalid,
+        ),
     };
     ProviderFailure {
         error,

@@ -5,10 +5,13 @@
 //! state needs a call.
 
 use ratatoskr_identifiers::BlobRef;
-use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
+use ratatoskr_knowledge::test_support::{
+    FakeReply, FakeTransport, TemporaryBlobRoot, TestDatabase,
+};
 use ratatoskr_knowledge::{
-    ArticlePipeline, BlobStore, PersistenceError, PipelineError, ProviderError, ProviderResponse,
-    ProviderUsage, ScriptedProvider, build_generation_request,
+    ArticlePipeline, BlobStore, OpenRouterProvider, OpenRouterSettings, PersistenceError,
+    PipelineError, ProviderError, ProviderResponse, ProviderSecret, ProviderUsage, RetryPolicy,
+    ScriptedProvider, build_generation_request,
 };
 
 mod support;
@@ -17,6 +20,7 @@ use support::*;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+const SUCCESS_ENVELOPE: &str = include_str!("fixtures/openrouter/success.json");
 const VALID: &[u8] = br#"{"summary":"A grounded summary.","key_points":[{"text":"Evidence exists.","source_block_indexes":[0]}]}"#;
 const INVALID: &[u8] = br#"{"summary":"","key_points":[]}"#;
 
@@ -235,6 +239,98 @@ async fn a_run_survives_a_spend_budget_refusal_until_the_budget_clears() -> Test
     assert_eq!(
         run_summary(&database, run_id).await?,
         ("persisted".to_owned(), 9, 1)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A rejected credential is a wait, not a verdict on the source: every drive records one
+/// non-spent `auth_error` attempt through the real adapter and reports the operator action, a run
+/// survives twenty of them far past its ten spent calls, and the first good answer finishes it
+/// (XR-021 CONTRACTS.md R5-08 rule 1).
+#[tokio::test]
+async fn a_run_survives_a_rejected_credential_until_the_operator_fixes_it() -> TestResult {
+    const REJECTED_DRIVES: usize = 20;
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    let mut replies: Vec<FakeReply> = (0..REJECTED_DRIVES)
+        .map(|_| {
+            FakeReply::bytes(
+                401,
+                br#"{"error":{"code":401,"message":"No auth"}}"#.to_vec(),
+            )
+        })
+        .collect();
+    replies.push(FakeReply::bytes(200, SUCCESS_ENVELOPE.as_bytes().to_vec()));
+    let transport = FakeTransport::start(replies).await?;
+    let provider = OpenRouterProvider::new(OpenRouterSettings {
+        base_url: format!("http://{}/api/v1", transport.local_addr()),
+        model: "openai/gpt-oss-20b".to_owned(),
+        credential: ProviderSecret::new("sk-or-v1-LEAKME".to_owned()),
+        max_output_tokens: 2_048,
+        response_byte_cap: 65_536,
+        call_deadline: std::time::Duration::from_secs(2),
+        connect_timeout: std::time::Duration::from_secs(2),
+        retry: RetryPolicy::new(1, 0, 0),
+    })?;
+    let pipeline = ArticlePipeline::new(
+        &database.database,
+        &provider,
+        &blobs,
+        std::time::Duration::from_secs(2),
+    );
+
+    for drive in 1..=REJECTED_DRIVES {
+        let outcome = pipeline
+            .execute(
+                run_id,
+                build_generation_request(&context)?,
+                &context,
+                &document,
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(PipelineError::Provider(ProviderError::OperatorAction))
+            ),
+            "drive {drive} must report the operator action, not {outcome:?}"
+        );
+        assert_eq!(
+            transport.request_count()?,
+            drive,
+            "a rejection is not retried inside the drive"
+        );
+    }
+    let recovered = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(recovered.summary, "A grounded summary.");
+    assert_eq!(
+        run_summary(&database, run_id).await?,
+        ("persisted".to_owned(), 21, 1)
+    );
+    let (waited, permanent, spent): (i64, i64, i64) = sqlx::query_as(
+        "select count(*) filter (where outcome = 'transient_failure'
+                                   and error_class = 'auth_error' and http_status = 401),
+                count(*) filter (where outcome = 'permanent_failure'),
+                count(*) filter (where outcome <> 'transient_failure')
+         from knowledge.analysis_attempts where run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(
+        (waited, permanent, spent),
+        (20, 0, 1),
+        "twenty non-spent rejections, no permanent failure, one spent call"
     );
     database.cleanup().await?;
     Ok(())

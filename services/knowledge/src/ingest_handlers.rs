@@ -33,6 +33,10 @@ const SOCIAL_PRODUCERS: &[&str] = &["ratatoskr-x", "ratatoskr-instagram", "ratat
 const ARCHIVE_PRODUCERS: &[&str] = &["ratatoskr-chatgpt", "ratatoskr-claude"];
 const REPOSITORY_PRODUCERS: &[&str] = &["ratatoskr-github"];
 
+/// The class logged when the provider refused a call for a reason only an operator can fix, such as
+/// a rejected credential or an empty balance (XR-021 CONTRACTS.md R5-08 rule 1).
+const OPERATOR_ACTION: &str = "provider_operator_action";
+
 /// What a handler decided about one delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -102,6 +106,8 @@ fn inbox_failure(error: &SourceInboxError, retry_class: &'static str) -> Outcome
 fn analysis_failure(error: &FamilyPipelineError, retry_class: &'static str) -> Outcome {
     if error.is_permanent() {
         Outcome::Reject("unanalysable")
+    } else if error.needs_operator() {
+        Outcome::Retry(OPERATOR_ACTION)
     } else {
         Outcome::Retry(retry_class)
     }
@@ -140,6 +146,7 @@ impl<P: LlmProvider> IngestContext<P> {
                 }
                 _ => "document",
             }),
+            Err(error) if error.needs_operator() => Outcome::Retry(OPERATOR_ACTION),
             Err(_) => Outcome::Retry("document_analysis"),
         }
     }

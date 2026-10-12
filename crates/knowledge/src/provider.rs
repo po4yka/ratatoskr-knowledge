@@ -37,6 +37,10 @@ pub enum ProviderError {
     /// The configured spend budget refuses further provider calls.
     #[error("the provider spend budget is exhausted")]
     BudgetExhausted,
+    /// The provider refused the call for a reason only an operator can fix: a rejected
+    /// credential, an exhausted balance or a withdrawn model.
+    #[error("the provider needs an operator action")]
+    OperatorAction,
     /// The deterministic script has no outcome left.
     #[error("the scripted provider is exhausted")]
     Exhausted,
@@ -48,15 +52,25 @@ pub enum ProviderError {
 impl ProviderError {
     /// Whether a later delivery of the same input can never succeed after this failure.
     ///
-    /// A transient failure and a spend-budget refusal are worth another delivery: the budget is a
-    /// daily and monthly window that clears at its rollover or when the operator raises the
-    /// ceiling, so waiting is the remedy and losing the capture is not (XR-021 CONTRACTS.md R4-05
-    /// rule 1). Every other failure is recorded on the run as a permanent one, and a run that
-    /// failed permanently reports that failure again on every later drive instead of calling the
-    /// provider.
+    /// A transient failure, a spend-budget refusal and an operator-fixable refusal are worth
+    /// another delivery: the budget is a daily and monthly window that clears at its rollover or
+    /// when the operator raises the ceiling, and a rejected credential, an empty balance or a
+    /// withdrawn model is fixed by the operator, so waiting is the remedy and losing the capture
+    /// is not (XR-021 CONTRACTS.md R4-05 rule 1 and R5-08 rule 1). Every other failure is
+    /// recorded on the run as a permanent one, and a run that failed permanently reports that
+    /// failure again on every later drive instead of calling the provider.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
-        !matches!(self, Self::Transient | Self::BudgetExhausted)
+        !matches!(
+            self,
+            Self::Transient | Self::BudgetExhausted | Self::OperatorAction
+        )
+    }
+
+    /// Whether only an operator can make a later delivery succeed.
+    #[must_use]
+    pub const fn needs_operator(&self) -> bool {
+        matches!(self, Self::OperatorAction)
     }
 }
 
@@ -74,6 +88,10 @@ pub enum ProviderFailureClass {
     ServerError,
     /// Authorization to the provider failed.
     AuthError,
+    /// The provider account has no balance left.
+    PaymentRequired,
+    /// The provider does not serve the configured model.
+    ModelUnavailable,
     /// Knowledge sent something the provider rejects permanently.
     RequestInvalid,
     /// The response exceeded the configured byte cap.
@@ -94,6 +112,8 @@ impl ProviderFailureClass {
             Self::RateLimited => "rate_limited",
             Self::ServerError => "server_error",
             Self::AuthError => "auth_error",
+            Self::PaymentRequired => "payment_required",
+            Self::ModelUnavailable => "model_unavailable",
             Self::RequestInvalid => "request_invalid",
             Self::SizeLimit => "size_limit",
             Self::BudgetExhausted => "budget_exhausted",
@@ -127,8 +147,8 @@ impl ProviderFailure {
 
     /// Reports whether the pipeline may retry within its shared call budget.
     ///
-    /// A spend-budget refusal is not transient in this sense: a second call in the same drive
-    /// would be refused too.
+    /// A spend-budget refusal and an operator-fixable refusal are not transient in this sense: a
+    /// second call in the same drive would be refused too.
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         matches!(self.error, ProviderError::Transient)

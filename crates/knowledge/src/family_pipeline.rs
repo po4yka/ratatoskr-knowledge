@@ -114,6 +114,13 @@ impl FamilyPipelineError {
             Self::Timeout | Self::Conflict | Self::RepositorySource(_) => false,
         }
     }
+
+    /// Whether only an operator can make a later delivery succeed: the provider refused the call
+    /// for a reason such as a rejected credential or an empty balance.
+    #[must_use]
+    pub const fn needs_operator(&self) -> bool {
+        matches!(self, Self::Provider(error) if error.needs_operator())
+    }
 }
 
 impl From<DriveFailure> for FamilyPipelineError {

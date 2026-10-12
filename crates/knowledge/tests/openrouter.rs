@@ -93,7 +93,7 @@ fn recorded_error_envelopes_classify_transient_and_permanent()
         (
             AUTH_ERROR_ENVELOPE,
             401,
-            ProviderError::Permanent,
+            ProviderError::OperatorAction,
             ProviderFailureClass::AuthError,
         ),
         (
@@ -115,6 +115,121 @@ fn recorded_error_envelopes_classify_transient_and_permanent()
         assert_eq!(failure.error, expected_error);
         assert_eq!(failure.class, expected_class);
         assert_eq!(failure.http_status, Some(expected_status));
+    }
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R5-08 rule 1: a rejected credential, an empty balance and a withdrawn
+/// model are fixed by an operator, so they are waited out; a malformed request is not.
+#[test]
+fn operator_fixable_statuses_are_classified_apart_from_malformed_requests() {
+    for (status, expected_error, expected_class) in [
+        (
+            401_u16,
+            ProviderError::OperatorAction,
+            ProviderFailureClass::AuthError,
+        ),
+        (
+            403,
+            ProviderError::OperatorAction,
+            ProviderFailureClass::AuthError,
+        ),
+        (
+            402,
+            ProviderError::OperatorAction,
+            ProviderFailureClass::PaymentRequired,
+        ),
+        (
+            404,
+            ProviderError::OperatorAction,
+            ProviderFailureClass::ModelUnavailable,
+        ),
+        (
+            400,
+            ProviderError::Permanent,
+            ProviderFailureClass::RequestInvalid,
+        ),
+        (
+            422,
+            ProviderError::Permanent,
+            ProviderFailureClass::RequestInvalid,
+        ),
+        (
+            409,
+            ProviderError::Permanent,
+            ProviderFailureClass::RequestInvalid,
+        ),
+        (408, ProviderError::Transient, ProviderFailureClass::Timeout),
+        (
+            429,
+            ProviderError::Transient,
+            ProviderFailureClass::RateLimited,
+        ),
+        (
+            500,
+            ProviderError::Transient,
+            ProviderFailureClass::ServerError,
+        ),
+        (
+            503,
+            ProviderError::Transient,
+            ProviderFailureClass::ServerError,
+        ),
+    ] {
+        let failure = classify_error(status);
+        assert_eq!(failure.error, expected_error, "status {status}");
+        assert_eq!(failure.class, expected_class, "status {status}");
+        assert_eq!(failure.http_status, Some(status));
+        assert_eq!(
+            failure.is_recoverable(),
+            expected_error != ProviderError::Permanent,
+            "status {status}"
+        );
+        assert!(
+            !failure.is_transient() || expected_error == ProviderError::Transient,
+            "only a transient failure is retried inside one drive"
+        );
+    }
+    assert!(!ProviderError::OperatorAction.is_permanent());
+    assert!(ProviderError::Permanent.is_permanent());
+    assert_eq!(
+        ProviderFailureClass::PaymentRequired.as_str(),
+        "payment_required"
+    );
+    assert_eq!(
+        ProviderFailureClass::ModelUnavailable.as_str(),
+        "model_unavailable"
+    );
+}
+
+/// The adapter answers an operator-fixable status with one request: a second call in the same
+/// drive would be refused the same way.
+#[tokio::test]
+async fn an_operator_fixable_status_over_transport_is_not_retried()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (status, class) in [
+        (401_u16, ProviderFailureClass::AuthError),
+        (402, ProviderFailureClass::PaymentRequired),
+        (403, ProviderFailureClass::AuthError),
+        (404, ProviderFailureClass::ModelUnavailable),
+    ] {
+        let transport = FakeTransport::start(vec![FakeReply::bytes(
+            status,
+            AUTH_ERROR_ENVELOPE.as_bytes().to_vec(),
+        )])
+        .await?;
+        let provider = OpenRouterProvider::new(adapter_settings(transport.local_addr(), 400))?;
+
+        let failure = provider
+            .generate_json(sample_request())
+            .await
+            .err()
+            .ok_or("expected an operator-fixable failure")?;
+
+        assert_eq!(failure.error, ProviderError::OperatorAction, "{status}");
+        assert_eq!(failure.class, class, "{status}");
+        assert_eq!(failure.http_status, Some(status));
+        assert_eq!(transport.request_count()?, 1, "{status}");
     }
     Ok(())
 }
@@ -226,7 +341,7 @@ async fn authentication_failure_does_not_retry() -> Result<(), Box<dyn std::erro
         .err()
         .ok_or("expected an authentication failure")?;
 
-    assert_eq!(failure.error, ProviderError::Permanent);
+    assert_eq!(failure.error, ProviderError::OperatorAction);
     assert_eq!(failure.class, ProviderFailureClass::AuthError);
     assert_eq!(failure.http_status, Some(401));
     assert_eq!(transport.request_count()?, 1);

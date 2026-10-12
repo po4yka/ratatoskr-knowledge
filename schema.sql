@@ -114,6 +114,8 @@ create table if not exists knowledge.analysis_attempts (
         'rate_limited',
         'server_error',
         'auth_error',
+        'payment_required',
+        'model_unavailable',
         'request_invalid',
         'size_limit',
         'budget_exhausted',
@@ -401,7 +403,8 @@ create table if not exists knowledge.channel_recap_attempts (
     constraint channel_recap_attempts_failure_check check (
         failure_class is null or failure_class in (
             'timeout', 'network', 'rate_limited', 'server_error', 'auth_error',
-            'request_invalid', 'size_limit', 'budget_exhausted', 'unclassified'
+            'payment_required', 'model_unavailable', 'request_invalid', 'size_limit',
+            'budget_exhausted', 'unclassified'
         )
     )
 );
@@ -704,6 +707,8 @@ create table if not exists knowledge.embedding_failures (
         'rate_limited',
         'server_error',
         'auth_error',
+        'payment_required',
+        'model_unavailable',
         'request_invalid',
         'size_limit',
         'budget_exhausted',

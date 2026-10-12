@@ -71,6 +71,13 @@ impl DocumentIntakeError {
             Self::Analysis(error) => error.is_permanent(),
         }
     }
+
+    /// Whether only an operator can make a later delivery succeed: the provider refused the call
+    /// for a reason such as a rejected credential or an empty balance.
+    #[must_use]
+    pub const fn needs_operator(&self) -> bool {
+        matches!(self, Self::Analysis(error) if error.needs_operator())
+    }
 }
 
 /// Registers extracted documents and runs the article analysis over them.

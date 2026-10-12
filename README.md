@@ -265,7 +265,7 @@ are redelivered, with no delivery budget, after `min(2 s * 2^(delivered - 1), 60
 outage of any length never drops a document, a social capture, an X removal or an AI conversation;
 the ingestion is applied once the database recovers. A provider outage is no exception: a call that
 failed transiently is recorded and not spent, so it never counts against the run's ten spent calls, and
-the run is reopened by every delivery until the provider answers. A refusal by the provider spend budget is a wait in the same way: the daily and monthly ceilings clear at their rollover or when the operator raises them, so the call is recorded as a non-spent refusal and the capture is redelivered until the window clears (the events stream keeps a message for seven days, which bounds a very long refusal). Each redelivery is counted by the label-free
+the run is reopened by every delivery until the provider answers. A refusal by the provider spend budget is a wait in the same way: the daily and monthly ceilings clear at their rollover or when the operator raises them, so the call is recorded as a non-spent refusal and the capture is redelivered until the window clears (the events stream keeps a message for seven days, which bounds a very long refusal). A provider answer that only an operator can fix is a wait too (XR-021 CONTRACTS.md R5-08 rule 1): a rejected credential, an exhausted balance or a withdrawn model is recorded as a non-spent attempt and redelivered, logged with the class `provider_operator_action`, until the operator fixes it. Each redelivery is counted by the label-free
 `knowledge_ingest_redeliveries_total` on the operator listener, and from the second delivery on it
 logs the family, the class and the delivery count, never content. A delivery that can never succeed
 (a response that stayed invalid, a permanent provider failure, a source the schema cannot hold) is
@@ -276,6 +276,21 @@ before it is acknowledged, so a delivery that committed the row deletion and the
 the byte erasure. A redelivery whose inbox
 row was committed before the analysis ran resumes the analysis when that delivery is still the head
 of its source; a delayed older delivery is kept as a receipt and never regresses the head.
+
+The provider failure classes recorded on an attempt, and what the ingest worker does with each:
+
+| HTTP status or cause | Class | Provider error | Redelivered |
+|---|---|---|---|
+| 408 | `timeout` | transient | yes, and retried once inside the drive |
+| 429 | `rate_limited` | transient | yes, and retried once inside the drive |
+| 500 to 599 | `server_error` | transient | yes, and retried once inside the drive |
+| connection fault | `network` | transient | yes, and retried once inside the drive |
+| 401, 403 | `auth_error` | operator action | yes, without spending a call |
+| 402 | `payment_required` | operator action | yes, without spending a call |
+| 404 | `model_unavailable` | operator action | yes, without spending a call |
+| spend ceiling | `budget_exhausted` | budget exhausted | yes, without spending a call |
+| other 4xx, malformed envelope | `request_invalid` | permanent | no, rejected at the first delivery |
+| response above `RATATOSKR__LIMITS__RAW_RESPONSE_BYTES` | `size_limit` | permanent | no, rejected at the first delivery |
 
 `knowledge.analysis.completed.v1`, `knowledge.ai_archive_analysis.completed.v1` and the two
 repository facts are rows of `knowledge.event_outbox`, committed with the state change that produced

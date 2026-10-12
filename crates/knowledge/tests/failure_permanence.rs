@@ -23,10 +23,16 @@ fn io() -> BlobError {
 }
 
 #[test]
-fn only_a_transient_or_budget_provider_failure_is_worth_another_delivery() {
+fn only_a_transient_budget_or_operator_provider_failure_is_worth_another_delivery() {
     // A spend ceiling is a daily and monthly window: it clears at the rollover or when the
-    // operator raises it, so a later delivery can succeed.
-    for recovers in [ProviderError::Transient, ProviderError::BudgetExhausted] {
+    // operator raises it, so a later delivery can succeed. So does a rejected credential, an
+    // empty balance or a withdrawn model, once the operator has fixed it (XR-021 CONTRACTS.md
+    // R5-08 rule 1).
+    for recovers in [
+        ProviderError::Transient,
+        ProviderError::BudgetExhausted,
+        ProviderError::OperatorAction,
+    ] {
         assert!(!recovers.is_permanent(), "{recovers:?}");
     }
     for permanent in [
@@ -75,6 +81,7 @@ fn an_article_pipeline_failure_is_permanent_only_when_the_run_cannot_recover() {
         PipelineError::Conflict,
         PipelineError::Provider(ProviderError::Transient),
         PipelineError::Provider(ProviderError::BudgetExhausted),
+        PipelineError::Provider(ProviderError::OperatorAction),
         PipelineError::Persistence(database_outage()),
         PipelineError::Blob(io()),
     ] {
@@ -97,6 +104,7 @@ fn a_family_pipeline_failure_is_permanent_only_when_the_source_cannot_recover() 
         FamilyPipelineError::Conflict,
         FamilyPipelineError::Provider(ProviderError::Transient),
         FamilyPipelineError::Provider(ProviderError::BudgetExhausted),
+        FamilyPipelineError::Provider(ProviderError::OperatorAction),
         FamilyPipelineError::Persistence(database_outage()),
         FamilyPipelineError::Blob(io()),
         FamilyPipelineError::Inbox(SourceInboxError::Persistence(database_outage())),
@@ -124,6 +132,7 @@ fn a_document_intake_failure_is_permanent_when_the_delivery_or_the_analysis_is()
         DocumentIntakeError::Persistence(database_outage()),
         DocumentIntakeError::Analysis(PipelineError::Timeout),
         DocumentIntakeError::Analysis(PipelineError::Provider(ProviderError::Transient)),
+        DocumentIntakeError::Analysis(PipelineError::Provider(ProviderError::OperatorAction)),
         DocumentIntakeError::Analysis(PipelineError::Conflict),
     ] {
         assert!(!recovers.is_permanent(), "{recovers:?}");
