@@ -566,10 +566,16 @@ async fn seed_tenant_source(
     tenant: TenantRef,
     with_active_chunk: bool,
 ) -> Result<SeededSource, Box<dyn std::error::Error>> {
+    // One tenant holds one extractor source per content digest (XR-021 CONTRACTS.md R5-02 rule
+    // 4), so each seeded document carries a digest of its own.
+    let document_id = DocumentId::new_v7();
     let document = Document {
-        document_id: DocumentId::new_v7(),
+        document_id,
         source_address: DocumentAddress::parse("document:indexing")?,
-        content_digest: digest('c')?,
+        content_digest: ContentDigest {
+            algorithm: DigestAlgorithm::Sha256,
+            hex: DigestHex::parse(&format!("{0}{0}", document_id.0.simple()))?,
+        },
         title: Some("Indexing fixture".to_owned()),
         language: None,
         blocks: vec![DocumentBlock::Paragraph {

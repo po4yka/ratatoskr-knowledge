@@ -6,7 +6,11 @@
 only `knowledge.*` objects:
 
 - `source_refs` stores an immutable tenant-scoped Document IR revision, its digest, and the
-  source-owner `BlobRef`;
+  source-owner `BlobRef`; a tenant has at most one row per content digest for the owner context
+  `ratatoskr-extractor` (the partial unique index `source_refs_document_digest_key`, XR-021
+  CONTRACTS.md R5-02 rule 4), whatever document id an event carries, and a second event with an
+  equal digest reuses the first row; Knowledge's own snapshots keep the identity key, which
+  includes the archive id;
 - `analysis_runs` stores the complete source, contract, prompt, context-builder, and model-policy
   identity plus its monotonic state;
 - `analysis_attempts` stores at most two ordered calls with a closed reason and outcome vocabulary,

@@ -28,6 +28,12 @@ create table if not exists knowledge.source_refs (
     )
 );
 
+-- XR-021 CONTRACTS.md R5-02 rule 4: an extracted document has one identity per tenant and content
+-- digest, whatever document id an event carries. Knowledge's own snapshots keep the identity key.
+create unique index if not exists source_refs_document_digest_key
+    on knowledge.source_refs (tenant_ref, content_digest_hex)
+    where owner_context = 'ratatoskr-extractor';
+
 create index if not exists source_refs_ai_archive_idx
     on knowledge.source_refs (tenant_ref, ai_archive_id)
     where ai_archive_id <> '';

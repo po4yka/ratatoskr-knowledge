@@ -3,6 +3,7 @@
 
 use ratatoskr_document_contracts::ContentDocumentExtracted;
 use ratatoskr_event_envelope::{EventEnvelope, EventPayload as _};
+use ratatoskr_identifiers::DocumentId;
 
 use crate::{
     AnalysisIdentity, ArticlePipeline, ArticleValidationError, BlobStore, ContextError, Database,
@@ -125,15 +126,14 @@ impl<'a> DocumentIntake<'a> {
         payload
             .validate()
             .map_err(|_| DocumentIntakeError::InvalidPayload)?;
-        let document = &payload.document;
         let source = self
             .database
             .register_source(&SourceReference {
                 tenant,
                 owner_context: PRODUCER.to_owned(),
                 ai_archive_id: String::new(),
-                document_id: document.document_id,
-                content_digest: document.content_digest.clone(),
+                document_id: payload.document.document_id,
+                content_digest: payload.document.content_digest.clone(),
                 source_blob: payload.document_blob.clone(),
             })
             .await?;
@@ -156,10 +156,23 @@ impl<'a> DocumentIntake<'a> {
         if matches!(state.as_str(), "persisted" | "indexed" | "completed") {
             return Ok(DocumentIntakeOutcome::AlreadyAnalysed);
         }
-        let context = prepare_context(document, self.context_characters)?;
+        // The source row is the identity of the document: when it was registered under another
+        // document id (an extractor from before the identity became derived, XR-021 CONTRACTS.md
+        // R5-02 rule 4), the analysis and the search document keep that first id.
+        let stored_document_id: String = sqlx::query_scalar(
+            "select source_document_id from knowledge.source_refs where source_ref_id = $1",
+        )
+        .bind(source.id)
+        .fetch_one(self.database.pool())
+        .await
+        .map_err(PersistenceError::Query)?;
+        let mut document = payload.document.clone();
+        document.document_id =
+            DocumentId::parse(&stored_document_id).map_err(|_| PersistenceError::InvalidSource)?;
+        let context = prepare_context(&document, self.context_characters)?;
         let request = build_generation_request(&context)?;
         ArticlePipeline::new(self.database, provider, blobs, self.provider_timeout)
-            .execute(run.id, request, &context, document)
+            .execute(run.id, request, &context, &document)
             .await?;
         Ok(DocumentIntakeOutcome::Analysed)
     }

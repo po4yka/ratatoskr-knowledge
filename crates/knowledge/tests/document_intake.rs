@@ -13,7 +13,7 @@ use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{
     BlobStore, DocumentIntake, DocumentIntakeError, DocumentIntakeOutcome, HybridRetriever,
     ProviderError, ProviderResponse, ProviderUsage, RankingPath, ScriptedEmbeddingProvider,
-    ScriptedProvider, SearchQuery,
+    ScriptedProvider, SearchQuery, SourceReference,
 };
 
 const OWNER: &str = "user:018f0000-0000-7000-8000-000000000005";
@@ -25,9 +25,16 @@ fn digest(digit: char) -> Result<ContentDigest, ratatoskr_identifiers::Identifie
     })
 }
 
+const FIRST_DOCUMENT_ID: &str = "018f0000-0000-7000-8000-000000000a01";
+const SECOND_DOCUMENT_ID: &str = "018f0000-0000-7000-8000-000000000a09";
+
 fn document() -> Result<Document, Box<dyn std::error::Error>> {
+    document_with_id(FIRST_DOCUMENT_ID)
+}
+
+fn document_with_id(document_id: &str) -> Result<Document, Box<dyn std::error::Error>> {
     Ok(Document {
-        document_id: DocumentId::parse("018f0000-0000-7000-8000-000000000a01")?,
+        document_id: DocumentId::parse(document_id)?,
         source_address: DocumentAddress::parse("document:quokka-notes")?,
         content_digest: digest('a')?,
         title: Some("Quokka migration notes".to_owned()),
@@ -204,6 +211,243 @@ async fn refused_extracted_document_events_leave_no_state() -> Result<(), Box<dy
     assert_eq!(
         count(&database, "select count(*) from knowledge.source_refs").await?,
         0
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Stores one extracted document through the intake and returns the outcome.
+async fn accept_document(
+    database: &TestDatabase,
+    blobs: &BlobStore,
+    provider: &ScriptedProvider,
+    document_id: &str,
+    tenant: &str,
+) -> Result<DocumentIntakeOutcome, Box<dyn std::error::Error>> {
+    let document = document_with_id(document_id)?;
+    let accepted = envelope(
+        &document,
+        &document_blob("ratatoskr-extractor")?,
+        "ratatoskr-extractor",
+        Some(tenant),
+    )?;
+    let intake = DocumentIntake::new(&database.database, 4_000, std::time::Duration::from_secs(5));
+    Ok(intake.accept(&accepted, provider, blobs).await?)
+}
+
+/// XR-021 CONTRACTS.md R5-02 rule 4: the same document captured twice makes one row, one run
+/// and one search document, whatever `document_id` the second event carries.
+#[tokio::test]
+async fn equal_digest_and_equal_document_id_make_one_row_run_and_search_document()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+    let provider = ScriptedProvider::new([Ok(article_response())]);
+
+    assert_eq!(
+        accept_document(&database, &blobs, &provider, FIRST_DOCUMENT_ID, OWNER).await?,
+        DocumentIntakeOutcome::Analysed
+    );
+    assert_eq!(
+        accept_document(&database, &blobs, &provider, FIRST_DOCUMENT_ID, OWNER).await?,
+        DocumentIntakeOutcome::AlreadyAnalysed
+    );
+
+    assert_eq!(provider.call_count()?, 1);
+    for table in ["source_refs", "analysis_runs", "search_documents"] {
+        assert_eq!(
+            count(
+                &database,
+                &format!("select count(*) from knowledge.{table}")
+            )
+            .await?,
+            1,
+            "{table}"
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn equal_digest_under_another_document_id_reuses_the_first_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+    let provider = ScriptedProvider::new([Ok(article_response())]);
+
+    assert_eq!(
+        accept_document(&database, &blobs, &provider, FIRST_DOCUMENT_ID, OWNER).await?,
+        DocumentIntakeOutcome::Analysed
+    );
+    assert_eq!(
+        accept_document(&database, &blobs, &provider, SECOND_DOCUMENT_ID, OWNER).await?,
+        DocumentIntakeOutcome::AlreadyAnalysed
+    );
+
+    assert_eq!(provider.call_count()?, 1);
+    for table in ["source_refs", "analysis_runs", "search_documents"] {
+        assert_eq!(
+            count(
+                &database,
+                &format!("select count(*) from knowledge.{table}")
+            )
+            .await?,
+            1,
+            "{table}"
+        );
+    }
+    let stored: String = sqlx::query_scalar("select source_document_id from knowledge.source_refs")
+        .fetch_one(database.database.pool())
+        .await?;
+    assert_eq!(stored, FIRST_DOCUMENT_ID);
+    let searchable: uuid::Uuid =
+        sqlx::query_scalar("select document_id from knowledge.search_documents")
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(searchable.to_string(), FIRST_DOCUMENT_ID);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The first analysis did not finish (the provider failed), so the second event with another
+/// document id continues the same run, and the search document keeps the first id.
+#[tokio::test]
+async fn an_unfinished_first_analysis_is_continued_under_the_first_document_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+    let provider = ScriptedProvider::new([
+        Err(ProviderError::Transient),
+        Err(ProviderError::Transient),
+        Ok(article_response()),
+    ]);
+
+    assert!(
+        accept_document(&database, &blobs, &provider, FIRST_DOCUMENT_ID, OWNER)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        accept_document(&database, &blobs, &provider, SECOND_DOCUMENT_ID, OWNER).await?,
+        DocumentIntakeOutcome::Analysed
+    );
+
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.source_refs").await?,
+        1
+    );
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.analysis_runs").await?,
+        1
+    );
+    let searchable: uuid::Uuid =
+        sqlx::query_scalar("select document_id from knowledge.search_documents")
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(searchable.to_string(), FIRST_DOCUMENT_ID);
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_same_digest_under_two_tenants_keeps_two_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+    let provider = ScriptedProvider::new([Ok(article_response()), Ok(article_response())]);
+
+    for tenant in [OWNER, "user:018f0000-0000-7000-8000-000000000006"] {
+        assert_eq!(
+            accept_document(&database, &blobs, &provider, FIRST_DOCUMENT_ID, tenant).await?,
+            DocumentIntakeOutcome::Analysed
+        );
+    }
+
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.source_refs").await?,
+        2
+    );
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.search_documents").await?,
+        2
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_database_keeps_one_extractor_source_per_tenant_and_digest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let index_definition: String = sqlx::query_scalar(
+        "select indexdef from pg_indexes
+         where schemaname = 'knowledge' and indexname = 'source_refs_document_digest_key'",
+    )
+    .fetch_one(database.database.pool())
+    .await?;
+    assert!(index_definition.contains("UNIQUE"), "{index_definition}");
+    assert!(
+        index_definition.contains("ratatoskr-extractor"),
+        "{index_definition}"
+    );
+
+    let tenant: TenantRef = OWNER.parse()?;
+    let reference = |document_id: &str| -> Result<SourceReference, Box<dyn std::error::Error>> {
+        Ok(SourceReference {
+            tenant,
+            owner_context: "ratatoskr-extractor".to_owned(),
+            ai_archive_id: String::new(),
+            document_id: DocumentId::parse(document_id)?,
+            content_digest: digest('a')?,
+            source_blob: document_blob("ratatoskr-extractor")?,
+        })
+    };
+    let first = database
+        .database
+        .register_source(&reference(FIRST_DOCUMENT_ID)?)
+        .await?;
+    let second = database
+        .database
+        .register_source(&reference(SECOND_DOCUMENT_ID)?)
+        .await?;
+    assert_eq!(
+        first.id, second.id,
+        "a second document id resolves to the first row"
+    );
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.source_refs").await?,
+        1
+    );
+
+    // The rule is scoped to the extractor: Knowledge's own snapshots of two archives with the
+    // same digest stay two rows.
+    let snapshot = |archive: &str| -> Result<SourceReference, Box<dyn std::error::Error>> {
+        Ok(SourceReference {
+            tenant,
+            owner_context: "ratatoskr-knowledge".to_owned(),
+            ai_archive_id: archive.to_owned(),
+            document_id: DocumentId::parse(FIRST_DOCUMENT_ID)?,
+            content_digest: digest('b')?,
+            source_blob: document_blob("ratatoskr-knowledge")?,
+        })
+    };
+    let one = database
+        .database
+        .register_source(&snapshot("018f0000-0000-7000-8000-000000000c01")?)
+        .await?;
+    let other = database
+        .database
+        .register_source(&snapshot("018f0000-0000-7000-8000-000000000c02")?)
+        .await?;
+    assert_ne!(one.id, other.id);
+    assert_eq!(
+        count(&database, "select count(*) from knowledge.source_refs").await?,
+        3
     );
     database.cleanup().await?;
     Ok(())

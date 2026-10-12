@@ -8,6 +8,6 @@ XR-021 CONTRACTS.md R5-02 rule 4 is the contract; the extractor derives a stable
 
 For `owner_context = 'ratatoskr-extractor'` the document body is content addressed, so `(tenant, digest)` identifies the document. The identity key keeps covering every other owner context because Knowledge's own snapshots reuse a digest across archives on purpose (two archives that carry the same conversation stay two rows).
 
-### Resolve first, then insert
+### Insert, then resolve to the existing row
 
-`DocumentIntake::accept` asks the database for the row by `(tenant, owner, digest)` before it registers. The unique index is the guard against a race between two deliveries: `insert_source` uses `on conflict do nothing` followed by a select of the existing row, which resolves a conflict on either constraint. The search document stays keyed by the first `source_ref_id`, so `search_documents.document_id` stays the first id.
+`Database::register_source` inserts with `on conflict do nothing` and, when no row came back, selects the existing row: by `(tenant, owner, digest)` for the extractor owner context, by the full identity key otherwise. The resolution lives in the one registration function, so every caller is covered, and the unique index is also what makes two concurrent deliveries of the same document converge on one row. `DocumentIntake::accept` then reads the stored `source_document_id` and analyses the document under that id, so the analysis context and the search document keep the first document id even when the first analysis had not finished and the second event carries another id. The run identity is keyed by the source row, so a second event creates no second run.

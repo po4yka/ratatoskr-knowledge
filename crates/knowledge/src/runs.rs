@@ -530,15 +530,16 @@ impl Database {
         if let Some((blobs, bytes)) = held {
             lock_and_verify(&mut transaction, blobs, &source.source_blob, Some(bytes)).await?;
         }
-        let stored_id = sqlx::query_scalar(
+        // A conflict on either unique constraint resolves to the row that is already there: the
+        // identity key, and for the extractor the (tenant, digest) index of XR-021 CONTRACTS.md
+        // R5-02 rule 4, which makes a document captured twice one source whatever document id
+        // the second event carries.
+        let inserted: Option<Uuid> = sqlx::query_scalar(
             "insert into knowledge.source_refs (
                 source_ref_id, tenant_ref, owner_context, ai_archive_id, source_document_id,
                 content_digest_algorithm, content_digest_hex, source_blob
              ) values ($1, $2, $3, $4, $5, $6, $7, $8)
-             on conflict (
-                tenant_ref, owner_context, ai_archive_id, source_document_id,
-                content_digest_algorithm, content_digest_hex
-             ) do update set source_ref_id = knowledge.source_refs.source_ref_id
+             on conflict do nothing
              returning source_ref_id",
         )
         .bind(id)
@@ -549,9 +550,30 @@ impl Database {
         .bind(algorithm)
         .bind(source.content_digest.hex.as_str())
         .bind(blob)
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(PersistenceError::Query)?;
+        let stored_id = match inserted {
+            Some(stored_id) => stored_id,
+            None => sqlx::query_scalar(
+                "select source_ref_id from knowledge.source_refs
+                 where tenant_ref = $1 and owner_context = $2
+                   and content_digest_algorithm = $3 and content_digest_hex = $4
+                   and (owner_context = 'ratatoskr-extractor'
+                        or (ai_archive_id = $5 and source_document_id = $6))
+                 order by created_at, source_ref_id
+                 limit 1",
+            )
+            .bind(source.tenant.to_string())
+            .bind(owner.as_str())
+            .bind(algorithm)
+            .bind(source.content_digest.hex.as_str())
+            .bind(&source.ai_archive_id)
+            .bind(source.document_id.to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(PersistenceError::Query)?,
+        };
         transaction
             .commit()
             .await
