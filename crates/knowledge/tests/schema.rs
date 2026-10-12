@@ -44,7 +44,6 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "embedding_failures",
             "event_outbox",
             "highlights",
-            "ingest_failures",
             "provider_usage",
             "repository_analysis_requests",
             "search_documents",
@@ -412,35 +411,34 @@ async fn outbox_and_social_tombstone_tables_exist_with_their_constraints()
     Ok(())
 }
 
-/// XR-021 CONTRACTS.md S09 and S12: the ingest failure record and the blob erasure queue exist
-/// with their closed vocabularies.
+/// XR-021 CONTRACTS.md R4-05 rule 4: a delivery that cannot succeed is rejected and a retryable
+/// one is redelivered, so nothing records a dead letter and the write-only table is gone.
 #[tokio::test]
-async fn ingest_failure_and_erasure_queue_tables_exist_with_their_constraints()
+async fn the_schema_has_no_ingest_failures_table() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let table: Option<String> =
+        sqlx::query_scalar("select to_regclass('knowledge.ingest_failures')::text")
+            .fetch_one(database.database.pool())
+            .await?;
+    assert_eq!(table, None, "the dead-letter table must not exist");
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "select constraint_name from information_schema.table_constraints
+         where table_schema = 'knowledge' and constraint_name like 'ingest_failures%'",
+    )
+    .fetch_all(database.database.pool())
+    .await?;
+    assert!(constraints.is_empty(), "{constraints:?}");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md S12: the blob erasure queue exists with its closed vocabulary.
+#[tokio::test]
+async fn the_erasure_queue_table_exists_with_its_constraints()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = TestDatabase::create().await?;
     let pool = database.database.pool();
-
-    for family in ["documents", "social", "ai_archive", "repository"] {
-        sqlx::query(
-            "insert into knowledge.ingest_failures
-                 (family, event_id, failure_class, delivered_count)
-             values ($1, $2, 'transient_exhausted', 5)",
-        )
-        .bind(family)
-        .bind(uuid::Uuid::now_v7())
-        .execute(pool)
-        .await?;
-    }
-    let bad_family = sqlx::query(
-        "insert into knowledge.ingest_failures
-             (family, event_id, failure_class, delivered_count)
-         values ('articles', $1, 'transient_exhausted', 5)",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .execute(pool)
-    .await
-    .expect_err("an unknown ingest family is refused");
-    assert_eq!(database_error_code(&bad_family).as_deref(), Some("23514"));
 
     sqlx::query(
         "insert into knowledge.blob_erasure_queue (digest_hex, deletion_id) values ($1, $2)",

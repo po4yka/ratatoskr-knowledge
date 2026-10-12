@@ -756,20 +756,6 @@ create table if not exists knowledge.social_tombstones (
 create index if not exists social_tombstones_lookup_idx
     on knowledge.social_tombstones (tenant_ref, source_id, removed_at desc);
 
--- Content-free record of a delivery that exhausted its redeliveries without an outcome.
-create table if not exists knowledge.ingest_failures (
-    family text not null,
-    event_id uuid not null,
-    failure_class text not null,
-    delivered_count integer not null,
-    recorded_at timestamptz not null default now(),
-    primary key (family, event_id),
-    constraint ingest_failures_family_check
-        check (family in ('documents', 'social', 'ai_archive', 'repository')),
-    constraint ingest_failures_class_check check (char_length(failure_class) between 1 and 64),
-    constraint ingest_failures_delivered_check check (delivered_count >= 1)
-);
-
 -- Knowledge-owned blobs whose last reference was deleted. The queue row is written in the same
 -- transaction as the row deletions, so a crash before the bytes are removed is healed by the next
 -- drain (XR-021 CONTRACTS.md S12).

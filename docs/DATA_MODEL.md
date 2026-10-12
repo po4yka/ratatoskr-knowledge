@@ -35,7 +35,6 @@ only `knowledge.*` objects:
   `knowledge.ai_archive_analysis.completed.v1` and the two repository facts) committed with the
   state change that produced them, unique by a natural dedupe key, until JetStream acknowledges
   publication;
-- `ingest_failures` records, without content, a delivery that used its five redeliveries;
 - `blob_erasure_queue` holds the Knowledge-owned digests of deleted rows until no row references
   them and the bytes are removed. Deletion never enumerates the blob root.
 

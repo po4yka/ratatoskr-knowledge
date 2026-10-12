@@ -19,5 +19,5 @@
 
 ## 4. Remove the dead-letter table (R4-05 rule 4)
 
-- [ ] 4.1 RED: remove `ingest_failures` from the expected table lists of `crates/knowledge/tests/schema.rs` and `ingest_bus/tenant.rs` and add `the_schema_has_no_ingest_failures_table`; run them and confirm the table list differs and `to_regclass` finds the table.
-- [ ] 4.2 GREEN: delete the table from `schema.sql`, the remaining assertions that read it, and the sentences in `README.md` and `docs/DATA_MODEL.md`. A development database is recreated.
+- [x] 4.1 RED: remove `ingest_failures` from the expected table lists of `crates/knowledge/tests/schema.rs` and `ingest_bus/tenant.rs` and add `the_schema_has_no_ingest_failures_table`; run them and confirm the table list differs and `to_regclass` finds the table.
+- [x] 4.2 GREEN: delete the table from `schema.sql`, the remaining assertions that read it, and the sentences in `README.md` and `docs/DATA_MODEL.md`. A development database is recreated.

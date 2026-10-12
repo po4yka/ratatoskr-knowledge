@@ -92,7 +92,6 @@ provider_usage
 repository_analysis_requests
 event_outbox
 social_tombstones
-ingest_failures
 blob_erasure_queue
 source_analysis_inbox
 source_analysis_heads

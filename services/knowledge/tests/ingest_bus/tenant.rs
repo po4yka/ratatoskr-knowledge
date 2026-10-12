@@ -26,7 +26,6 @@ const WRITTEN_BY_ADMISSION: &[&str] = &[
     "social_tombstones",
     "search_documents",
     "event_outbox",
-    "ingest_failures",
 ];
 
 /// Publishes the five mismatched deliveries: the payload owner is `OWNER`, the envelope names
