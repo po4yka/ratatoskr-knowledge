@@ -799,7 +799,7 @@ async fn user_requested_tombstone_refuses_a_cross_tenant_subject()
         .accept_ai_tombstone(event_id, "ai_archive.subject.tombstoned.v1", &tombstone)
         .await;
     assert!(
-        matches!(admission, Err(SourceInboxError::InvalidArchiveFact)),
+        matches!(admission, Err(SourceInboxError::ForeignSubject)),
         "a known subject owned only by another tenant must be refused: {admission:?}"
     );
     let source_count: i64 =
