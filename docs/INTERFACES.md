@@ -62,8 +62,8 @@ read-through boundary for the channel-digest service, not a public analysis API.
   run from its durable state under a per-run advisory lock: a persisted run returns its output, a
   run whose last call failed transiently is reopened, a run left mid-call continues with the next
   call (a call killed twice fails the run), and a stored response (including one recorded on the newest attempt of a run still at
-  `model_requested`) is validated again without a provider call. A delivery makes at most two provider calls and a run records at most ten, so five
-  deliveries stay bounded.
+  `model_requested`) is validated again without a provider call. A delivery makes at most two provider calls and a run may spend ten, where a call that failed
+  transiently is not spent, so only a run that keeps getting unusable answers is bounded.
 - `BlobStore` owns content-addressed raw responses and returns contract `BlobRef` values.
 - `ChannelRecapInbox` admits only `knowledge.channel_digest_recap.requested.v1`; the transport
   adapter separately verifies the `cmd.` subject and `ratatoskr-channel-digests` producer.

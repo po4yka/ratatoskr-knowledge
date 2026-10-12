@@ -21,3 +21,8 @@
 
 - [x] 4.1 RED: remove `ingest_failures` from the expected table lists of `crates/knowledge/tests/schema.rs` and `ingest_bus/tenant.rs` and add `the_schema_has_no_ingest_failures_table`; run them and confirm the table list differs and `to_regclass` finds the table.
 - [x] 4.2 GREEN: delete the table from `schema.sql`, the remaining assertions that read it, and the sentences in `README.md` and `docs/DATA_MODEL.md`. A development database is recreated.
+
+## 5. A provider outage is not a spend (R4-05 rule 1, review of the first attempt)
+
+- [x] 5.1 RED: add `crates/knowledge/tests/pipeline_resume.rs::a_run_survives_a_transient_provider_outage_of_any_length` and `ingest_bus/redelivery.rs::a_provider_outage_longer_than_five_deliveries_does_not_lose_a_capture`; run them against the ten-attempt row check and confirm drive 6 reports `AttemptBudgetExhausted` instead of the transient failure and the capture is rejected as `unanalysable` after about six deliveries, so the redelivery wait times out.
+- [x] 5.2 GREEN: count only the calls that did not fail transiently against `MAX_RUN_ATTEMPTS` in `record_attempt` and the run driver's reopen check, relax `analysis_attempts_ordinal_check` to `ordinal >= 1`, rewrite `a_run_at_its_attempt_budget_is_not_reopened` around ten spent calls, and update the README, DEVELOPMENT.md, INTERFACES.md, TESTING.md, the design and the delta.

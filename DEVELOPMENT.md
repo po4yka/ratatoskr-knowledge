@@ -194,13 +194,14 @@ refuse the durable and the worker would never consume.
 `RATATOSKR__INGEST__FETCH_BATCH` defaults to 1. A worker handles one delivery at a time while the broker
 starts each message's ack-wait clock when it delivers it, so a batch above 1 prefetches messages whose
 120 s can run out behind a slow analysis; the expired deliveries come back with a higher delivery count
-and can reach the fifth-delivery terminal path early. Raise it only when the batch size times the
+and can use up the repository family's five-delivery budget early. Raise it only when the batch size times the
 worst-case handler time (provider timeout times attempts) stays below the ack wait.
 
 A redelivered analysis continues the same run instead of failing on a state that has already advanced
 (XR-021 CONTRACTS.md S02 rule 7). Each delivery makes at most two provider calls, one retry or one repair,
-and a run records at most ten calls over all its deliveries. A run whose last call failed transiently is
-reopened by the next delivery; a run left mid-call by a stopped worker records that call as interrupted and
+and a run may spend ten calls over all its deliveries; a call that failed transiently is recorded and is not
+spent. A run whose last call failed transiently is reopened by the next delivery, however many times that has
+happened; a run left mid-call by a stopped worker records that call as interrupted and
 continues, and fails after two such calls; a response that was stored but never validated is validated again
 without a provider call. A run that failed with an invalid response or a permanent provider error stays failed.
 

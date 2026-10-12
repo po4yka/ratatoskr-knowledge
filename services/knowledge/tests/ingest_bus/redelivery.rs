@@ -304,13 +304,53 @@ async fn an_ai_archive_conversation_survives_more_than_five_transient_failures()
     Ok(())
 }
 
-/// A provider that errors for three deliveries (two calls each, six of the run's ten) and a
-/// database that then refuses the completion fact for four more: the capture is analysed once and
-/// its completion fact is queued once, after eight deliveries.
-///
-/// The provider alone cannot be kept failing for eight deliveries: a run records at most ten calls
-/// over all its deliveries (`schema.sql`, `analysis_attempts_ordinal_check`), so the outage is
-/// followed by a database fault that outlasts the budget on its own.
+/// A provider that errors for eight deliveries (two calls each) and then answers: the capture is
+/// analysed once and its completion fact is queued once, with no termination in between. A
+/// provider outage is not a spend, so the run's budget of answers is not used up by it
+/// (XR-021 CONTRACTS.md R4-05 rule 1).
+#[tokio::test]
+async fn a_provider_outage_longer_than_five_deliveries_does_not_lose_a_capture() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start_fast().await?;
+    let mut script: Vec<_> = (0..DELIVERIES_PAST_THE_OLD_BUDGET * 2)
+        .map(|_| Err(ProviderError::Transient))
+        .collect();
+    script.push(Ok(response(SOCIAL_ANALYSIS)));
+    let worker = harness.spawn(Arc::new(ScriptedProvider::new(script)));
+    publish_capture(&harness).await?;
+
+    redelivered_until(
+        &harness,
+        IngestFamily::Social,
+        DELIVERIES_PAST_THE_OLD_BUDGET,
+    )
+    .await?;
+    eventually(
+        "the capture is analysed once the provider answers",
+        || async { Ok(harness.search_documents().await? == 1) },
+    )
+    .await?;
+    eventually("the completion fact is published once", || async {
+        Ok(harness.facts_on(COMPLETED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    quiet(&harness, IngestFamily::Social).await?;
+    assert_eq!(
+        harness
+            .rows_in(&["analysis_runs", "analysis_outputs"])
+            .await?,
+        2
+    );
+    assert_eq!(harness.rows_in(&["event_outbox"]).await?, 1);
+    assert_counted(&harness).await?;
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
+/// Three deliveries of provider errors followed by four of a refused completion fact: the
+/// capture is analysed once and its completion fact is queued once, after eight deliveries. The
+/// two faults are of different kinds, so each recovery path is exercised in one message's life.
 #[tokio::test]
 async fn a_provider_outage_then_a_database_outage_does_not_lose_a_capture() -> TestResult {
     let _serial = BROKER.lock().await;

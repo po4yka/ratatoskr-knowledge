@@ -14,6 +14,11 @@ A failure of an ingest delivery that a later delivery can fix SHALL be negative-
 - **WHEN** the database refuses the inbox receipt of a social capture or an AI conversation, or the tombstone of an X removal, for eight consecutive deliveries and then recovers
 - **THEN** no delivery is terminated, the capture or conversation is analysed once, and the removal deletes the source from search
 
+#### Scenario: A provider outage of any length
+
+- **WHEN** the provider fails transiently for eight consecutive deliveries and then answers
+- **THEN** no delivery is terminated, the capture is analysed once and its completion fact is queued once
+
 #### Scenario: A provider outage followed by a database outage
 
 - **WHEN** the provider fails transiently for three deliveries and the database then refuses the completion fact for four more
@@ -58,6 +63,35 @@ Each ingest consumer SHALL verify its Edge-provisioned durable, terminate perman
 
 - **WHEN** the provider fails permanently for a social capture
 - **THEN** the delivery is terminated with the class `unanalysable` instead of being redelivered
+
+### Requirement: A redelivered analysis run resumes from its durable state
+
+Knowledge SHALL drive every analysis run of the document, social, AI-archive and repository lanes from the state the database holds, under a per-run lock, so that a redelivery after a transient provider failure or after the worker stopped mid-call finishes the same run. A response that is already stored SHALL be validated again without a provider call. A run SHALL stop at a ceiling of ten spent calls, where a call that failed transiently is recorded and is not spent, so a provider outage of any length never exhausts a run.
+
+#### Scenario: A transient provider failure is finished by the next delivery
+
+- **WHEN** the provider fails transiently on both calls of a delivery and answers on the next delivery
+- **THEN** the same run is reopened and persisted once, with one accepted output and one search document, and no terminal failure is recorded
+
+#### Scenario: A provider outage longer than ten calls does not exhaust the run
+
+- **WHEN** the provider fails transiently on sixteen consecutive calls and then answers
+- **THEN** every drive reports the transient failure, the same run is reopened each time, and the seventeenth call persists one accepted output
+
+#### Scenario: A run that spent its calls is not reopened
+
+- **WHEN** a run has ten calls that were answers it could not use or were abandoned and its newest call failed transiently
+- **THEN** the run stays failed and the provider is not called
+
+#### Scenario: A worker killed mid-call is replaced without losing the run
+
+- **WHEN** a worker stops while a provider call is in flight and the message is redelivered to a new worker
+- **THEN** the abandoned call is recorded as interrupted and the run continues to one persisted output
+
+#### Scenario: A stored response is not requested again
+
+- **WHEN** a run is found with a raw response already stored, whether its state is `response_received`, `schema_validated`, or still `model_requested` with the response recorded on its newest attempt
+- **THEN** the stored bytes are validated again, one output is persisted, and the provider is called zero times, or once to repair a stored response that is invalid
 
 ### Requirement: An archive tombstone is never dead-lettered or half finished
 

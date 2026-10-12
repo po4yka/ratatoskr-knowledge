@@ -132,21 +132,79 @@ async fn a_run_that_failed_transiently_is_reopened_by_the_next_execute() -> Test
     Ok(())
 }
 
-/// A run whose calls keep failing transiently stops at the per-run budget instead of looping.
+/// A provider outage is not a spend: the run is reopened for as long as the provider keeps failing
+/// transiently, far past the ten calls it may spend on answers, and the first good response
+/// finishes it (XR-021 CONTRACTS.md R4-05 rule 1).
+#[tokio::test]
+async fn a_run_survives_a_transient_provider_outage_of_any_length() -> TestResult {
+    const FAILING_DRIVES: usize = 8;
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    let mut script: Vec<_> = (0..FAILING_DRIVES * 2)
+        .map(|_| Err(ProviderError::Transient))
+        .collect();
+    script.push(Ok(valid_response("after-the-outage")));
+    let provider = ScriptedProvider::new(script);
+    let pipeline = pipeline(&database, &provider, &blobs);
+
+    for drive in 1..=FAILING_DRIVES {
+        let outcome = pipeline
+            .execute(
+                run_id,
+                build_generation_request(&context)?,
+                &context,
+                &document,
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(PipelineError::Provider(ProviderError::Transient))
+            ),
+            "drive {drive} must report the transient outage, not {outcome:?}"
+        );
+    }
+    let recovered = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(recovered.summary, "A grounded summary.");
+    assert_eq!(
+        run_summary(&database, run_id).await?,
+        ("persisted".to_owned(), 17, 1)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A run that has spent its ten calls on answers it could not use is not reopened, even when the
+/// last call failed transiently: the budget bounds spending, not outages.
 #[tokio::test]
 async fn a_run_at_its_attempt_budget_is_not_reopened() -> TestResult {
     let database = TestDatabase::create().await?;
     let root = TemporaryBlobRoot::create().await?;
     let blobs = BlobStore::new(root.path(), 4_096);
     let (run_id, context, document) = run_and_context(&database).await?;
-    for ordinal in 1..=10_i16 {
+    for ordinal in 1..=11_i16 {
+        let outcome = if ordinal == 11 {
+            "transient_failure"
+        } else {
+            "invalid"
+        };
         sqlx::query(
             "insert into knowledge.analysis_attempts (
                 run_id, ordinal, reason, provider, model_policy, outcome
-             ) values ($1, $2, 'retry', 'scripted_fake', 'fake_default_v1', 'transient_failure')",
+             ) values ($1, $2, 'retry', 'scripted_fake', 'fake_default_v1', $3)",
         )
         .bind(run_id)
         .bind(ordinal)
+        .bind(outcome)
         .execute(database.database.pool())
         .await?;
     }

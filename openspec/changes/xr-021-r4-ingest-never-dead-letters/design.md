@@ -14,7 +14,7 @@ XR-021 CONTRACTS.md R4-05 is the contract. This file records only the choices lo
 
 ### Which failures are permanent
 
-A redelivery without a budget is only safe for a delivery that a later attempt can fix. The run driver records every provider failure except `Transient` as a permanent attempt, and a run that failed permanently, or whose response stayed invalid after the repair, reports the same failure on every later drive without calling the provider. A run holds at most ten attempts over all its deliveries (`analysis_attempts_ordinal_check`). `is_permanent` is therefore:
+A redelivery without a budget is only safe for a delivery that a later attempt can fix. The run driver records every provider failure except `Transient` as a permanent attempt, and a run that failed permanently, or whose response stayed invalid after the repair, reports the same failure on every later drive without calling the provider. A run may spend ten calls over all its deliveries; a transient failure is not spent (see below). `is_permanent` is therefore:
 
 | Error | Permanent | Recovers |
 |---|---|---|
@@ -29,9 +29,13 @@ The repository family keeps its own classification (`classify_repository_failure
 
 A permanent failure is `Reject` with a closed class: `document`, `unanalysable`, `inbox_invalid`, `unqueueable`, `unprocessable`, next to the existing `undecodable`, `producer`, `tenant`, `owner`, `payload`, `type`, `unsupported`, `foreign_subject`, `invalid_fact` and `repository_request`.
 
-### Known limit: a provider outage is bounded by the run
+### A provider outage is not a spend
 
-A provider outage is retried without a delivery budget, but each delivery makes up to two provider calls and a run records at most ten over all its deliveries. A provider that stays down for about five deliveries (about a minute with the standard schedule) exhausts the run, the next delivery reports `AttemptBudgetExhausted`, which is permanent, and the delivery is rejected as `unanalysable`. The source and the failed run stay in the database and the log line carries the class. Lifting that needs a decision about the per-run attempt bound (it is a spend guard and a schema check), which is outside this change; the tests therefore combine a provider outage of three deliveries with a database outage of four more.
+Each delivery makes up to two provider calls, and the run used to record at most ten calls over all of its deliveries (`analysis_attempts_ordinal_check`, `MAX_RUN_ATTEMPTS`). A provider that stayed down for about five deliveries exhausted the run, the next delivery reported `AttemptBudgetExhausted`, which is permanent, and the capture was rejected as `unanalysable`: the provider half of the R4-05 hazard, moved by one delivery. The bound is a spend guard, and a call that failed transiently spends nothing: it produced no answer, so it is recorded and no longer counted.
+
+- `record_attempt` and the run driver's reopen check count the calls whose outcome is not `transient_failure` against `MAX_RUN_ATTEMPTS`. Answers, invalid answers, permanent failures and abandoned (`requested`, `interrupted`) calls still count, so a run that keeps getting unusable answers, or whose worker keeps dying mid-call, stops after ten calls, and the abandoned-call rule (a run fails after two) is unchanged.
+- The ordinal check in `schema.sql` is now `ordinal >= 1`, because a spend guard cannot be a row check. The ordinal column stays a `smallint`: the worst case is two transient rows per delivery, one delivery a minute once the schedule has reached its cap, so a single run holds about 32 thousand rows after an outage of about eleven days, and `record_attempt` then reports `AttemptBudgetExhausted` rather than overflowing. Transient rows hold no raw response and no token counts.
+- The alternative of compacting transient rows on reopen was rejected: it loses the record of how often the provider failed, which the operator needs, for a bound that no real outage reaches.
 
 ### Visibility
 

@@ -81,7 +81,7 @@ create table if not exists knowledge.analysis_attempts (
     error_class text,
     created_at timestamptz not null default now(),
     primary key (run_id, ordinal),
-    constraint analysis_attempts_ordinal_check check (ordinal between 1 and 10),
+    constraint analysis_attempts_ordinal_check check (ordinal >= 1),
     constraint analysis_attempts_reason_check check (reason in ('initial', 'retry', 'repair')),
     constraint analysis_attempts_outcome_check check (outcome in (
         'requested',

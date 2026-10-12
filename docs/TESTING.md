@@ -28,15 +28,19 @@ bounded drain. All identifiers, secrets, and recap text are synthetic.
 The ingest worker is proven against a real `JetStream` in one test binary, `services/knowledge/tests/ingest_bus/`.
 `lifecycle.rs`: a document, a social capture and its removal, an AI-archive conversation and its
 tombstone become searchable and disappear; wrong-producer and undecodable deliveries are terminated
-and never looped; a failing analysis is redelivered and becomes terminal on the fifth delivery; a
-redelivery after a crash between the inbox commit and the analysis resumes it; the completion facts
+and never looped; a redelivery after a crash between the inbox commit and the analysis resumes it; the completion facts
 reach the stream once, even across a restart. `repository.rs`: a repository request reads its README
 over the authenticated loopback route and publishes one completed fact; an unavailable README source
 is redelivered and the fifth delivery settles the request as a retryable failed fact; bytes that fail
 the digest settle it as a non-retryable failure on the first delivery. `tenant.rs`: a social
 capture, a social removal, an archive conversation, an archive tombstone and a repository request
 whose payload owner differs from the envelope `tenant_id` are terminated and leave no row in any
-table. `ingest_outage.rs` proves that readiness follows the broker.
+table. `redelivery.rs`: a document, a social capture, a social removal and an AI-archive conversation
+survive a database fault of eight deliveries, a provider outage of eight deliveries and a provider
+outage followed by a database outage, with no termination, the fact applied once and
+`knowledge_ingest_redeliveries_total` counted; a permanent failure and an undecodable message are
+terminated at the first delivery; the repository family still settles its failed fact on the fifth.
+`ingest_outage.rs` proves that readiness follows the broker.
 
 `authorized.rs` boots a broker that enforces exactly the Knowledge stanza of
 `deploy/nats/identity.conf` and runs the real recap and ingest workers under that identity. It feeds

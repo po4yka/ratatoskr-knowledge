@@ -7,7 +7,8 @@
 //!
 //! - a run at `persisted`, `indexed` or `completed` returns its accepted output;
 //! - a run at `failed` whose last call failed transiently is reopened to `queued`, within the
-//!   per-run attempt budget [`MAX_RUN_ATTEMPTS`]; any other failed run reports its terminal cause;
+//!   per-run budget of spent calls [`MAX_RUN_ATTEMPTS`] (a transient failure is not spent, so a
+//!   provider outage never exhausts it); any other failed run reports its terminal cause;
 //! - a run at `model_requested` had a call in flight or between calls: an unfinished call is
 //!   recorded as interrupted and the next call continues the run, and a run whose calls were
 //!   abandoned twice is failed rather than tried a third time;
@@ -87,7 +88,8 @@ pub(crate) struct RunDriver<'a, P> {
 #[derive(Debug)]
 struct Snapshot {
     state: String,
-    attempts: i64,
+    /// Calls that count against [`MAX_RUN_ATTEMPTS`]: every attempt but a transient failure.
+    spent: i64,
     abandoned: i64,
     newest: Option<Newest>,
 }
@@ -578,7 +580,7 @@ impl<P: LlmProvider> RunDriver<'_, P> {
             .as_ref()
             .map(|newest| newest.outcome.as_str());
         match outcome {
-            Some("transient_failure") if snapshot.attempts < i64::from(MAX_RUN_ATTEMPTS) => {
+            Some("transient_failure") if snapshot.spent < i64::from(MAX_RUN_ATTEMPTS) => {
                 if self.database.reopen_failed_run(run_id).await? {
                     Ok(())
                 } else {
@@ -605,7 +607,8 @@ impl<P: LlmProvider> RunDriver<'_, P> {
     async fn snapshot(&self, run_id: Uuid) -> Result<Snapshot, DriveFailure> {
         let row: Option<SnapshotRow> = sqlx::query_as(
             "select r.state,
-                    (select count(*) from knowledge.analysis_attempts where run_id = r.run_id),
+                    (select count(*) from knowledge.analysis_attempts
+                      where run_id = r.run_id and outcome <> 'transient_failure'),
                     (select count(*) from knowledge.analysis_attempts
                       where run_id = r.run_id and outcome in ('requested', 'interrupted')),
                     n.ordinal, n.reason, n.outcome, n.validation_code, n.raw_response
@@ -621,7 +624,7 @@ impl<P: LlmProvider> RunDriver<'_, P> {
         .fetch_optional(self.database.pool())
         .await
         .map_err(PersistenceError::Query)?;
-        let (state, attempts, abandoned, ordinal, reason, outcome, validation_code, raw_response) =
+        let (state, spent, abandoned, ordinal, reason, outcome, validation_code, raw_response) =
             row.ok_or(PersistenceError::InvalidAnalysisIdentity)?;
         let newest = match (ordinal, reason, outcome) {
             (Some(ordinal), Some(reason), Some(outcome)) => Some(Newest {
@@ -635,7 +638,7 @@ impl<P: LlmProvider> RunDriver<'_, P> {
         };
         Ok(Snapshot {
             state,
-            attempts,
+            spent,
             abandoned,
             newest,
         })

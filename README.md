@@ -259,9 +259,9 @@ first delivery, and an AI-archive tombstone for a subject that belongs only to a
 terminated with the class `foreign_subject`. A failed analysis, a refused write and a provider outage
 are redelivered, with no delivery budget, after `min(2 s * 2^(delivered - 1), 60 s)`, so a database
 outage of any length never drops a document, a social capture, an X removal or an AI conversation;
-the ingestion is applied once the database recovers. A provider outage is bounded by the run's ten
-provider calls over all its deliveries (about five deliveries): a run that spent them has failed for
-good and its delivery is terminated as `unanalysable`. Each redelivery is counted by the label-free
+the ingestion is applied once the database recovers. A provider outage is no exception: a call that
+failed transiently is recorded and not spent, so it never counts against the run's ten spent calls, and
+the run is reopened by every delivery until the provider answers. Each redelivery is counted by the label-free
 `knowledge_ingest_redeliveries_total` on the operator listener, and from the second delivery on it
 logs the family, the class and the delivery count, never content. A delivery that can never succeed
 (a response that stayed invalid, a permanent provider failure, a source the schema cannot hold) is

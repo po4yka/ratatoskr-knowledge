@@ -6,11 +6,14 @@ use uuid::Uuid;
 use crate::blob_registry::lock_and_verify;
 use crate::{BlobStore, Database, PersistenceError};
 
-/// Provider calls one run may record over all of its deliveries.
+/// Provider calls one run may spend over all of its deliveries.
 ///
-/// A delivery makes at most two calls (one retry or one repair), and the bus gives a request five
-/// deliveries, so a run that failed transiently can be tried again without an unbounded budget.
-/// `schema.sql` states the same number in `analysis_attempts_ordinal_check`.
+/// A call that failed transiently (a timeout, a rate limit, a server error) is not spent: it
+/// produced no answer and a provider outage lasts as long as it lasts, so it is recorded and never
+/// counted (XR-021 CONTRACTS.md R4-05 rule 1). Every other call counts: an answer, an invalid
+/// answer, a permanent failure and a call that was abandoned. A delivery makes at most two calls
+/// (one retry or one repair), so a run that keeps getting answers it cannot use stops here
+/// instead of spending without bound.
 pub(crate) const MAX_RUN_ATTEMPTS: i16 = 10;
 
 pub(crate) struct AttemptUpdate<'a> {
@@ -309,8 +312,9 @@ impl Database {
         if present.is_none() {
             return Err(PersistenceError::InvalidAnalysisIdentity);
         }
-        let previous: i16 = sqlx::query_scalar(
-            "select coalesce(max(ordinal), 0)::smallint
+        let (previous, spent): (i16, i64) = sqlx::query_as(
+            "select coalesce(max(ordinal), 0)::smallint,
+                    count(*) filter (where outcome <> 'transient_failure')
              from knowledge.analysis_attempts where run_id = $1",
         )
         .bind(run_id)
@@ -320,7 +324,7 @@ impl Database {
         let ordinal = previous
             .checked_add(1)
             .ok_or(PersistenceError::AttemptBudgetExhausted)?;
-        if ordinal > MAX_RUN_ATTEMPTS {
+        if spent >= i64::from(MAX_RUN_ATTEMPTS) {
             return Err(PersistenceError::AttemptBudgetExhausted);
         }
         sqlx::query(
