@@ -20,22 +20,25 @@ use ratatoskr_knowledge::{
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::Lifecycle;
 use crate::bus::{self, BusFailure, DurableSpec};
 use crate::ingest_handlers::Outcome;
 use crate::ingest_publish::publish_event_outbox;
 use crate::provider_runtime::IngestProvider;
+use crate::redelivery::{Redelivery, RedeliverySchedule};
+use crate::{Lifecycle, Metrics};
 
 /// The one events stream every ingest durable belongs to.
 pub const EVENTS_STREAM: &str = "ratatoskr_events";
 
-/// The delivery on which a redelivered failure becomes terminal.
+/// The delivery on which the repository family settles a failed fact instead of retrying.
+///
+/// Only the repository family has a delivery budget: its terminal delivery ends in a
+/// `knowledge.repository_analysis.failed.v1` fact that the requester waits for. Every other family
+/// is redelivered until it succeeds or turns out never to be able to (XR-021 CONTRACTS.md R4-05).
 pub const TERMINAL_DELIVERY: i64 = 5;
 
 /// How long the completion publisher may keep failing before the worker stops being ready.
 pub const PUBLISH_READINESS_GRACE: Duration = Duration::from_secs(30);
-
-const NAK_DELAY: Duration = Duration::from_secs(2);
 
 /// One of the four ingest durables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +84,7 @@ impl IngestFamily {
         }
     }
 
-    /// The family spelling recorded on `knowledge.ingest_failures`.
+    /// The family spelling logged beside a rejected or redelivered delivery.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -191,6 +194,7 @@ pub(crate) struct IngestContext<P> {
     pub(crate) blobs: BlobStore,
     pub(crate) provider: Arc<P>,
     pub(crate) readme: GithubReadmeClient,
+    pub(crate) redelivery: Redelivery,
 }
 
 /// Spawns the ingest supervisor with the provider the configuration selects.
@@ -206,6 +210,7 @@ pub fn spawn_ingest_workers(
     lifecycle: Lifecycle,
     drain: watch::Receiver<bool>,
     limiter: Arc<RateLimiter>,
+    metrics: Arc<Metrics>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         match IngestProvider::from_config(&config, &database, limiter) {
@@ -217,6 +222,7 @@ pub fn spawn_ingest_workers(
                     lifecycle,
                     drain,
                     Arc::new(provider),
+                    Redelivery::standard(metrics),
                 )
                 .await;
             }
@@ -225,7 +231,7 @@ pub fn spawn_ingest_workers(
     })
 }
 
-/// Spawns the ingest supervisor with an explicit provider.
+/// Spawns the ingest supervisor with an explicit provider and the production redelivery schedule.
 ///
 /// This is the seam the tests use to run the real consumers against a scripted provider.
 #[must_use]
@@ -236,9 +242,35 @@ pub fn spawn_ingest_workers_with_provider<P: LlmProvider + 'static>(
     lifecycle: Lifecycle,
     drain: watch::Receiver<bool>,
     provider: Arc<P>,
+    metrics: Arc<Metrics>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_ingest_workers_with_schedule(
+        config,
+        database,
+        blobs,
+        lifecycle,
+        drain,
+        provider,
+        Redelivery::standard(metrics),
+    )
+}
+
+/// Spawns the ingest supervisor with an explicit provider and an explicit redelivery schedule.
+///
+/// The schedule is an argument and never a configuration key, so a test can redeliver eight times
+/// inside its deadline while a deployment cannot lower the production delay.
+#[must_use]
+pub fn spawn_ingest_workers_with_schedule<P: LlmProvider + 'static>(
+    config: Config,
+    database: Database,
+    blobs: BlobStore,
+    lifecycle: Lifecycle,
+    drain: watch::Receiver<bool>,
+    provider: Arc<P>,
+    redelivery: Redelivery,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(supervise(
-        config, database, blobs, lifecycle, drain, provider,
+        config, database, blobs, lifecycle, drain, provider, redelivery,
     ))
 }
 
@@ -269,6 +301,7 @@ async fn supervise<P: LlmProvider + 'static>(
     lifecycle: Lifecycle,
     mut drain: watch::Receiver<bool>,
     provider: Arc<P>,
+    redelivery: Redelivery,
 ) {
     let Ok(readme) = readme_client(&config) else {
         tracing::error!(class = "readme_configuration");
@@ -281,6 +314,7 @@ async fn supervise<P: LlmProvider + 'static>(
         blobs,
         provider,
         readme,
+        redelivery,
     });
     let mut tasks = JoinSet::new();
     for family in IngestFamily::ALL {
@@ -393,7 +427,7 @@ async fn consume_once<P: LlmProvider>(
                 let message = next.map_err(|_| BusFailure::Unavailable)?;
                 let delivered = message.info().map_or(1, |info| info.delivered);
                 let outcome = context.handle(family, message.payload.as_ref(), delivered).await;
-                let ack = context.disposition(family, outcome, delivered).await;
+                let ack = context.disposition(family, &outcome, delivered);
                 message.ack_with(ack).await.map_err(|_| BusFailure::Unavailable)?;
             }
         }
@@ -410,44 +444,60 @@ impl<P: LlmProvider> IngestContext<P> {
         }
     }
 
-    /// Maps a handler outcome to the broker disposition, recording a delivery that ran out of
-    /// attempts.
-    async fn disposition(
+    /// Maps a handler outcome to the broker disposition and makes a redelivery visible.
+    ///
+    /// A redelivery is counted on the operator plane, and from the second delivery on it is logged
+    /// with the family, the class and the delivery count, never content (XR-021 CONTRACTS.md
+    /// R4-05 rule 3).
+    fn disposition(
         &self,
         family: IngestFamily,
-        outcome: Outcome,
+        outcome: &Outcome,
         delivered: i64,
     ) -> jetstream::AckKind {
         match outcome {
-            Outcome::Done => jetstream::AckKind::Ack,
+            Outcome::Done => {}
             Outcome::Reject(class) => {
                 tracing::warn!(family = family.label(), class, "ingest delivery rejected");
-                jetstream::AckKind::Term
             }
-            Outcome::Retry { class, event_id } if delivered >= TERMINAL_DELIVERY => {
-                let recorded = sqlx::query(
-                    "insert into knowledge.ingest_failures
-                         (family, event_id, failure_class, delivered_count)
-                     values ($1, $2, $3, $4)
-                     on conflict (family, event_id) do nothing",
-                )
-                .bind(family.label())
-                .bind(event_id)
-                .bind(class)
-                .bind(i32::try_from(delivered).unwrap_or(i32::MAX))
-                .execute(self.database.pool())
-                .await;
-                if recorded.is_err() {
-                    return jetstream::AckKind::Nak(Some(NAK_DELAY));
+            Outcome::Retry(class) => {
+                self.redelivery.metrics.record_ingest_redelivery();
+                if delivered >= 2 {
+                    tracing::warn!(
+                        family = family.label(),
+                        class,
+                        delivered,
+                        "ingest delivery failed and will be redelivered"
+                    );
+                } else {
+                    tracing::debug!(
+                        family = family.label(),
+                        class,
+                        delivered,
+                        "ingest delivery failed and will be redelivered"
+                    );
                 }
-                tracing::warn!(family = family.label(), class, "ingest delivery gave up");
-                jetstream::AckKind::Term
-            }
-            Outcome::Retry { class, .. } | Outcome::Redeliver(class) => {
-                tracing::warn!(family = family.label(), class, "ingest delivery will retry");
-                jetstream::AckKind::Nak(Some(NAK_DELAY))
             }
         }
+        ack_kind(outcome, delivered, &self.redelivery.schedule)
+    }
+}
+
+/// The broker disposition of a handler outcome.
+///
+/// Pure: a retryable outcome is negative-acknowledged with the delay the schedule gives for its
+/// delivery count and is never terminal, however many deliveries it has had. A delivery that can
+/// never succeed arrives as [`Outcome::Reject`], and the repository family ends its own budget by
+/// settling a fact (XR-021 CONTRACTS.md R4-05).
+pub(crate) fn ack_kind(
+    outcome: &Outcome,
+    delivered: i64,
+    schedule: &RedeliverySchedule,
+) -> jetstream::AckKind {
+    match outcome {
+        Outcome::Done => jetstream::AckKind::Ack,
+        Outcome::Reject(_) => jetstream::AckKind::Term,
+        Outcome::Retry(_) => jetstream::AckKind::Nak(Some(schedule.delay(delivered))),
     }
 }
 
@@ -488,5 +538,72 @@ async fn publish_loop<P: LlmProvider>(
         let now = Instant::now();
         tracker.record(succeeded, now);
         health.set_publisher(tracker.healthy(now, PUBLISH_READINESS_GRACE));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use async_nats::jetstream::AckKind;
+
+    use super::ack_kind;
+    use crate::ingest_handlers::Outcome;
+    use crate::redelivery::RedeliverySchedule;
+
+    /// A retryable failure is naked at every delivery count and never terminated: the delivery
+    /// budget that used to end the fifth delivery is gone.
+    #[test]
+    fn a_retryable_outcome_is_never_terminal() {
+        for delivered in [1, 2, 4, 5, 6, 500] {
+            let kind = ack_kind(
+                &Outcome::Retry("social_analysis"),
+                delivered,
+                &RedeliverySchedule::STANDARD,
+            );
+            assert!(
+                matches!(kind, AckKind::Nak(Some(_))),
+                "delivery {delivered} was {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retryable_outcome_waits_as_long_as_the_schedule_says() {
+        let schedule = RedeliverySchedule::STANDARD;
+        for delivered in [1, 3, 6, 500] {
+            assert!(
+                matches!(
+                    ack_kind(&Outcome::Retry("document_analysis"), delivered, &schedule),
+                    AckKind::Nak(Some(delay)) if delay == schedule.delay(delivered)
+                ),
+                "delivery {delivered}"
+            );
+        }
+        assert!(
+            matches!(
+                ack_kind(&Outcome::Retry("document_analysis"), 7, &schedule),
+                AckKind::Nak(Some(delay)) if delay == Duration::from_mins(1)
+            ),
+            "the delay stops growing at one minute"
+        );
+    }
+
+    #[test]
+    fn done_is_acknowledged_and_reject_is_terminal_at_any_delivery() {
+        for delivered in [1, 5, 500] {
+            assert!(matches!(
+                ack_kind(&Outcome::Done, delivered, &RedeliverySchedule::STANDARD),
+                AckKind::Ack
+            ));
+            assert!(matches!(
+                ack_kind(
+                    &Outcome::Reject("undecodable"),
+                    delivered,
+                    &RedeliverySchedule::STANDARD
+                ),
+                AckKind::Term
+            ));
+        }
     }
 }

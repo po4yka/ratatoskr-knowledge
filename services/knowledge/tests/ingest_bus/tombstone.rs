@@ -1,8 +1,10 @@
 //! Archive tombstones and the other archive facts against a real `JetStream` and database (XR-021
 //! CONTRACTS.md R3-08).
 //!
-//! A deletion tombstone is never dead-lettered and is never left half finished, and a delivery
-//! that can never succeed is terminated at its first delivery instead of its fifth. The transient
+//! A deletion tombstone is never left half finished, and a delivery that can never succeed is
+//! terminated at its first delivery instead of its fifth. Every family is redelivered without a
+//! budget (R4-05, `redelivery.rs`); the tombstone keeps its own tests because its erasure is a
+//! second step. The transient
 //! failures are forced from the database side (a trigger that refuses the inbox receipt) and from
 //! the filesystem side (a blob directory the worker may not write).
 
@@ -12,11 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ratatoskr_knowledge::ScriptedProvider;
-use ratatoskr_knowledge_service::{IngestFamily, TERMINAL_DELIVERY};
+use ratatoskr_knowledge_service::IngestFamily;
 
 use crate::fixtures::{
     ARCHIVE_ANALYSIS, CONTRACT_CONVERSATION, CONTRACT_TOMBSTONE, CONVERSATION_ADDED, EVENT_A,
-    EVENT_B, EVENT_C, OTHER_OWNER, OWNER, envelope, response,
+    EVENT_B, OTHER_OWNER, OWNER, envelope, response,
 };
 use crate::harness::{BROKER, Harness};
 use crate::ingest_support::{TestResult, eventually};
@@ -103,12 +105,6 @@ async fn archive_is_quiet(harness: &Harness) -> TestResult {
     .await
 }
 
-async fn failure_rows(harness: &Harness) -> Result<i64, sqlx::Error> {
-    harness
-        .count("select count(*) from knowledge.ingest_failures")
-        .await
-}
-
 /// The stored blob files under the worker's blob root.
 fn blob_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -144,13 +140,13 @@ fn set_mode(directories: &[PathBuf], mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A tombstone is a privacy deletion: the delivery budget that protects the worker from a poison
-/// message must never end it. The database refuses the receipt for eight deliveries, three more
-/// than the budget of any other fact, and the ninth applies the tombstone.
+/// A tombstone is a privacy deletion: no delivery budget may end it. The database refuses the
+/// receipt for eight deliveries, three more than the five that used to end a delivery, and the
+/// ninth applies the tombstone.
 #[tokio::test]
 async fn a_tombstone_survives_more_than_five_transient_failures() -> TestResult {
     let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
+    let harness = Harness::start_fast().await?;
     let worker = harness.spawn(scripted());
     publish_added(&harness, EVENT_A, OWNER).await?;
     eventually("the conversation is searchable", || async {
@@ -163,15 +159,10 @@ async fn a_tombstone_survives_more_than_five_transient_failures() -> TestResult 
     publish_tombstone(&harness, EVENT_B, OWNER).await?;
     let first_tombstone_delivery = 2;
     let target = first_tombstone_delivery + 7;
-    eventually("eight tombstone deliveries or a dead letter", || async {
-        Ok(archive_deliveries(&harness).await? >= target || failure_rows(&harness).await? > 0)
+    eventually("eight tombstone deliveries", || async {
+        Ok(archive_deliveries(&harness).await? >= target)
     })
     .await?;
-    assert_eq!(
-        failure_rows(&harness).await?,
-        0,
-        "a tombstone is never dead-lettered after {TERMINAL_DELIVERY} deliveries"
-    );
     assert_eq!(
         harness.search_documents().await?,
         1,
@@ -184,7 +175,6 @@ async fn a_tombstone_survives_more_than_five_transient_failures() -> TestResult 
     })
     .await?;
     archive_is_quiet(&harness).await?;
-    assert_eq!(failure_rows(&harness).await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())
@@ -279,7 +269,6 @@ async fn a_tombstone_for_another_tenants_subject_is_rejected_at_once() -> TestRe
     // A redelivery would arrive after the 2 s nak delay; none may.
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert_eq!(archive_deliveries(&harness).await?, 2, "no redelivery");
-    assert_eq!(failure_rows(&harness).await?, 0);
     assert_eq!(harness.search_documents().await?, 1);
     assert_eq!(
         harness
@@ -311,7 +300,6 @@ async fn rejected_at_once(
     archive_is_quiet(harness).await?;
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert_eq!(archive_deliveries(harness).await?, 1, "no redelivery");
-    assert_eq!(failure_rows(harness).await?, 0);
     assert_eq!(
         logs.lines_containing(class),
         1,
@@ -355,39 +343,6 @@ async fn an_unsupported_archive_type_is_rejected_at_once() -> TestResult {
         )
         .await?;
     rejected_at_once(&harness, &logs, "unsupported").await?;
-    worker.stop().await?;
-    harness.database.cleanup().await?;
-    Ok(())
-}
-
-/// The budget still protects the worker from every other archive fact: a conversation that fails
-/// transiently gives up on the fifth delivery and leaves a failure row.
-#[tokio::test]
-async fn a_non_tombstone_archive_fact_keeps_its_delivery_budget() -> TestResult {
-    let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
-    let worker = harness.spawn(scripted());
-    refuse_inbox_receipts(&harness).await?;
-    publish_added(&harness, EVENT_C, OWNER).await?;
-    eventually("the delivery gave up", || async {
-        Ok(failure_rows(&harness).await? == 1)
-    })
-    .await?;
-    archive_is_quiet(&harness).await?;
-    assert_eq!(
-        archive_deliveries(&harness).await?,
-        u64::try_from(TERMINAL_DELIVERY)?,
-        "the fifth delivery is the last"
-    );
-    assert_eq!(
-        harness
-            .count(
-                "select count(*) from knowledge.ingest_failures
-                 where family = 'ai_archive' and delivered_count = 5"
-            )
-            .await?,
-        1
-    );
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

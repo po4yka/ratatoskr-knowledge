@@ -23,8 +23,9 @@ use ratatoskr_knowledge::{
 use tokio::sync::watch;
 
 use crate::bus::{self, DurableSpec};
-use crate::channel_recap_delivery::{redelivery_delay, run_with_progress};
+use crate::channel_recap_delivery::run_with_progress;
 use crate::provider_runtime::{ControlledOpenRouter, openrouter_provider};
+use crate::redelivery::RedeliverySchedule;
 use crate::{Lifecycle, Metrics};
 
 const PRODUCER: &str = "ratatoskr-channel-digests";
@@ -315,7 +316,7 @@ async fn serve(
                     Disposition::Nak => {
                         let delivered = message.info().map_or(1, |info| info.delivered);
                         worker.metrics.record_channel_recap_redelivery();
-                        jetstream::AckKind::Nak(Some(redelivery_delay(delivered)))
+                        jetstream::AckKind::Nak(Some(RedeliverySchedule::STANDARD.delay(delivered)))
                     }
                 };
                 message.ack_with(ack).await.map_err(|_| ChannelRecapWorkerError::Bus)?;

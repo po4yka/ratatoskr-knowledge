@@ -136,7 +136,6 @@ async fn assert_converged(harness: &Harness, lane: Lane) -> TestResult {
         1
     );
     assert_eq!(harness.rows_in(&["analysis_outputs"]).await?, 1);
-    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
     if matches!(lane, Lane::Repository) {
         eventually("the completed fact is published", || async {
             Ok(harness.facts_on(COMPLETED_SUBJECT).await?.len() == 1)

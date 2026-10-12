@@ -37,6 +37,24 @@ pub enum PipelineError {
     Conflict,
 }
 
+impl PipelineError {
+    /// Whether a later delivery of the same document can never succeed after this failure.
+    ///
+    /// A response that stayed invalid after its repair and a provider failure other than a
+    /// transient one leave the run failed for good. A timeout, a run held by another executor and
+    /// a storage failure may recover.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::Persistence(error) => error.is_permanent(),
+            Self::Provider(error) => error.is_permanent(),
+            Self::Blob(error) => error.is_permanent(),
+            Self::Invalid => true,
+            Self::Timeout | Self::Conflict => false,
+        }
+    }
+}
+
 impl From<DriveFailure> for PipelineError {
     fn from(failure: DriveFailure) -> Self {
         match failure {

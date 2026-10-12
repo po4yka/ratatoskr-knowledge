@@ -16,17 +16,17 @@ use ratatoskr_github_contracts::{AnalysisFailureCode, RepositoryAnalysisRequeste
 use ratatoskr_identifiers::{EntityRef, Extensions, TenantRef, WireTimestamp};
 use ratatoskr_knowledge::{
     ArchiveEventAdmission, ArchiveEventConsumer, ArchiveEventError, DocumentIntake,
-    DocumentIntakeError, EventCause, EventOutbox, FamilyPipeline, FamilyPipelineError, LlmProvider,
-    OutboxFact, OutboxSubject, RepositoryAnalysisConsumer, RepositoryReadmeError, SourceInbox,
-    SourceInboxAdmission, SourceInboxError, collect_pending_blobs,
+    DocumentIntakeError, EventCause, EventOutbox, EventOutboxError, FamilyPipeline,
+    FamilyPipelineError, LlmProvider, OutboxFact, OutboxSubject, RepositoryAnalysisConsumer,
+    RepositoryReadmeError, SourceInbox, SourceInboxAdmission, SourceInboxError,
+    collect_pending_blobs,
 };
 use ratatoskr_social_contracts::{
     SocialSourceAnalysisCompleted, SocialSourceCaptured, SocialSourceRemoved, SocialSourceSnapshot,
     SocialSourceUpdated,
 };
-use uuid::Uuid;
 
-use crate::ingest::IngestContext;
+use crate::ingest::{IngestContext, TERMINAL_DELIVERY};
 
 const DOCUMENT_PRODUCERS: &[&str] = &["ratatoskr-extractor"];
 const SOCIAL_PRODUCERS: &[&str] = &["ratatoskr-x", "ratatoskr-instagram", "ratatoskr-threads"];
@@ -41,13 +41,13 @@ pub(crate) enum Outcome {
     /// The delivery can never succeed (unknown type, wrong producer, missing tenant, invalid
     /// payload); terminate it. The class is logged, never content.
     Reject(&'static str),
-    /// The delivery failed in a way a later delivery may not; redeliver after a delay, and give
-    /// up after the delivery budget.
-    Retry { class: &'static str, event_id: Uuid },
-    /// The delivery cannot be settled yet because the settlement itself failed; redeliver
-    /// without a delivery budget, because the terminal delivery is the one that must end in a
-    /// fact and the durable has no delivery limit.
-    Redeliver(&'static str),
+    /// The delivery failed in a way a later delivery may not; redeliver it after a delay that
+    /// grows with the delivery count, until it succeeds or turns out to be a [`Outcome::Reject`].
+    /// The class is logged, never content.
+    ///
+    /// The repository family is the one exception to the missing delivery budget: its handler
+    /// stops returning this outcome at [`TERMINAL_DELIVERY`] and settles a failed fact instead.
+    Retry(&'static str),
 }
 
 fn decode(bytes: &[u8], producers: &[&str]) -> Result<(EventEnvelope, TenantRef), Outcome> {
@@ -61,7 +61,51 @@ fn decode(bytes: &[u8], producers: &[&str]) -> Result<(EventEnvelope, TenantRef)
 
 /// A completion fact could not be queued.
 #[derive(Debug, Clone, Copy)]
-struct QueueFailure;
+struct QueueFailure {
+    /// The same fact can never be queued: it cannot be built or the schema cannot hold it.
+    permanent: bool,
+}
+
+impl QueueFailure {
+    /// The fact itself is not representable.
+    const UNREPRESENTABLE: Self = Self { permanent: true };
+
+    fn outcome(self, retry_class: &'static str) -> Outcome {
+        if self.permanent {
+            Outcome::Reject("unqueueable")
+        } else {
+            Outcome::Retry(retry_class)
+        }
+    }
+}
+
+impl From<EventOutboxError> for QueueFailure {
+    fn from(error: EventOutboxError) -> Self {
+        Self {
+            permanent: error.is_permanent(),
+        }
+    }
+}
+
+/// A failed inbox write or read: a delivery the schema cannot hold is rejected, anything else is
+/// the database and is redelivered.
+fn inbox_failure(error: &SourceInboxError, retry_class: &'static str) -> Outcome {
+    if error.is_permanent() {
+        Outcome::Reject("inbox_invalid")
+    } else {
+        Outcome::Retry(retry_class)
+    }
+}
+
+/// A failed analysis: a source that can never be analysed is rejected, anything else is the
+/// provider, a timeout, a held run or the database and is redelivered.
+fn analysis_failure(error: &FamilyPipelineError, retry_class: &'static str) -> Outcome {
+    if error.is_permanent() {
+        Outcome::Reject("unanalysable")
+    } else {
+        Outcome::Retry(retry_class)
+    }
+}
 
 impl<P: LlmProvider> IngestContext<P> {
     fn provider_timeout(&self) -> Duration {
@@ -90,18 +134,13 @@ impl<P: LlmProvider> IngestContext<P> {
         );
         match intake.accept(&envelope, &*self.provider, &self.blobs).await {
             Ok(_) => Outcome::Done,
-            Err(
-                DocumentIntakeError::UnsupportedEvent
-                | DocumentIntakeError::WrongProducer
-                | DocumentIntakeError::MissingTenant
-                | DocumentIntakeError::InvalidPayload
-                | DocumentIntakeError::Context(_)
-                | DocumentIntakeError::Request(_),
-            ) => Outcome::Reject("document"),
-            Err(_) => Outcome::Retry {
-                class: "document_analysis",
-                event_id: envelope.event_id.0,
-            },
+            Err(error) if error.is_permanent() => Outcome::Reject(match error {
+                DocumentIntakeError::Persistence(_) | DocumentIntakeError::Analysis(_) => {
+                    "unanalysable"
+                }
+                _ => "document",
+            }),
+            Err(_) => Outcome::Retry("document_analysis"),
         }
     }
 
@@ -112,10 +151,6 @@ impl<P: LlmProvider> IngestContext<P> {
             Err(outcome) => return outcome,
         };
         let subject = envelope.event_type.to_wire();
-        let retry = |class| Outcome::Retry {
-            class,
-            event_id: envelope.event_id.0,
-        };
         let snapshot = match subject.as_str() {
             SocialSourceCaptured::EVENT_TYPE => envelope
                 .payload_as::<SocialSourceCaptured>()
@@ -141,28 +176,27 @@ impl<P: LlmProvider> IngestContext<P> {
             Ok(SourceInboxAdmission::Duplicate) => {
                 match inbox.is_current_head(envelope.event_id.0).await {
                     Ok(head) => head,
-                    Err(_) => return retry("social_inbox"),
+                    Err(error) => return inbox_failure(&error, "social_inbox"),
                 }
             }
             Ok(SourceInboxAdmission::AcceptedHistorical | SourceInboxAdmission::Tombstoned) => {
                 false
             }
-            Err(_) => return retry("social_inbox"),
+            Err(error) => return inbox_failure(&error, "social_inbox"),
         };
         if !analyse {
             return Outcome::Done;
         }
-        if self
+        if let Err(error) = self
             .pipeline()
             .execute_social_event(&inbox, envelope.event_id.0)
             .await
-            .is_err()
         {
-            return retry("social_analysis");
+            return analysis_failure(&error, "social_analysis");
         }
         match self.queue_social_completion(&envelope, &snapshot).await {
             Ok(()) => Outcome::Done,
-            Err(QueueFailure) => retry("social_outbox"),
+            Err(failure) => failure.outcome("social_outbox"),
         }
     }
 
@@ -173,20 +207,20 @@ impl<P: LlmProvider> IngestContext<P> {
         if removed.owner != tenant {
             return Outcome::Reject("owner");
         }
-        let admitted = SourceInbox::new(&self.database)
+        if let Err(error) = SourceInbox::new(&self.database)
             .accept_social_removed(envelope.event_id.0, &removed)
-            .await;
-        if admitted.is_err()
-            || collect_pending_blobs(&self.database, &self.blobs)
-                .await
-                .is_err()
+            .await
         {
-            return Outcome::Retry {
-                class: "social_removal",
-                event_id: envelope.event_id.0,
-            };
+            return inbox_failure(&error, "social_removal");
         }
-        Outcome::Done
+        // The removal committed its row deletions and its erasure queue; a redelivery is a
+        // duplicate that drains the queue again, so a failed erasure is finished by the next
+        // delivery.
+        match collect_pending_blobs(&self.database, &self.blobs).await {
+            Ok(_) => Outcome::Done,
+            Err(error) if error.is_permanent() => Outcome::Reject("unprocessable"),
+            Err(_) => Outcome::Retry("social_removal"),
+        }
     }
 
     async fn queue_social_completion(
@@ -206,10 +240,14 @@ impl<P: LlmProvider> IngestContext<P> {
             subject: OutboxSubject::AnalysisCompleted,
             tenant: snapshot.owner,
             aggregate_id: EntityRef::parse(&format!("social_source:{}", snapshot.social_source_id))
-                .map_err(|_| QueueFailure)?,
+                .map_err(|_| QueueFailure::UNREPRESENTABLE)?,
             correlation_id: cause.correlation_id.clone(),
-            causation_id: Some(cause.causation_ref().map_err(|_| QueueFailure)?),
-            payload: serde_json::to_value(&completed).map_err(|_| QueueFailure)?,
+            causation_id: Some(
+                cause
+                    .causation_ref()
+                    .map_err(|_| QueueFailure::UNREPRESENTABLE)?,
+            ),
+            payload: serde_json::to_value(&completed).map_err(|_| QueueFailure::UNREPRESENTABLE)?,
             dedupe_key: format!(
                 "social:{}:{}:{}",
                 snapshot.owner, snapshot.social_source_id, snapshot.content_digest.hex
@@ -219,14 +257,14 @@ impl<P: LlmProvider> IngestContext<P> {
             .enqueue(&fact)
             .await
             .map(|_| ())
-            .map_err(|_| QueueFailure)
+            .map_err(QueueFailure::from)
     }
 
     /// `ai_archive.*`: claim the delivery, analyse conversations and projects, apply tombstones.
     ///
-    /// A tombstone is a privacy deletion, so every transient failure of one is redelivered without
-    /// a delivery budget (XR-021 CONTRACTS.md R3-08); the other facts give up after the budget.
-    /// A fact that can never succeed is rejected at its first delivery.
+    /// Every transient failure is redelivered without a delivery budget (XR-021 CONTRACTS.md R4-05),
+    /// and a tombstone, a privacy deletion, always reports the class `archive_tombstone`
+    /// (R3-08). A fact that can never succeed is rejected at its first delivery.
     pub(crate) async fn ai_archive(&self, bytes: &[u8]) -> Outcome {
         let (envelope, tenant) = match decode(bytes, ARCHIVE_PRODUCERS) {
             Ok(decoded) => decoded,
@@ -234,14 +272,11 @@ impl<P: LlmProvider> IngestContext<P> {
         };
         let tombstone = envelope.event_type.to_wire() == AiArchiveTombstone::EVENT_TYPE;
         let retry = |class| {
-            if tombstone {
-                Outcome::Redeliver("archive_tombstone")
+            Outcome::Retry(if tombstone {
+                "archive_tombstone"
             } else {
-                Outcome::Retry {
-                    class,
-                    event_id: envelope.event_id.0,
-                }
-            }
+                class
+            })
         };
         match archive_owner(&envelope) {
             Ok(owner) if owner == tenant => {}
@@ -264,6 +299,7 @@ impl<P: LlmProvider> IngestContext<P> {
             ArchiveEventAdmission::Tombstone | ArchiveEventAdmission::TombstoneDuplicate => {
                 return match collect_pending_blobs(&self.database, &self.blobs).await {
                     Ok(_) => Outcome::Done,
+                    Err(error) if error.is_permanent() => Outcome::Reject("unprocessable"),
                     Err(_) => retry("archive_tombstone"),
                 };
             }
@@ -276,6 +312,7 @@ impl<P: LlmProvider> IngestContext<P> {
             SourceInboxAdmission::Duplicate => {
                 match inbox.is_current_head(envelope.event_id.0).await {
                     Ok(head) => head,
+                    Err(error) if error.is_permanent() => return Outcome::Reject("inbox_invalid"),
                     Err(_) => return retry("archive_inbox"),
                 }
             }
@@ -295,9 +332,9 @@ impl<P: LlmProvider> IngestContext<P> {
                     .await
                 {
                     Ok(()) => Outcome::Done,
-                    Err(QueueFailure) => retry("archive_outbox"),
+                    Err(failure) => failure.outcome("archive_outbox"),
                 },
-                Err(_) => retry("archive_analysis"),
+                Err(error) => analysis_failure(&error, "archive_analysis"),
             }
         } else {
             match pipeline
@@ -305,7 +342,7 @@ impl<P: LlmProvider> IngestContext<P> {
                 .await
             {
                 Ok(_) => Outcome::Done,
-                Err(_) => retry("archive_analysis"),
+                Err(error) => analysis_failure(&error, "archive_analysis"),
             }
         }
     }
@@ -320,16 +357,20 @@ impl<P: LlmProvider> IngestContext<P> {
         let ratatoskr_ai_archive_contracts::AiArchiveSubject::Conversation { ai_conversation_id } =
             &completion.subject
         else {
-            return Err(QueueFailure);
+            return Err(QueueFailure::UNREPRESENTABLE);
         };
         let fact = OutboxFact {
             subject: OutboxSubject::AiArchiveAnalysisCompleted,
             tenant,
             aggregate_id: EntityRef::parse(&format!("ai_conversation:{ai_conversation_id}"))
-                .map_err(|_| QueueFailure)?,
+                .map_err(|_| QueueFailure::UNREPRESENTABLE)?,
             correlation_id: cause.correlation_id.clone(),
-            causation_id: Some(cause.causation_ref().map_err(|_| QueueFailure)?),
-            payload: serde_json::to_value(completion).map_err(|_| QueueFailure)?,
+            causation_id: Some(
+                cause
+                    .causation_ref()
+                    .map_err(|_| QueueFailure::UNREPRESENTABLE)?,
+            ),
+            payload: serde_json::to_value(completion).map_err(|_| QueueFailure::UNREPRESENTABLE)?,
             dedupe_key: format!(
                 "ai_archive:{tenant}:conversation:{ai_conversation_id}:{}",
                 completion.content_digest.hex
@@ -339,7 +380,7 @@ impl<P: LlmProvider> IngestContext<P> {
             .enqueue(&fact)
             .await
             .map(|_| ())
-            .map_err(|_| QueueFailure)
+            .map_err(QueueFailure::from)
     }
 
     /// `knowledge.repository_analysis.requested.v1`: analyse with the GitHub README, settle.
@@ -363,13 +404,10 @@ impl<P: LlmProvider> IngestContext<P> {
             return Outcome::Done;
         };
         let (code, retryable, transient) = classify_repository_failure(&failure);
-        if transient && delivered < crate::ingest::TERMINAL_DELIVERY {
-            return Outcome::Retry {
-                class: "repository_analysis",
-                event_id: envelope.event_id.0,
-            };
+        if transient && delivered < TERMINAL_DELIVERY {
+            return Outcome::Retry("repository_analysis");
         }
-        let settlement_retry = Outcome::Redeliver("repository_settlement");
+        let settlement_retry = Outcome::Retry("repository_settlement");
         let consumer = RepositoryAnalysisConsumer::new(&self.database);
         // The pipeline can fail before it stored the request, and a request that is not stored
         // cannot be settled: record it first (a no-op when it exists) so the terminal fact always
@@ -420,6 +458,7 @@ fn archive_accept_failure(
                 "invalid_fact"
             })
         }
+        _ if error.is_permanent() => Outcome::Reject("inbox_invalid"),
         _ => retry("archive_inbox"),
     }
 }

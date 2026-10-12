@@ -257,11 +257,18 @@ value stops startup, because a service that disagrees with its durable never sta
 delivery from the wrong producer, without a tenant,
 undecodable, of an unsupported type, or whose tenant differs from the payload owner is terminated on
 first delivery, and an AI-archive tombstone for a subject that belongs only to another tenant is
-terminated with the class `foreign_subject`. A failed analysis is redelivered after 2 seconds; the
-fifth delivery is terminal and leaves a content-free row in `knowledge.ingest_failures`, except for
-repository requests, which settle as a `knowledge.repository_analysis.failed.v1` fact so the
-requester is told, and except for AI-archive deletion tombstones, which are redelivered without a
-delivery budget until they are applied. A redelivered tombstone also drains the blob erasure queue
+terminated with the class `foreign_subject`. A failed analysis, a refused write and a provider outage
+are redelivered, with no delivery budget, after `min(2 s * 2^(delivered - 1), 60 s)`, so a database
+outage of any length never drops a document, a social capture, an X removal or an AI conversation;
+the ingestion is applied once the database recovers. A provider outage is bounded by the run's ten
+provider calls over all its deliveries (about five deliveries): a run that spent them has failed for
+good and its delivery is terminated as `unanalysable`. Each redelivery is counted by the label-free
+`knowledge_ingest_redeliveries_total` on the operator listener, and from the second delivery on it
+logs the family, the class and the delivery count, never content. A delivery that can never succeed
+(a response that stayed invalid, a permanent provider failure, a source the schema cannot hold) is
+terminated at its first delivery with a closed class. Repository requests keep a budget of five
+deliveries, because their terminal delivery settles a `knowledge.repository_analysis.failed.v1` fact
+so the requester is told. A redelivered tombstone also drains the blob erasure queue
 before it is acknowledged, so a delivery that committed the row deletion and then failed finishes
 the byte erasure. A redelivery whose inbox
 row was committed before the analysis ran resumes the analysis when that delivery is still the head

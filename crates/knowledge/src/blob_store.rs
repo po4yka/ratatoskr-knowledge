@@ -26,6 +26,17 @@ pub enum BlobError {
     InvalidReference,
 }
 
+impl BlobError {
+    /// Whether the same input can never be stored, however often it is retried.
+    ///
+    /// A response above the byte limit and an invalid reference are properties of the input; an
+    /// unavailable store and a filesystem failure are the environment and may recover.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        matches!(self, Self::TooLarge | Self::InvalidReference)
+    }
+}
+
 /// Finite Knowledge-owned content-addressed blob root.
 #[derive(Debug, Clone)]
 pub struct BlobStore {

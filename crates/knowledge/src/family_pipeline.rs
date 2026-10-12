@@ -92,6 +92,30 @@ pub enum FamilyPipelineError {
     Conflict,
 }
 
+impl FamilyPipelineError {
+    /// Whether a later delivery of the same source can never succeed after this failure.
+    ///
+    /// This is the rule of the families that are redelivered without a budget. A response that
+    /// stayed invalid after its repair, a provider failure other than a transient one, a source
+    /// identity or contract snapshot that cannot be built and a corrupt README leave the run
+    /// failed or the input unusable for good. A timeout, a run held by another executor, an
+    /// unavailable README and a storage failure may recover.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::Persistence(error) => error.is_permanent(),
+            Self::Blob(error) => error.is_permanent(),
+            Self::Provider(error) => error.is_permanent(),
+            Self::Inbox(error) => error.is_permanent(),
+            Self::Invalid
+            | Self::Contract(_)
+            | Self::Source
+            | Self::RepositorySource(RepositoryReadmeError::Integrity) => true,
+            Self::Timeout | Self::Conflict | Self::RepositorySource(_) => false,
+        }
+    }
+}
+
 impl From<DriveFailure> for FamilyPipelineError {
     fn from(failure: DriveFailure) -> Self {
         match failure {

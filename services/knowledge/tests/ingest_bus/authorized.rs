@@ -408,6 +408,7 @@ async fn every_knowledge_consumer_runs_and_acknowledges_under_the_pinned_identit
             ("archive_prompt_v1", ARCHIVE_ANALYSIS),
             ("repository_prompt_v1", REPOSITORY_ANALYSIS_ABSENT),
         ]),
+        Arc::new(ratatoskr_knowledge_service::Metrics::new()),
     );
     eventually("both workers report ready under the identity", || async {
         Ok(lifecycle.is_ready())
@@ -565,6 +566,7 @@ async fn knowledge_workers_complete_jetstream_requests_under_their_inbox_prefix(
         lifecycle.clone(),
         receiver,
         routed(&[("article_prompt_v1", ARTICLE_ANALYSIS)]),
+        Arc::new(ratatoskr_knowledge_service::Metrics::new()),
     );
     eventually(
         "both workers verify their durables under the prefix",

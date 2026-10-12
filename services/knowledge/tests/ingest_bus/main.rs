@@ -14,6 +14,7 @@ mod fixtures;
 mod harness;
 mod lifecycle;
 mod recap_source;
+mod redelivery;
 mod repository;
 mod resume;
 mod tenant;

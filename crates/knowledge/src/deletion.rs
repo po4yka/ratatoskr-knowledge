@@ -150,6 +150,17 @@ pub enum DeletionError {
     VerificationFailed,
 }
 
+impl DeletionError {
+    /// Whether the same deletion can never succeed, however often it is retried.
+    ///
+    /// A count the database cannot represent is a property of the scope. A failed query, a blob
+    /// store failure and rows that survived a commit may recover on the next attempt.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        matches!(self, Self::ValueOverflow)
+    }
+}
+
 /// Runs the child-first row deletions and the audit insert inside a
 /// caller-supplied transaction.
 ///

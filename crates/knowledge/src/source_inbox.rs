@@ -64,6 +64,22 @@ pub enum SourceInboxError {
     Envelope(#[from] EnvelopeError),
 }
 
+impl SourceInboxError {
+    /// Whether the same delivery can never be claimed, however often it is retried.
+    ///
+    /// An undecodable envelope, a snapshot that cannot be encoded and an archive fact that
+    /// contradicts its provenance are properties of the delivery. Storage and deletion failures
+    /// are permanent only when the schema cannot represent the input.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::Persistence(error) => error.is_permanent(),
+            Self::Deletion(error) => error.is_permanent(),
+            Self::Encode(_) | Self::InvalidArchiveFact | Self::Envelope(_) => true,
+        }
+    }
+}
+
 /// Consumer that claims social and AI-archive source facts before analysis scheduling.
 #[derive(Debug)]
 pub struct SourceInbox<'a> {

@@ -15,7 +15,7 @@ use ratatoskr_knowledge::{
     BlobStore, ChannelRecapProviderMode, Config, DigestSourceSecret, RateLimiter,
 };
 use ratatoskr_knowledge_service::{
-    Lifecycle, Metrics, redelivery_delay, run_with_progress, spawn_channel_recap_worker,
+    Lifecycle, Metrics, RedeliverySchedule, run_with_progress, spawn_channel_recap_worker,
 };
 use tokio::sync::watch;
 
@@ -34,12 +34,12 @@ fn nats_url() -> String {
 #[test]
 fn redelivery_delay_doubles_from_two_seconds_and_caps_at_one_minute() {
     let seconds: Vec<u64> = (1..=7)
-        .map(|delivered| redelivery_delay(delivered).as_secs())
+        .map(|delivered| RedeliverySchedule::STANDARD.delay(delivered).as_secs())
         .collect();
     assert_eq!(seconds, [2, 4, 8, 16, 32, 60, 60]);
-    assert_eq!(redelivery_delay(1_000).as_secs(), 60);
+    assert_eq!(RedeliverySchedule::STANDARD.delay(1_000).as_secs(), 60);
     assert_eq!(
-        redelivery_delay(0).as_secs(),
+        RedeliverySchedule::STANDARD.delay(0).as_secs(),
         2,
         "a missing delivery count is the first delivery"
     );

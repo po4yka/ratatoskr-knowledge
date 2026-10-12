@@ -609,6 +609,44 @@ async fn search_uses_the_hybrid_retrieval_selection_when_configured()
     Ok(())
 }
 
+/// XR-021 CONTRACTS.md R4-05 rule 3: the dead letter is replaced by a label-free counter on the
+/// operator listener, beside the recap one.
+#[tokio::test]
+async fn the_operator_plane_exposes_the_ingest_redelivery_counter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let metrics = Arc::new(Metrics::new());
+    let operator = admin_router(Lifecycle::starting(), Arc::clone(&metrics));
+    let exposition = operator_metrics(&operator).await?;
+    assert!(
+        exposition.contains("# TYPE knowledge_ingest_redeliveries_total counter"),
+        "{exposition}"
+    );
+    assert!(exposition.contains("knowledge_ingest_redeliveries_total 0\n"));
+
+    metrics.record_ingest_redelivery();
+    metrics.record_ingest_redelivery();
+    let exposition = operator_metrics(&operator).await?;
+    assert!(
+        exposition.contains("knowledge_ingest_redeliveries_total 2\n"),
+        "{exposition}"
+    );
+    assert!(
+        exposition.contains("knowledge_channel_recap_redeliveries_total 0\n"),
+        "the recap counter is a different counter"
+    );
+    Ok(())
+}
+
+async fn operator_metrics(operator: &axum::Router) -> Result<String, Box<dyn std::error::Error>> {
+    let response = operator
+        .clone()
+        .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await?.to_bytes();
+    Ok(String::from_utf8(body.to_vec())?)
+}
+
 /// Projects one searchable row directly, simulating an accepted analysis
 /// whose output landed `age_seconds` ago.
 async fn seed_search_hit(

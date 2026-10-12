@@ -51,6 +51,27 @@ pub enum DocumentIntakeError {
     Analysis(#[from] PipelineError),
 }
 
+impl DocumentIntakeError {
+    /// Whether redelivering the same event can never succeed after this failure.
+    ///
+    /// A fact that is not a valid extracted document, a document that cannot be rendered into a
+    /// context or a request, and an analysis that failed for good are properties of the delivery;
+    /// a storage failure, a timeout and a transient provider failure are not.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::UnsupportedEvent
+            | Self::WrongProducer
+            | Self::MissingTenant
+            | Self::InvalidPayload
+            | Self::Context(_)
+            | Self::Request(_) => true,
+            Self::Persistence(error) => error.is_permanent(),
+            Self::Analysis(error) => error.is_permanent(),
+        }
+    }
+}
+
 /// Registers extracted documents and runs the article analysis over them.
 #[derive(Debug)]
 pub struct DocumentIntake<'a> {

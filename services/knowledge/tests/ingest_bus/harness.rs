@@ -10,13 +10,18 @@ use ratatoskr_event_envelope::EventEnvelope;
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
 use ratatoskr_knowledge::{BlobStore, Config, LlmProvider};
 use ratatoskr_knowledge_service::{
-    EVENTS_STREAM, IngestFamily, Lifecycle, spawn_ingest_workers_with_provider,
+    EVENTS_STREAM, IngestFamily, Lifecycle, Metrics, Redelivery, RedeliverySchedule,
+    spawn_ingest_workers_with_schedule,
 };
 use tokio::sync::watch;
 
 use crate::ingest_support::{
     PLATFORM_ACK_WAIT, TestResult, config, eventually, provision_with_ack_wait,
 };
+
+/// A redelivery schedule that fits eight deliveries of one message inside the polling deadline.
+pub(crate) const FAST_REDELIVERY: RedeliverySchedule =
+    RedeliverySchedule::new(Duration::from_millis(20), Duration::from_millis(100));
 
 /// One broker, one test at a time: the stream and the durables are shared by name.
 pub(crate) static BROKER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -32,11 +37,19 @@ pub(crate) struct Harness {
     context: jetstream::Context,
     url: String,
     ack_wait: Duration,
+    /// The operator counters the ingest worker records on.
+    pub(crate) metrics: Arc<Metrics>,
+    schedule: RedeliverySchedule,
 }
 
 impl Harness {
     pub(crate) async fn start() -> Result<Self, Box<dyn std::error::Error>> {
         Self::start_with_ack_wait(PLATFORM_ACK_WAIT).await
+    }
+
+    /// Starts with [`FAST_REDELIVERY`], for a test that waits for several deliveries of a message.
+    pub(crate) async fn start_fast() -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self::start().await?.with_schedule(FAST_REDELIVERY))
     }
 
     /// Starts with every durable's ack wait set to `ack_wait`, and a worker configuration that
@@ -54,7 +67,16 @@ impl Harness {
             context,
             url,
             ack_wait,
+            metrics: Arc::new(Metrics::new()),
+            schedule: RedeliverySchedule::STANDARD,
         })
+    }
+
+    /// Redelivers on `schedule` instead of the production one, so a test can see eight deliveries
+    /// of one message inside its deadline.
+    pub(crate) const fn with_schedule(mut self, schedule: RedeliverySchedule) -> Self {
+        self.schedule = schedule;
+        self
     }
 
     /// The broker context the harness provisioned and publishes through.
@@ -99,13 +121,14 @@ impl Harness {
         lifecycle: Lifecycle,
     ) -> Worker {
         let (drain, receiver) = watch::channel(false);
-        let handle = spawn_ingest_workers_with_provider(
+        let handle = spawn_ingest_workers_with_schedule(
             config,
             self.database.database.clone(),
             self.blobs.clone(),
             lifecycle,
             receiver,
             provider,
+            Redelivery::new(Arc::clone(&self.metrics), self.schedule),
         );
         Worker { drain, handle }
     }

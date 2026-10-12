@@ -18,6 +18,7 @@ pub struct Metrics {
     search_lexical: AtomicU64,
     search_hybrid: AtomicU64,
     channel_recap_redeliveries: AtomicU64,
+    ingest_redeliveries: AtomicU64,
     channel_recap_source_up: AtomicBool,
 }
 
@@ -49,6 +50,11 @@ impl Metrics {
     pub fn record_channel_recap_redelivery(&self) {
         self.channel_recap_redeliveries
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one ingest delivery scheduled for redelivery after a retryable failure.
+    pub fn record_ingest_redelivery(&self) {
+        self.ingest_redeliveries.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records whether the channel-digests API answered its last probe.
@@ -117,6 +123,11 @@ impl Metrics {
             &mut text,
             "knowledge_channel_recap_redeliveries_total",
             self.channel_recap_redeliveries.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut text,
+            "knowledge_ingest_redeliveries_total",
+            self.ingest_redeliveries.load(Ordering::Relaxed),
         );
         let _ = writeln!(
             text,

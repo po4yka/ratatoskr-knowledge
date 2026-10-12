@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use ratatoskr_ai_archive_contracts::AiArchiveProvenance;
 use ratatoskr_knowledge::test_support::archive::conversation_from_json;
-use ratatoskr_knowledge::{ProviderError, ScriptedProvider, SourceInbox};
+use ratatoskr_knowledge::{ScriptedProvider, SourceInbox};
 use ratatoskr_knowledge_service::{IngestFamily, PUBLISH_READINESS_GRACE, PublishHealth};
 use ratatoskr_social_contracts::{SocialSourceAnalysisCompleted, SocialSourceSnapshot};
 
@@ -210,55 +210,6 @@ async fn wrong_producer_and_garbage_are_termed_not_looped() -> TestResult {
             .await?,
         0
     );
-    assert_eq!(
-        harness
-            .count("select count(*) from knowledge.ingest_failures")
-            .await?,
-        0
-    );
-    worker.stop().await?;
-    harness.database.cleanup().await?;
-    Ok(())
-}
-
-/// A failing analysis is redelivered with a delay; the fifth delivery is terminal and recorded.
-#[tokio::test]
-async fn transient_failure_is_naked_and_fifth_delivery_is_terminal() -> TestResult {
-    let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
-    let worker = harness.spawn(Arc::new(ScriptedProvider::new([
-        Err(ProviderError::Transient),
-        Err(ProviderError::Transient),
-    ])));
-    harness
-        .publish(
-            "evt.social.source.captured.v1",
-            EVENT_A,
-            envelope(
-                EVENT_A,
-                CAPTURED,
-                "ratatoskr-x",
-                Some(OWNER),
-                &social_payload("2026-08-17T10:00:00Z")?,
-            ),
-        )
-        .await?;
-
-    eventually("the fifth delivery is recorded", || async {
-        Ok(harness
-            .count("select count(*) from knowledge.ingest_failures where delivered_count = 5")
-            .await?
-            == 1)
-    })
-    .await?;
-    let failure: (String, String) =
-        sqlx::query_as("select family, event_id::text from knowledge.ingest_failures")
-            .fetch_one(harness.database.database.pool())
-            .await?;
-    assert_eq!(failure, ("social".to_owned(), EVENT_A.to_owned()));
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    harness.settled(IngestFamily::Social, 5).await?;
-    assert_eq!(harness.search_documents().await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

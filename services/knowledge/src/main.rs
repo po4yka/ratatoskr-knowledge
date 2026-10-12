@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lifecycle.clone(),
                 drain_rx.clone(),
                 limiter,
+                Arc::clone(&metrics),
             ),
             &drain_tx,
             &worker_failed,

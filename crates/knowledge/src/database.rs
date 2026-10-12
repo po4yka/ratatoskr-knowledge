@@ -44,16 +44,19 @@ impl PersistenceError {
     /// Whether the same input can never be stored, however often it is retried.
     ///
     /// An identity, source reference, number or value the schema cannot represent is a property of
-    /// the input. A connection, query or schema failure is the database and may recover.
+    /// the input, and so is a run that has spent its provider-call budget. A connection, query or
+    /// schema failure is the database and may recover.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::InvalidSource
-                | Self::InvalidAnalysisIdentity
-                | Self::ValueOverflow
-                | Self::Encode(_)
-        )
+            | Self::InvalidAnalysisIdentity
+            | Self::AttemptBudgetExhausted
+            | Self::ValueOverflow
+            | Self::Encode(_) => true,
+            Self::Blob(error) => error.is_permanent(),
+            Self::Connect(_) | Self::Schema(_) | Self::Query(_) => false,
+        }
     }
 }
 

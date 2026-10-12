@@ -43,6 +43,18 @@ pub enum ArchiveEventError {
     Unsupported,
 }
 
+impl ArchiveEventError {
+    /// Whether redelivering the same event can never succeed after this failure.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::Envelope(_) | Self::Unsupported => true,
+            Self::Inbox(error) => error.is_permanent(),
+            Self::Persistence(error) => error.is_permanent(),
+        }
+    }
+}
+
 /// Consumer for published AI-archive normalized lifecycle facts.
 #[derive(Debug)]
 pub struct ArchiveEventConsumer<'a> {

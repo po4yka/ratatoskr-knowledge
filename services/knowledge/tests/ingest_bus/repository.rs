@@ -108,7 +108,7 @@ async fn readme_request_settles_and_publishes_one_completed_fact() -> TestResult
 #[tokio::test]
 async fn unavailable_readme_is_naked_until_the_fifth_delivery_then_fails_retryably() -> TestResult {
     let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
+    let harness = Harness::start_fast().await?;
     let stub = HttpStub::start(vec![(readme_path(), 503, Vec::new())]).await?;
     let config = publish_request(&harness, &stub).await?;
     let worker = harness.spawn_with(
@@ -129,11 +129,6 @@ async fn unavailable_readme_is_naked_until_the_fifth_delivery_then_fails_retryab
     assert_eq!(request_state(&harness).await?, "failed");
     assert!(harness.facts_on(COMPLETED_SUBJECT).await?.is_empty());
     assert_eq!(harness.search_documents().await?, 0);
-    assert_eq!(
-        harness.rows_in(&["ingest_failures"]).await?,
-        0,
-        "the request settled through its own terminal fact"
-    );
     tokio::time::sleep(Duration::from_secs(3)).await;
     harness.settled(IngestFamily::Repository, 5).await?;
     worker.stop().await?;
@@ -239,7 +234,6 @@ async fn a_transient_intake_failure_is_retried_and_then_completes() -> TestResul
         harness.facts_on(FAILED_SUBJECT).await?.is_empty(),
         "a transient database failure must not produce a terminal failure"
     );
-    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())
@@ -269,7 +263,6 @@ async fn a_transient_settlement_failure_does_not_fail_an_analysed_request() -> T
         harness.facts_on(FAILED_SUBJECT).await?.is_empty(),
         "an analysed request must not be settled as a permanent contract failure"
     );
-    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())
@@ -281,7 +274,7 @@ async fn a_transient_settlement_failure_does_not_fail_an_analysed_request() -> T
 #[tokio::test]
 async fn an_intake_that_never_succeeded_still_ends_in_one_retryable_failed_fact() -> TestResult {
     let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
+    let harness = Harness::start_fast().await?;
     fail_first_writes(&harness, "insert", "true", 5).await?;
     let stub = HttpStub::start(vec![(readme_path(), 200, README.to_vec())]).await?;
     let config = publish_request(&harness, &stub).await?;
@@ -304,7 +297,6 @@ async fn an_intake_that_never_succeeded_still_ends_in_one_retryable_failed_fact(
     harness.settled(IngestFamily::Repository, 5).await?;
     assert_eq!(request_state(&harness).await?, "failed");
     assert!(harness.facts_on(COMPLETED_SUBJECT).await?.is_empty());
-    assert_eq!(harness.rows_in(&["ingest_failures"]).await?, 0);
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())
@@ -312,12 +304,12 @@ async fn an_intake_that_never_succeeded_still_ends_in_one_retryable_failed_fact(
 
 /// A database failure while settling the request on the terminal delivery must not end the
 /// delivery without a fact: the settlement is redelivered past the delivery budget until the
-/// failed fact is committed, and no `ingest_failures` row replaces it.
+/// failed fact is committed.
 #[tokio::test]
 async fn a_settlement_failure_on_the_fifth_delivery_is_redelivered_until_the_failed_fact()
 -> TestResult {
     let _serial = BROKER.lock().await;
-    let harness = Harness::start().await?;
+    let harness = Harness::start_fast().await?;
     fail_first_writes(&harness, "update", "new.state = 'failed'", 1).await?;
     let stub = HttpStub::start(vec![(readme_path(), 503, Vec::new())]).await?;
     let config = publish_request(&harness, &stub).await?;
@@ -336,11 +328,6 @@ async fn a_settlement_failure_on_the_fifth_delivery_is_redelivered_until_the_fai
     assert!(payload.retryable);
     harness.settled(IngestFamily::Repository, 6).await?;
     assert_eq!(request_state(&harness).await?, "failed");
-    assert_eq!(
-        harness.rows_in(&["ingest_failures"]).await?,
-        0,
-        "the request settled through its own terminal fact"
-    );
     worker.stop().await?;
     harness.database.cleanup().await?;
     Ok(())

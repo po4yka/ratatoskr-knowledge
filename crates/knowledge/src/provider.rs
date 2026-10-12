@@ -45,6 +45,18 @@ pub enum ProviderError {
     Internal,
 }
 
+impl ProviderError {
+    /// Whether a later delivery of the same input can never succeed after this failure.
+    ///
+    /// Only a transient failure is worth another call. Every other failure is recorded on the run
+    /// as a permanent one, and a run that failed permanently reports that failure again on every
+    /// later drive instead of calling the provider.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        !matches!(self, Self::Transient)
+    }
+}
+
 /// Closed transport-failure vocabulary safe for durable attempt records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

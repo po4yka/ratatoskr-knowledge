@@ -80,6 +80,7 @@ async fn broker_outage_flips_readiness_false_and_recovers() -> TestResult {
         lifecycle.clone(),
         receiver,
         Arc::new(ScriptedProvider::new([])),
+        Arc::new(Metrics::new()),
     );
     let app = admin_router(lifecycle.clone(), Arc::new(Metrics::new()));
     lifecycle.mark_listener_bound(Listener::Operator);

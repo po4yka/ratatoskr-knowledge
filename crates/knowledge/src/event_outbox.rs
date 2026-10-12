@@ -133,6 +133,17 @@ pub enum EventOutboxError {
     InvalidRow,
 }
 
+impl EventOutboxError {
+    /// Whether the same fact can never be queued, however often it is retried.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        match self {
+            Self::InvalidRow => true,
+            Self::Persistence(error) => error.is_permanent(),
+        }
+    }
+}
+
 /// Outbox over Knowledge's owned storage.
 #[derive(Debug)]
 pub struct EventOutbox<'a> {
