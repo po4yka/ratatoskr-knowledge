@@ -98,7 +98,7 @@ pub use channel_digest_recap_store::{
 pub use chunking::{CHUNKING_VERSION, Chunk, ChunkPolicy, ChunkPolicyError, chunk_article};
 pub use config::{
     AdminConfig, CHANNEL_RECAP_ACK_WAIT_SECONDS, ChannelRecapConfig, ChannelRecapProviderMode,
-    Config, ConfigError, Limits, StorageConfig,
+    Config, ConfigError, Limits, MIN_SNAPSHOT_BLOB_BYTES, StorageConfig,
 };
 pub use config_api::ApiConfig;
 pub use config_ingest::{INGEST_ACK_WAIT_SECONDS, IngestConfig, IngestProviderMode};

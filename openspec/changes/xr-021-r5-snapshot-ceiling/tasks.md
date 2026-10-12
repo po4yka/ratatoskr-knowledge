@@ -5,8 +5,8 @@
 
 ## 1. Configuration (R5-03 rule 2)
 
-- [ ] 1.1 RED: add `crates/knowledge/tests/config.rs::blob_bytes_below_the_snapshot_floor_or_the_response_cap_is_refused` (8388607 refused with a message naming both keys, 8388608 accepted, a `blob_bytes` below `raw_response_bytes` refused, the default validates); run it against a validation stub and confirm 8388607 is accepted.
-- [ ] 1.2 GREEN: add `MIN_SNAPSHOT_BLOB_BYTES` and the two rules beside the other `Limits` validation, and document the two keys in `README.md`.
+- [x] 1.1 RED: add `crates/knowledge/tests/config.rs::blob_bytes_below_the_snapshot_floor_or_the_response_cap_is_refused` (8388607 refused with a message naming both keys, 8388608 accepted, a `blob_bytes` below `raw_response_bytes` refused, the default validates); run it against a validation stub and confirm 8388607 is accepted.
+- [x] 1.2 GREEN: add `MIN_SNAPSHOT_BLOB_BYTES` and the two rules beside the other `Limits` validation, and document the two keys in `README.md`.
 
 ## 2. The store takes blob_bytes only (R5-03 rule 1)
 

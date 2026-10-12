@@ -673,3 +673,43 @@ fn the_default_ack_waits_are_accepted() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(defaults.channel_recap.ack_wait_seconds, 30);
     Ok(())
 }
+
+#[test]
+fn blob_bytes_below_the_snapshot_floor_or_the_response_cap_is_refused() {
+    // XR-021 CONTRACTS.md R5-03 rule 2: the floor is the broker payload, the largest fact any
+    // producer can publish.
+    let below_floor = Config::from_environment([("RATATOSKR__LIMITS__BLOB_BYTES", "8388607")])
+        .expect_err("a ceiling below the broker payload must be refused")
+        .to_string();
+    assert!(below_floor.contains("RATATOSKR__LIMITS__BLOB_BYTES"));
+    assert!(below_floor.contains("RATATOSKR__LIMITS__RAW_RESPONSE_BYTES"));
+
+    let at_floor = Config::from_environment([("RATATOSKR__LIMITS__BLOB_BYTES", "8388608")])
+        .expect("the floor itself is accepted");
+    assert_eq!(at_floor.limits.blob_bytes, 8_388_608);
+
+    // The order of the entries must not matter.
+    let below_cap = Config::from_environment([
+        ("RATATOSKR__LIMITS__RAW_RESPONSE_BYTES", "9000000"),
+        ("RATATOSKR__LIMITS__BLOB_BYTES", "8388608"),
+    ])
+    .expect_err("a ceiling below the provider response cap must be refused")
+    .to_string();
+    assert!(below_cap.contains("RATATOSKR__LIMITS__BLOB_BYTES"));
+    assert!(below_cap.contains("RATATOSKR__LIMITS__RAW_RESPONSE_BYTES"));
+
+    let wide_cap = Config::from_environment([
+        ("RATATOSKR__LIMITS__BLOB_BYTES", "9000000"),
+        ("RATATOSKR__LIMITS__RAW_RESPONSE_BYTES", "9000000"),
+    ])
+    .expect("equal limits above the floor are accepted");
+    assert_eq!(wide_cap.limits.raw_response_bytes, 9_000_000);
+
+    let default = Config::default();
+    assert!(default.limits.blob_bytes >= 8_388_608);
+    assert!(
+        default.limits.blob_bytes
+            >= u64::try_from(default.limits.raw_response_bytes).unwrap_or(u64::MAX)
+    );
+    Config::from_environment(std::iter::empty::<(&str, &str)>()).expect("the default validates");
+}

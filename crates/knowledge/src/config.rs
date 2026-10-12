@@ -265,6 +265,7 @@ impl Config {
         validate_listeners(&config)?;
         validate_channel_recap(&config)?;
         validate_ingest(&config)?;
+        validate_blob_ceiling(&config.limits)?;
         if config.limits.chunk_overlap_characters >= config.limits.chunk_target_characters {
             return Err(ConfigError::new(
                 "RATATOSKR__LIMITS__CHUNK_OVERLAP_CHARACTERS",
@@ -274,6 +275,23 @@ impl Config {
 
         Ok(config)
     }
+}
+
+/// Smallest accepted `blob_bytes`: the broker `max_payload`, the largest fact any producer can
+/// publish (XR-021 CONTRACTS.md R5-03 rule 2).
+pub const MIN_SNAPSHOT_BLOB_BYTES: u64 = 8_388_608;
+
+/// The blob store holds source snapshots as large as the largest producer fact, so its ceiling
+/// may be neither below that fact nor below one provider response.
+fn validate_blob_ceiling(limits: &Limits) -> Result<(), ConfigError> {
+    let response_cap = u64::try_from(limits.raw_response_bytes).unwrap_or(u64::MAX);
+    if limits.blob_bytes < MIN_SNAPSHOT_BLOB_BYTES || limits.blob_bytes < response_cap {
+        return Err(ConfigError::new(
+            "RATATOSKR__LIMITS__BLOB_BYTES",
+            "must be at least 8388608 and at least RATATOSKR__LIMITS__RAW_RESPONSE_BYTES",
+        ));
+    }
+    Ok(())
 }
 
 impl ConfigError {

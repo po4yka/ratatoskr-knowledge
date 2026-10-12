@@ -195,6 +195,8 @@ RATATOSKR__INGEST__GITHUB_README_BASE_URL
 RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET
 ```
 
+`RATATOSKR__LIMITS__BLOB_BYTES` is the snapshot and blob ceiling: the largest object the blob store accepts, which holds the whole source snapshot of an AI-archive conversation or project (a fact of up to the 8 MiB broker payload, XR-021 CONTRACTS.md R5-03). It must be at least 8388608 and at least `RATATOSKR__LIMITS__RAW_RESPONSE_BYTES`, and the default is 16 MiB. `RATATOSKR__LIMITS__RAW_RESPONSE_BYTES` is only the cap on one provider HTTP response, which the provider adapter enforces before anything is stored. Startup fails when either rule is broken.
+
 Unknown or invalid `RATATOSKR__` keys stop startup without printing their values. Without
 `RATATOSKR__PROVIDER__OPENROUTER__API_KEY` the process stays offline and the real adapter cannot
 make a request; without `RATATOSKR__PROVIDER__EMBEDDINGS__API_KEY` the process serves lexical
