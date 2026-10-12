@@ -6,6 +6,7 @@ Round 5 of changeset XR-021 (CONTRACTS.md R5-03) verified that `open_storage` an
 
 - The blob store is built with `limits.blob_bytes` only, through one helper that `open_storage` and `connect_job_stack` both call. `limits.raw_response_bytes` stays the cap on one provider HTTP response, which the provider adapter already enforces before anything is stored.
 - Configuration validation refuses `RATATOSKR__LIMITS__BLOB_BYTES` below `MIN_SNAPSHOT_BLOB_BYTES = 8_388_608` (the broker `max_payload`) and below `RATATOSKR__LIMITS__RAW_RESPONSE_BYTES`; the message names both limits. The default stays 16 MiB.
+- The search projection indexes at most 300000 bytes of title, lead and body (found while verifying the 7.9 million byte conversation: PostgreSQL refuses a `tsvector` of 1 MiB or more).
 - `README.md` documents `RATATOSKR__LIMITS__BLOB_BYTES` as the snapshot and blob ceiling and `RATATOSKR__LIMITS__RAW_RESPONSE_BYTES` as the provider response cap.
 - Deliberate break: a deployment that set `RATATOSKR__LIMITS__BLOB_BYTES` below 8 MiB no longer starts.
 

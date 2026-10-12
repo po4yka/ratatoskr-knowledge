@@ -83,7 +83,10 @@ fn free_port() -> Result<u16, std::io::Error> {
 }
 
 /// An authorization-enabled broker with the Knowledge identity, its topology and an admin handle.
-struct Authorized {
+///
+/// The broker carries the deployed `max_payload` of 8 MiB (XR-021 CONTRACTS.md R5-03), the largest
+/// fact a producer can publish; the shared test broker keeps the server default of 1 MiB.
+pub(crate) struct Authorized {
     _broker: Broker,
     _directory: TemporaryBlobRoot,
     url: String,
@@ -93,7 +96,7 @@ struct Authorized {
 }
 
 impl Authorized {
-    async fn boot() -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) async fn boot() -> Result<Self, Box<dyn std::error::Error>> {
         let admin_key = nkeys::KeyPair::new_user();
         let knowledge = nkeys::KeyPair::new_user();
         let directory = TemporaryBlobRoot::create().await?;
@@ -128,7 +131,7 @@ impl Authorized {
         })
     }
 
-    fn config(&self, digest_source: std::net::SocketAddr) -> Config {
+    pub(crate) fn config(&self, digest_source: std::net::SocketAddr) -> Config {
         let mut config = Config::default();
         config.ingest.enabled = true;
         config.ingest.bus_endpoint.clone_from(&self.url);
@@ -148,7 +151,7 @@ impl Authorized {
     }
 
     /// Unacknowledged, undelivered and delivered counts of one durable.
-    async fn durable(
+    pub(crate) async fn durable(
         &self,
         stream_name: &str,
         durable: &str,
@@ -166,7 +169,10 @@ impl Authorized {
     }
 
     /// How many messages `subject` holds on the events stream.
-    async fn messages_on(&self, subject: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    pub(crate) async fn messages_on(
+        &self,
+        subject: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         let events = self.admin.get_stream(EVENTS_STREAM).await?;
         let mut consumer = events
             .create_consumer(pull::Config {
@@ -179,7 +185,7 @@ impl Authorized {
         Ok(usize::try_from(consumer.info().await?.num_pending)?)
     }
 
-    async fn publish(&self, subject: &str, bytes: Vec<u8>) -> TestResult {
+    pub(crate) async fn publish(&self, subject: &str, bytes: Vec<u8>) -> TestResult {
         self.admin
             .publish(subject.to_owned(), bytes.into())
             .await?
@@ -199,6 +205,7 @@ fn start_broker(
         &configuration,
         format!(
             "port: {port}\nhost: 127.0.0.1\nserver_name: ratatoskr_test\n\
+             max_payload: 8MB\n\
              jetstream {{ store_dir: \"{}\" }}\n\
              authorization {{\n  users: [\n    {{ nkey: {admin_public}, permissions: {{ publish: \">\", subscribe: \">\" }} }},\n{stanza}\n  ]\n}}\n",
             directory.join("store").display()

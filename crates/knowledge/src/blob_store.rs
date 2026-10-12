@@ -54,6 +54,19 @@ impl BlobStore {
         }
     }
 
+    /// Creates the store a deployment runs with: rooted at the configured blob root and bounded
+    /// by `limits.blob_bytes` alone (XR-021 CONTRACTS.md R5-03 rule 1).
+    ///
+    /// The store also holds Knowledge's own source snapshots, which can be as large as the
+    /// largest fact a producer publishes, so `limits.raw_response_bytes` does not bound it: that
+    /// limit caps one provider HTTP response, which the provider adapter enforces before a
+    /// response reaches the store. Both entry points of the service (`serve` and the one-shot
+    /// jobs) call this one function, so the ceiling cannot differ between them.
+    #[must_use]
+    pub fn for_config(config: &crate::Config) -> Self {
+        Self::new(&config.storage.blob_root, config.limits.blob_bytes)
+    }
+
     /// Stores raw provider bytes before validation.
     ///
     /// # Errors

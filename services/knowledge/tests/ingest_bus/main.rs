@@ -12,6 +12,7 @@ mod log_capture;
 mod authorized;
 mod fixtures;
 mod harness;
+mod large_conversation;
 mod lifecycle;
 mod recap_source;
 mod redelivery;

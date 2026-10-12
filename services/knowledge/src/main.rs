@@ -130,13 +130,7 @@ async fn open_storage(
     config: &Config,
 ) -> Result<(BlobStore, Database), Box<dyn std::error::Error>> {
     tokio::fs::create_dir_all(&config.storage.blob_root).await?;
-    let blobs = BlobStore::new(
-        &config.storage.blob_root,
-        config
-            .limits
-            .blob_bytes
-            .min(u64::try_from(config.limits.raw_response_bytes)?),
-    );
+    let blobs = BlobStore::for_config(config);
     let database = Database::connect(
         &config.storage.database_url,
         config.limits.database_connections,
@@ -359,13 +353,7 @@ async fn connect_job_stack(
     )
     .await?;
     database.apply_schema().await?;
-    let blobs = BlobStore::new(
-        &config.storage.blob_root,
-        config
-            .limits
-            .blob_bytes
-            .min(u64::try_from(config.limits.raw_response_bytes)?),
-    );
+    let blobs = BlobStore::for_config(config);
     Ok((database, blobs))
 }
 

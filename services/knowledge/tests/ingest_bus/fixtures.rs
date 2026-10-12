@@ -387,3 +387,45 @@ pub(crate) fn recap_command() -> Result<RecapCommand, Box<dyn std::error::Error>
         manifest,
     })
 }
+
+/// A `conversation.added` payload whose conversation has `messages` messages of `part_bytes`
+/// bytes of distinct words each, so its serialised size is about `messages * part_bytes`.
+pub(crate) fn large_conversation_payload(
+    messages: usize,
+    part_bytes: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    use std::fmt::Write as _;
+    let template: serde_json::Value = serde_json::from_str(CONTRACT_CONVERSATION)?;
+    let mut counter = 0_u64;
+    let mut message_values = Vec::new();
+    for index in 0..messages {
+        let mut text = String::with_capacity(part_bytes + 16);
+        while text.len() < part_bytes {
+            counter += 1;
+            let _ignored = write!(text, "w{counter:x} ");
+        }
+        text.truncate(part_bytes);
+        message_values.push(serde_json::json!({
+            "external_message_id": format!("msg-{:04}", index + 1),
+            "author_role": if index % 2 == 0 { "user" } else { "assistant" },
+            "parts": [{"part_kind": "text", "text": text}],
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        }));
+    }
+    let conversation = ratatoskr_knowledge::test_support::archive::conversation_from_json(
+        &serde_json::json!({
+            "ai_conversation_id": "018f0000-0000-7000-8000-000000000403",
+            "provider": "chatgpt",
+            "owner": OWNER,
+            "title": "A very long conversation",
+            "messages": message_values,
+            "content_digest": {"algorithm": "sha256", "hex": "0".repeat(64)},
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        })
+        .to_string(),
+    )?;
+    Ok(serde_json::json!({
+        "import_provenance": template.get("import_provenance").cloned().ok_or("no provenance")?,
+        "conversation": serde_json::to_value(&conversation)?,
+    }))
+}

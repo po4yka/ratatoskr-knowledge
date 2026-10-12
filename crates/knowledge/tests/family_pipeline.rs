@@ -21,12 +21,13 @@ use ratatoskr_identifiers::{
     BlobOwner, BlobRef, ContentDigest, DigestAlgorithm, DigestHex, EntityRef, Extensions,
     MediaType, RepositoryAnalysisRequestId, RepositoryId, TenantRef, UserId,
 };
-use ratatoskr_knowledge::test_support::TestDatabase;
 use ratatoskr_knowledge::test_support::archive::conversation_from_json;
+use ratatoskr_knowledge::test_support::{FakeReply, FakeTransport, TestDatabase};
 use ratatoskr_knowledge::{
-    BlobStore, BudgetLedger, BudgetLimits, ControlledProvider, EventCause, FamilyPipeline,
-    FamilyPipelineError, ProviderError, ProviderResponse, ProviderUsage, RateLimiter,
-    RepositoryReadmeError, RepositoryReadmeResolver, ScriptedProvider, SearchQuery, SourceInbox,
+    BlobError, BlobStore, BudgetLedger, BudgetLimits, Config, ControlledProvider, EventCause,
+    FamilyPipeline, FamilyPipelineError, OpenRouterProvider, OpenRouterSettings, ProviderError,
+    ProviderResponse, ProviderSecret, ProviderUsage, RateLimiter, RepositoryReadmeError,
+    RepositoryReadmeResolver, RetryPolicy, ScriptedProvider, SearchQuery, SourceInbox,
     SpendControls, TokenPrices, search_page,
 };
 use sha2::{Digest as _, Sha256};
@@ -408,6 +409,275 @@ async fn one_shared_ledger_blocks_archive_after_social_usage()
         FamilyPipelineError::Provider(ProviderError::BudgetExhausted)
     ));
     assert_eq!(repository_inner.call_count()?, 0);
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A conversation of `messages` messages whose text parts are `part_bytes` long and made of
+/// distinct words, so the search projection is as wide as a real export.
+fn large_conversation(
+    messages: usize,
+    part_bytes: usize,
+) -> Result<ratatoskr_ai_archive_contracts::AiConversation, Box<dyn std::error::Error>> {
+    use std::fmt::Write as _;
+    let mut counter = 0_u64;
+    let mut messages_json = Vec::new();
+    for index in 0..messages {
+        let mut text = String::with_capacity(part_bytes + 16);
+        while text.len() < part_bytes {
+            counter += 1;
+            let _ignored = write!(text, "w{counter:x} ");
+        }
+        text.truncate(part_bytes);
+        messages_json.push(serde_json::json!({
+            "external_message_id": format!("msg-{:04}", index + 1),
+            "author_role": if index % 2 == 0 { "user" } else { "assistant" },
+            "parts": [{"part_kind": "text", "text": text}],
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        }));
+    }
+    conversation_from_json(
+        &serde_json::json!({
+            "ai_conversation_id": "018f0000-0000-7000-8000-000000000403",
+            "provider": "chatgpt",
+            "owner": "user:018f0000-0000-7000-8000-000000000005",
+            "title": "A very long conversation",
+            "messages": messages_json,
+            "content_digest": {"algorithm": "sha256", "hex": "0".repeat(64)},
+            "parser_name": "chatgpt_export", "parser_version": "2026.08.1"
+        })
+        .to_string(),
+    )
+}
+
+/// Stores, analyses and searches one conversation through the store the service builds from the
+/// default configuration, whose provider response cap is 1 MiB (XR-021 CONTRACTS.md R5-03).
+async fn analyse_large_conversation(
+    label: &str,
+    messages: usize,
+    part_bytes: usize,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let conversation = large_conversation(messages, part_bytes)?;
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
+    let inbox = SourceInbox::new(&database.database);
+    let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000821")?;
+    inbox
+        .accept_ai_conversation(
+            event_id,
+            "ai_archive.conversation.added.v1",
+            &provenance,
+            &conversation,
+        )
+        .await?;
+    let mut config = Config::default();
+    assert_eq!(config.limits.raw_response_bytes, 1_048_576);
+    config.storage.blob_root = temp_root(label);
+    let store = BlobStore::for_config(&config);
+    let provider = ScriptedProvider::new([Ok(response(
+        r#"{"summary":"A long conversation.","summary_message_ids":["msg-0001"],"decisions":[]}"#,
+    ))]);
+    let execution = FamilyPipeline::new(
+        &database.database,
+        &provider,
+        &store,
+        Duration::from_secs(5),
+    )
+    .execute_archive_event(&inbox, event_id)
+    .await;
+    assert!(
+        execution.is_ok(),
+        "a snapshot of {messages} x {part_bytes} bytes must be analysed: {execution:?}"
+    );
+    assert_eq!(search_document_count(&database).await?, 1);
+    let stored: i64 = sqlx::query_scalar(
+        "select (source_blob->>'length_bytes')::bigint from knowledge.source_refs \
+         where owner_context = 'ratatoskr-knowledge'",
+    )
+    .fetch_one(database.database.pool())
+    .await?;
+    let page = search_page(
+        database.database.pool(),
+        &SearchQuery::new(conversation.owner.to_string(), "w1", 10, 0)?,
+    )
+    .await?;
+    assert_eq!(page.results.len(), 1, "the conversation is searchable");
+    database.cleanup().await?;
+    Ok(u64::try_from(stored)?)
+}
+
+#[tokio::test]
+async fn a_two_mebibyte_conversation_is_stored_analysed_and_searchable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stored = analyse_large_conversation("two-mib", 36, 60_000).await?;
+    assert!(stored > 2 * 1_048_576, "{stored}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_conversation_of_7_9_million_bytes_is_stored_analysed_and_searchable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stored = analyse_large_conversation("seven-nine", 132, 59_800).await?;
+    assert!(stored > 7_800_000 && stored <= 8_388_608, "{stored}");
+    Ok(())
+}
+
+/// The cap on the indexed text is what keeps a long conversation from failing with `PostgreSQL`'s
+/// "string is too long for tsvector" error, so it is measured here against the worst case: the
+/// widest vector per input byte that English text can make is a run of distinct short words.
+#[tokio::test]
+async fn the_search_text_cap_keeps_the_worst_case_vector_under_the_postgres_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    // Every two-, three- and four-letter word, shortest first: the shorter the words, the wider
+    // the vector per input byte.
+    let cap = ratatoskr_knowledge::search::SEARCH_TEXT_MAX_BYTES;
+    let mut text = String::new();
+    'fill: for length in 2_u32..=4 {
+        for index in 0..26_u32.pow(length) {
+            let word: String = (0..length)
+                .map(|place| {
+                    char::from(b'a' + u8::try_from(index / 26_u32.pow(place) % 26).unwrap_or(0))
+                })
+                .collect();
+            text.push_str(&word);
+            text.push(' ');
+            if text.len() >= cap {
+                break 'fill;
+            }
+        }
+    }
+    text.truncate(ratatoskr_knowledge::search::SEARCH_TEXT_MAX_BYTES);
+    let size: i32 = sqlx::query_scalar("select pg_column_size(to_tsvector('english', $1::text))")
+        .bind(&text)
+        .fetch_one(database.database.pool())
+        .await?;
+    assert!(
+        size < 1_000_000,
+        "the vector of the widest capped text is {size} bytes"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_snapshot_above_blob_bytes_is_rejected_with_a_class_and_no_partial_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let conversation = large_conversation(34, 60_000)?;
+    let provenance: AiArchiveProvenance = serde_json::from_str(ARCHIVE_PROVENANCE)?;
+    let inbox = SourceInbox::new(&database.database);
+    let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000822")?;
+    inbox
+        .accept_ai_conversation(
+            event_id,
+            "ai_archive.conversation.added.v1",
+            &provenance,
+            &conversation,
+        )
+        .await?;
+    let mut config = Config::default();
+    config.storage.blob_root = temp_root("above-ceiling");
+    config.limits.blob_bytes = 1_048_576;
+    let store = BlobStore::for_config(&config);
+    let provider = ScriptedProvider::new([]);
+    let failure = FamilyPipeline::new(
+        &database.database,
+        &provider,
+        &store,
+        Duration::from_secs(5),
+    )
+    .execute_archive_event(&inbox, event_id)
+    .await
+    .expect_err("a snapshot above the ceiling must be rejected");
+    assert!(
+        matches!(failure, FamilyPipelineError::Blob(BlobError::TooLarge)),
+        "{failure:?}"
+    );
+    assert!(failure.is_permanent());
+    assert_eq!(provider.call_count()?, 0);
+    for table in ["source_refs", "analysis_runs", "search_documents"] {
+        let rows: i64 = sqlx::query_scalar(&format!("select count(*) from knowledge.{table}"))
+            .fetch_one(database.database.pool())
+            .await?;
+        assert_eq!(rows, 0, "{table} must hold no partial row");
+    }
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R5-03 rule 1: the blob store is no longer capped at `raw_response_bytes`,
+/// so the cap on a provider response must hold in the adapter. A response above it is cut while
+/// it is read, before anything is stored, whatever the store would have accepted.
+#[tokio::test]
+async fn a_provider_response_above_the_response_cap_is_cut_before_it_is_stored()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let snapshot: ratatoskr_social_contracts::SocialSourceSnapshot = serde_json::from_str(SOCIAL)?;
+    let inbox = SourceInbox::new(&database.database);
+    let event_id = uuid::Uuid::parse_str("018f0000-0000-7000-8000-000000000823")?;
+    inbox
+        .accept_social(event_id, "social.source.captured.v1", &snapshot)
+        .await?;
+    let transport = FakeTransport::start(vec![FakeReply::oversized(200_000)]).await?;
+    let provider = OpenRouterProvider::new(OpenRouterSettings {
+        base_url: format!("http://{}/api/v1", transport.local_addr()),
+        model: "openai/gpt-oss-20b".to_owned(),
+        credential: ProviderSecret::new("sk-or-v1-LEAKME".to_owned()),
+        max_output_tokens: 2_048,
+        response_byte_cap: 4_096,
+        call_deadline: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(2),
+        retry: RetryPolicy::new(1, 0, 0),
+    })?;
+    let root = temp_root("response-cap");
+    let mut config = Config::default();
+    config.storage.blob_root.clone_from(&root);
+    let store = BlobStore::for_config(&config);
+
+    let failure = FamilyPipeline::new(
+        &database.database,
+        &provider,
+        &store,
+        Duration::from_secs(2),
+    )
+    .execute_social_event(&inbox, event_id)
+    .await
+    .expect_err("a response above the cap must fail");
+
+    assert!(
+        matches!(
+            &failure,
+            FamilyPipelineError::Provider(ProviderError::Permanent)
+        ),
+        "{failure:?}"
+    );
+    let stored_raw_responses: i64 = sqlx::query_scalar(
+        "select count(*) from knowledge.analysis_attempts where raw_response is not null",
+    )
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(stored_raw_responses, 0, "no raw response was stored");
+    let mut largest = 0_u64;
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                largest = largest.max(metadata.len());
+            }
+        }
+    }
+    assert!(
+        largest <= 4_096,
+        "a stored file of {largest} bytes is above the provider response cap"
+    );
     database.cleanup().await?;
     Ok(())
 }

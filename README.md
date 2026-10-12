@@ -34,7 +34,9 @@ analysis, and persists the evidence and result.
 - structural, typed, citation, retry, repair, and replay checks;
 - one transaction for an accepted result and the `persisted` transition;
 - a tenant-scoped full-text projection (`knowledge.search_documents`) written inside that
-  transaction with a latest-wins output guard;
+  transaction with a latest-wins output guard; one projection indexes at most 300000 bytes of
+  title, lead and body together (`SEARCH_TEXT_MAX_BYTES`), because PostgreSQL refuses a `tsvector`
+  of 1 MiB or more and a long AI-archive conversation would otherwise fail its whole analysis;
 - ranked retrieval over the projection with bounded snippets, deterministic ordering, and strict
   page bounds validated before any database work;
 - deterministic versioned chunking (`article-chunks.v1`) with configurable target size and overlap;

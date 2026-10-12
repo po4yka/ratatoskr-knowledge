@@ -33,3 +33,12 @@ The blob store SHALL be bounded by `RATATOSKR__LIMITS__BLOB_BYTES` alone, and `R
 
 - **WHEN** a provider answers with more than `raw_response_bytes`
 - **THEN** the adapter cuts the response before it is stored
+
+### Requirement: A search projection never exceeds the full-text vector limit
+
+A search document SHALL index at most 300000 bytes of title, lead and body together, cut at a character boundary, so that a conversation as large as the largest producer fact can be analysed and searched.
+
+#### Scenario: The widest capped text fits
+
+- **WHEN** the widest text English can make (every two-, three- and four-letter word) is cut at the cap and converted to a `tsvector`
+- **THEN** the vector is smaller than 1000000 bytes
