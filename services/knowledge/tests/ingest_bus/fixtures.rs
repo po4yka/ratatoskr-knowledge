@@ -467,8 +467,10 @@ pub(crate) fn presented_conversation(
         .get("import_provenance")
         .cloned()
         .ok_or("no provenance")?;
-    provenance["ai_archive_id"] = serde_json::json!(archive_id);
-    provenance["imported_at"] = serde_json::json!(imported_at);
+    if let Some(object) = provenance.as_object_mut() {
+        object.insert("ai_archive_id".to_owned(), serde_json::json!(archive_id));
+        object.insert("imported_at".to_owned(), serde_json::json!(imported_at));
+    }
     Ok(serde_json::json!({
         "import_provenance": provenance,
         "conversation": serde_json::to_value(&conversation)?,
@@ -481,8 +483,13 @@ pub(crate) fn archive_tombstone(
     observed_at: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut tombstone: serde_json::Value = serde_json::from_str(CONTRACT_TOMBSTONE)?;
-    tombstone["ai_archive_id"] = serde_json::json!(archive_id);
-    tombstone["subject"] = serde_json::json!({"subject_kind": "archive"});
-    tombstone["observed_at"] = serde_json::json!(observed_at);
+    if let Some(object) = tombstone.as_object_mut() {
+        object.insert("ai_archive_id".to_owned(), serde_json::json!(archive_id));
+        object.insert(
+            "subject".to_owned(),
+            serde_json::json!({"subject_kind": "archive"}),
+        );
+        object.insert("observed_at".to_owned(), serde_json::json!(observed_at));
+    }
     Ok(tombstone)
 }

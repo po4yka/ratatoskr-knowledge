@@ -165,7 +165,11 @@ async fn ai_archive_conversation_is_indexed_and_tombstone_removes_it() -> TestRe
     Ok(())
 }
 
-/// XR-021 CONTRACTS.md R5-08 rule 2, replaying the survivor sequence of ChatGPT and Claude after
+const RETAINED: &str = "018f0000-0000-7000-8000-000000000e01";
+const DELETED: &str = "018f0000-0000-7000-8000-000000000e02";
+const IMPORTED: &str = "2026-08-18T11:30:00Z";
+
+/// XR-021 CONTRACTS.md R5-08 rule 2, replaying the survivor sequence of `ChatGPT` and `Claude` after
 /// a privacy deletion. The retained archive presented the conversation at one instant and its
 /// fact carries a part (`zanzibar`) that only the deleted export wrote. The deletion tombstones
 /// the deleted archive, and the retained archive re-announces the conversation without the part
@@ -181,9 +185,6 @@ async fn a_survivor_re_announcement_under_the_same_instant_removes_the_deleted_p
         Ok(response(ARCHIVE_ANALYSIS)),
         Ok(response(ARCHIVE_ANALYSIS)),
     ])));
-    const RETAINED: &str = "018f0000-0000-7000-8000-000000000e01";
-    const DELETED: &str = "018f0000-0000-7000-8000-000000000e02";
-    const IMPORTED: &str = "2026-08-18T11:30:00Z";
     let search = |term: &'static str| {
         let harness = &harness;
         async move {

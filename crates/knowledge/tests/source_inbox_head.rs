@@ -3,7 +3,7 @@
 //!
 //! A survivor re-announcement after a privacy deletion carries the original `imported_at` of the
 //! retained archive, the same instant as the fact Knowledge already holds, so only the event id
-//! (a UUIDv7, time ordered) can say which of the two is newer.
+//! (a `UUIDv7`, time ordered) can say which of the two is newer.
 
 use std::time::Duration;
 
@@ -43,9 +43,17 @@ fn snapshot_with_text(
     text: &str,
 ) -> Result<SocialSourceSnapshot, Box<dyn std::error::Error>> {
     let mut value: serde_json::Value = serde_json::from_str(SOCIAL)?;
-    value["text"] = serde_json::json!(text);
-    value["captured_at"] = serde_json::json!(captured_at);
-    value["content_digest"]["hex"] = serde_json::json!(digest_digit.to_string().repeat(64));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("text".to_owned(), serde_json::json!(text));
+        object.insert("captured_at".to_owned(), serde_json::json!(captured_at));
+        object.insert(
+            "content_digest".to_owned(),
+            serde_json::json!({
+                "algorithm": "sha256",
+                "hex": digest_digit.to_string().repeat(64),
+            }),
+        );
+    }
     Ok(serde_json::from_value(value)?)
 }
 
