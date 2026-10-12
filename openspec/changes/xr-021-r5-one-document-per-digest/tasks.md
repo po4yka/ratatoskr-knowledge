@@ -1,0 +1,4 @@
+## 1. One source row per tenant and digest (R5-02 rule 4)
+
+- [ ] 1.1 RED: add `crates/knowledge/tests/document_intake.rs` cases on real PostgreSQL: equal digest and equal document id makes one `source_refs` row, one run and one `search_documents` row with the second `AlreadyAnalysed`; equal digest and different document ids make one of each and the document id stays the first; the same digest under two tenants keeps two rows; the index `source_refs_document_digest_key` exists and a direct second insert with another document id resolves to the first row; two archive snapshots with equal digest and different `ai_archive_id` stay two rows. Run them and confirm the second envelope registers a second row.
+- [ ] 1.2 GREEN: resolve by `(tenant, 'ratatoskr-extractor', digest)` in `DocumentIntake::accept`, add the partial unique index to `schema.sql` in place, resolve a conflict on either constraint in `insert_source`, and update `docs/DATA_MODEL.md`.
