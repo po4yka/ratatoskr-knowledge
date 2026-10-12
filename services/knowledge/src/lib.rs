@@ -9,6 +9,7 @@ mod bus;
 mod channel_recap;
 mod channel_recap_delivery;
 mod ingest;
+mod ingest_deletion;
 mod ingest_handlers;
 mod ingest_publish;
 mod metrics;

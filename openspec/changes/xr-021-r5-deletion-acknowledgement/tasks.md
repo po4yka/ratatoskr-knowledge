@@ -5,9 +5,9 @@
 
 ## 2. Handlers (R5-11 rule 2)
 
-- [ ] 2.1 RED: add `services/knowledge/tests/ingest_bus/tombstone.rs` cases (real broker, PostgreSQL, deployed ACL): an applied tombstone and an applied social removal produce exactly one acknowledgement after the blobs are erased, none while the erasure fails; a redelivery after the acknowledgement was published produces a second publication after the re-arm window and none inside it; a foreign-subject tombstone is acknowledged `refused` and Termed; an undecodable message, a wrong producer and a missing tenant are Termed with no acknowledgement; a tombstone for a subject never held is `applied`. Run them and confirm no acknowledgement is published.
-- [ ] 2.2 GREEN: `SourceInboxError::ForeignSubject`, the acknowledgement enqueue after `collect_pending_blobs` in the `ai_archive` tombstone branch (admission `Tombstone` and `TombstoneDuplicate`) and in `social_removed` (including `Duplicate`), with a failure to enqueue mapped to `Outcome::Retry`.
+- [x] 2.1 RED: add `services/knowledge/tests/ingest_bus/tombstone.rs` cases (real broker, PostgreSQL, deployed ACL): an applied tombstone and an applied social removal produce exactly one acknowledgement after the blobs are erased, none while the erasure fails; a redelivery after the acknowledgement was published produces a second publication after the re-arm window and none inside it; a foreign-subject tombstone is acknowledged `refused` and Termed; an undecodable message, a wrong producer and a missing tenant are Termed with no acknowledgement; a tombstone for a subject never held is `applied`. Run them with the acknowledgement enqueue disabled and confirm seven of the eight time out waiting for the acknowledgement (the eighth, the unattributable message, already holds).
+- [x] 2.2 GREEN: `SourceInboxError::ForeignSubject`, the acknowledgement enqueue after `collect_pending_blobs` in the `ai_archive` tombstone branch (admission `Tombstone` and `TombstoneDuplicate`) and in `social_removed` (including `Duplicate`), with a failure to enqueue mapped to `Outcome::Retry`.
 
 ## 3. Documentation
 
-- [ ] 3.1 Describe the acknowledgement, the re-arm rule and the one-minute window in `README.md` and `docs/`. Documentation cannot start from a failing test.
+- [x] 3.1 Describe the acknowledgement, the re-arm rule and the one-minute window in `README.md` and `docs/`. Documentation cannot start from a failing test.

@@ -287,6 +287,26 @@ the search documents and projection inputs of its superseded revisions are remov
 transaction (the analyses themselves stay as history), so the text a deleted export wrote stops
 being served.
 
+Deletion facts are acknowledged (XR-021 CONTRACTS.md R5-11, the owner's stream policy). The events
+stream drops its oldest message at 7 days or 1 GiB and a producer marks a deletion fact published at
+the broker acknowledgement, so Knowledge answers every `ai_archive.subject.tombstoned.v1` and
+`social.source.removed.v1` with one `knowledge.deletion.acknowledged.v1` (family, owner, a subject
+reference, the acknowledged event id and an outcome; ids only, never content) through its outbox. The
+acknowledgement is queued only after the rows are deleted and `collect_pending_blobs` succeeded in the
+same handler pass, so it means the content is gone; while blob erasure fails the delivery is
+redelivered and nothing is acknowledged. A tombstone for a subject Knowledge never held is `applied`
+(nothing to delete, the tombstone is recorded), and one whose subject belongs only to another owner is
+`refused` with the refusal `foreign_subject`, terminated, and its data stays for an operator to look
+at. A message that cannot be attributed (undecodable, wrong producer, no tenant) is terminated and
+not acknowledged. The outbox row is keyed `deletion_ack:<acknowledged event id>`; a repeat of an
+applied fact re-arms the row (it is published again, under the same message id) when it was last
+published more than one minute earlier, which is how an acknowledgement the stream dropped is
+produced again when the producer re-sends. A repeat inside the minute changes nothing. The broker
+collapses a repeated message id inside the 120 second duplicate window of the events stream, so the
+re-send of a producer is what reaches it after that window. A failure to queue the acknowledgement is
+a retry, never a silent success. `deploy/nats/identity.conf` lets the Knowledge identity publish
+`evt.knowledge.deletion.acknowledged.v1`; it stays byte-equal to Platform's stanza.
+
 The provider failure classes recorded on an attempt, and what the ingest worker does with each:
 
 | HTTP status or cause | Class | Provider error | Redelivered |

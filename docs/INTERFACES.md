@@ -88,7 +88,9 @@ read-through boundary for the channel-digest service, not a public analysis API.
 - `DocumentIntake` registers an extracted document under the extractor's context with the
   extractor-owned Document IR blob as provenance, creates the run once and analyses it with the
   article pipeline.
-- `EventOutbox` is the transactional outbox of completion facts; `RepositoryAnalysisConsumer`
+- `EventOutbox` is the transactional outbox of completion facts and of the deletion acknowledgement
+  (`acknowledge_deletion` queues it, or produces it again when it was published more than the re-arm
+  window ago); `RepositoryAnalysisConsumer`
   settles a request and queues its terminal fact in the same transaction.
 - `GithubReadmeClient` resolves a GitHub README reference over loopback with a bearer, refuses
   redirects and any bytes that are not the referenced digest and length.

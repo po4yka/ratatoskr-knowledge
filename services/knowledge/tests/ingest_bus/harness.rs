@@ -16,7 +16,7 @@ use ratatoskr_knowledge_service::{
 use tokio::sync::watch;
 
 use crate::ingest_support::{
-    PLATFORM_ACK_WAIT, TestResult, config, eventually, provision_with_ack_wait,
+    PLATFORM_ACK_WAIT, TestResult, config, eventually, provision, provision_with_ack_wait,
 };
 
 /// A redelivery schedule that fits eight deliveries of one message inside the polling deadline.
@@ -40,6 +40,7 @@ pub(crate) struct Harness {
     /// The operator counters the ingest worker records on.
     pub(crate) metrics: Arc<Metrics>,
     schedule: RedeliverySchedule,
+    ack_rearm_after: Option<Duration>,
 }
 
 impl Harness {
@@ -59,6 +60,24 @@ impl Harness {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let url = nats_url();
         let context = provision_with_ack_wait(&url, ack_wait).await?;
+        Self::around(url, context, ack_wait).await
+    }
+
+    /// Starts with the events stream's duplicate window set to `window`, so a message published
+    /// again under one `Nats-Msg-Id` after the window is stored again.
+    pub(crate) async fn start_with_duplicate_window(
+        window: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let url = nats_url();
+        let context = provision(&url, PLATFORM_ACK_WAIT, window).await?;
+        Self::around(url, context, PLATFORM_ACK_WAIT).await
+    }
+
+    async fn around(
+        url: String,
+        context: jetstream::Context,
+        ack_wait: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let root = TemporaryBlobRoot::create().await?;
         Ok(Self {
             database: TestDatabase::create().await?,
@@ -69,6 +88,7 @@ impl Harness {
             ack_wait,
             metrics: Arc::new(Metrics::new()),
             schedule: RedeliverySchedule::STANDARD,
+            ack_rearm_after: None,
         })
     }
 
@@ -76,6 +96,12 @@ impl Harness {
     /// of one message inside its deadline.
     pub(crate) const fn with_schedule(mut self, schedule: RedeliverySchedule) -> Self {
         self.schedule = schedule;
+        self
+    }
+
+    /// Produces a published deletion acknowledgement again after `window` instead of a minute.
+    pub(crate) const fn with_ack_rearm_after(mut self, window: Duration) -> Self {
+        self.ack_rearm_after = Some(window);
         self
     }
 
@@ -128,9 +154,17 @@ impl Harness {
             lifecycle,
             receiver,
             provider,
-            Redelivery::new(Arc::clone(&self.metrics), self.schedule),
+            self.redelivery(),
         );
         Worker { drain, handle }
+    }
+
+    fn redelivery(&self) -> Redelivery {
+        let redelivery = Redelivery::new(Arc::clone(&self.metrics), self.schedule);
+        match self.ack_rearm_after {
+            Some(window) => redelivery.with_ack_rearm_after(window),
+            None => redelivery,
+        }
     }
 
     pub(crate) async fn publish(

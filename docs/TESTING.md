@@ -40,6 +40,11 @@ survive a database fault of eight deliveries, a provider outage of eight deliver
 refusal of eight deliveries, a rejected credential (HTTP 401 through the real adapter) of eight deliveries and a provider outage followed by a database outage, with no termination, the fact applied once and
 `knowledge_ingest_redeliveries_total` counted; a permanent failure and an undecodable message are
 terminated at the first delivery; the repository family still settles its failed fact on the fifth.
+`deletion_ack.rs` shows that an applied tombstone and an applied social removal produce exactly one
+`knowledge.deletion.acknowledged.v1` after the blobs are erased and none while the erasure fails, that
+a redelivery after the re-arm window produces a lost acknowledgement again and one inside it does not,
+that a foreign-subject tombstone is acknowledged as refused and terminated, that an unattributable
+message is terminated without an acknowledgement, and that a subject Knowledge never held is applied.
 `ingest_outage.rs` proves that readiness follows the broker.
 
 `authorized.rs` boots a broker that enforces exactly the Knowledge stanza of

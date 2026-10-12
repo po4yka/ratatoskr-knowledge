@@ -56,6 +56,9 @@ pub enum SourceInboxError {
     /// An archive payload contradicted its immutable import provenance.
     #[error("the archive source fact contradicted its import provenance")]
     InvalidArchiveFact,
+    /// A tombstone named a subject that belongs only to another owner.
+    #[error("the tombstone names a subject that belongs to another owner")]
+    ForeignSubject,
     /// The durable deletion of derived state failed.
     #[error(transparent)]
     Deletion(#[from] DeletionError),
@@ -75,7 +78,10 @@ impl SourceInboxError {
         match self {
             Self::Persistence(error) => error.is_permanent(),
             Self::Deletion(error) => error.is_permanent(),
-            Self::Encode(_) | Self::InvalidArchiveFact | Self::Envelope(_) => true,
+            Self::Encode(_)
+            | Self::InvalidArchiveFact
+            | Self::ForeignSubject
+            | Self::Envelope(_) => true,
         }
     }
 }
@@ -389,7 +395,7 @@ impl<'a> SourceInbox<'a> {
                 .rollback()
                 .await
                 .map_err(PersistenceError::Query)?;
-            return Err(SourceInboxError::InvalidArchiveFact);
+            return Err(SourceInboxError::ForeignSubject);
         }
         let duplicate: bool = sqlx::query_scalar(
             "select exists (select 1 from knowledge.source_analysis_inbox where event_id = $1)",

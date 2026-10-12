@@ -24,8 +24,8 @@ use crate::harness::{BROKER, Harness};
 use crate::ingest_support::{TestResult, eventually};
 use crate::log_capture::capture;
 
-const ADDED_SUBJECT: &str = "evt.ai_archive.conversation.added.v1";
-const TOMBSTONE_SUBJECT: &str = "evt.ai_archive.subject.tombstoned.v1";
+pub(crate) const ADDED_SUBJECT: &str = "evt.ai_archive.conversation.added.v1";
+pub(crate) const TOMBSTONE_SUBJECT: &str = "evt.ai_archive.subject.tombstoned.v1";
 const TOMBSTONED: &str = "ai_archive.subject.tombstoned.v1";
 
 /// Refuses every inbox receipt until [`allow_inbox_receipts`], so `accept` fails with a storage
@@ -36,7 +36,7 @@ const REFUSE_INBOX_RECEIPTS: &str = "
     create trigger refuse_inbox_receipt before insert on knowledge.source_analysis_inbox
         for each row execute function knowledge.refuse_inbox_receipt();";
 
-fn scripted() -> Arc<ScriptedProvider> {
+pub(crate) fn scripted() -> Arc<ScriptedProvider> {
     Arc::new(ScriptedProvider::new([Ok(response(ARCHIVE_ANALYSIS))]))
 }
 
@@ -45,7 +45,7 @@ fn as_owner(fixture: &str, owner: &str) -> Result<serde_json::Value, serde_json:
     serde_json::from_str(&fixture.replace(OWNER, owner))
 }
 
-async fn publish_added(harness: &Harness, event_id: &str, owner: &str) -> TestResult {
+pub(crate) async fn publish_added(harness: &Harness, event_id: &str, owner: &str) -> TestResult {
     harness
         .publish(
             ADDED_SUBJECT,
@@ -61,7 +61,11 @@ async fn publish_added(harness: &Harness, event_id: &str, owner: &str) -> TestRe
         .await
 }
 
-async fn publish_tombstone(harness: &Harness, event_id: &str, owner: &str) -> TestResult {
+pub(crate) async fn publish_tombstone(
+    harness: &Harness,
+    event_id: &str,
+    owner: &str,
+) -> TestResult {
     harness
         .publish(
             TOMBSTONE_SUBJECT,
@@ -92,12 +96,14 @@ async fn allow_inbox_receipts(harness: &Harness) -> Result<(), sqlx::Error> {
 }
 
 /// The consumer sequence of the archive durable: every delivery, redeliveries included.
-async fn archive_deliveries(harness: &Harness) -> Result<u64, Box<dyn std::error::Error>> {
+pub(crate) async fn archive_deliveries(
+    harness: &Harness,
+) -> Result<u64, Box<dyn std::error::Error>> {
     Ok(harness.durable(IngestFamily::AiArchive).await?.2)
 }
 
 /// Waits until the archive durable holds nothing open and has nothing left to deliver.
-async fn archive_is_quiet(harness: &Harness) -> TestResult {
+pub(crate) async fn archive_is_quiet(harness: &Harness) -> TestResult {
     eventually("the archive durable is quiet", || async {
         let (ack_pending, pending, _) = harness.durable(IngestFamily::AiArchive).await?;
         Ok(ack_pending == 0 && pending == 0)
@@ -106,7 +112,7 @@ async fn archive_is_quiet(harness: &Harness) -> TestResult {
 }
 
 /// The stored blob files under the worker's blob root.
-fn blob_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn blob_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for prefix in std::fs::read_dir(root.join("sha256"))
         .into_iter()
@@ -124,7 +130,7 @@ fn blob_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn blob_directories(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn blob_directories(root: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(root.join("sha256"))
         .into_iter()
         .flatten()
@@ -133,7 +139,7 @@ fn blob_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn set_mode(directories: &[PathBuf], mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_mode(directories: &[PathBuf], mode: u32) -> std::io::Result<()> {
     for directory in directories {
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode))?;
     }

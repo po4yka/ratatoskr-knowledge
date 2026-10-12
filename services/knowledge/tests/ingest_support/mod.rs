@@ -21,6 +21,17 @@ pub(crate) async fn provision_with_ack_wait(
     url: &str,
     ack_wait: Duration,
 ) -> Result<jetstream::Context, Box<dyn std::error::Error>> {
+    provision(url, ack_wait, Duration::from_mins(2)).await
+}
+
+/// As [`provision_with_ack_wait`], with the events stream's duplicate window set to `window`: a
+/// test that wants to see a message published twice under one `Nats-Msg-Id` shortens it, because
+/// the broker collapses a repeat inside the window.
+pub(crate) async fn provision(
+    url: &str,
+    ack_wait: Duration,
+    window: Duration,
+) -> Result<jetstream::Context, Box<dyn std::error::Error>> {
     let context = jetstream::new(async_nats::connect(url).await?);
     let _absent_is_fine = context.delete_stream(EVENTS_STREAM).await;
     let stream = context
@@ -29,7 +40,7 @@ pub(crate) async fn provision_with_ack_wait(
             subjects: vec!["evt.>".to_owned()],
             max_messages: 10_000,
             max_bytes: 67_108_864,
-            duplicate_window: Duration::from_mins(2),
+            duplicate_window: window,
             ..stream::Config::default()
         })
         .await?;

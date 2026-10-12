@@ -8,6 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ratatoskr_knowledge::DELETION_ACK_REARM_AFTER;
+
 use crate::Metrics;
 
 /// Doubling stops mattering long before this: `2 s << 20` is far beyond any cap.
@@ -46,6 +48,9 @@ impl RedeliverySchedule {
 pub struct Redelivery {
     pub(crate) schedule: RedeliverySchedule,
     pub(crate) metrics: Arc<Metrics>,
+    /// How long a published deletion acknowledgement waits before a repeat of its deletion fact
+    /// produces it again (XR-021 CONTRACTS.md R5-11).
+    pub(crate) ack_rearm_after: Duration,
 }
 
 impl Redelivery {
@@ -58,7 +63,19 @@ impl Redelivery {
     /// An explicit schedule counting on `metrics`.
     #[must_use]
     pub const fn new(metrics: Arc<Metrics>, schedule: RedeliverySchedule) -> Self {
-        Self { schedule, metrics }
+        Self {
+            schedule,
+            metrics,
+            ack_rearm_after: DELETION_ACK_REARM_AFTER,
+        }
+    }
+
+    /// Produces a published deletion acknowledgement again after `window` instead of the
+    /// production minute, so a test does not wait a minute.
+    #[must_use]
+    pub const fn with_ack_rearm_after(mut self, window: Duration) -> Self {
+        self.ack_rearm_after = window;
+        self
     }
 }
 

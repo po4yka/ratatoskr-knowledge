@@ -165,6 +165,7 @@ fn an_inbox_or_deletion_failure_is_permanent_only_when_the_delivery_is() {
     for never in [
         SourceInboxError::Encode(encode_error()),
         SourceInboxError::InvalidArchiveFact,
+        SourceInboxError::ForeignSubject,
         SourceInboxError::Persistence(PersistenceError::ValueOverflow),
         SourceInboxError::Deletion(DeletionError::ValueOverflow),
     ] {
@@ -176,6 +177,7 @@ fn an_inbox_or_deletion_failure_is_permanent_only_when_the_delivery_is() {
     );
     assert!(ArchiveEventError::Unsupported.is_permanent());
     assert!(ArchiveEventError::Inbox(SourceInboxError::InvalidArchiveFact).is_permanent());
+    assert!(ArchiveEventError::Inbox(SourceInboxError::ForeignSubject).is_permanent());
 }
 
 #[test]

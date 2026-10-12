@@ -10,6 +10,7 @@ mod ingest_support;
 mod log_capture;
 
 mod authorized;
+mod deletion_ack;
 mod fixtures;
 mod harness;
 mod large_conversation;

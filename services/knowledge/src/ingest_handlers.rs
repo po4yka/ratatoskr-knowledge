@@ -27,6 +27,7 @@ use ratatoskr_social_contracts::{
 };
 
 use crate::ingest::{IngestContext, TERMINAL_DELIVERY};
+use crate::ingest_deletion::{archive_acknowledgement, social_acknowledgement};
 
 const DOCUMENT_PRODUCERS: &[&str] = &["ratatoskr-extractor"];
 const SOCIAL_PRODUCERS: &[&str] = &["ratatoskr-x", "ratatoskr-instagram", "ratatoskr-threads"];
@@ -65,7 +66,7 @@ fn decode(bytes: &[u8], producers: &[&str]) -> Result<(EventEnvelope, TenantRef)
 
 /// A completion fact could not be queued.
 #[derive(Debug, Clone, Copy)]
-struct QueueFailure {
+pub(crate) struct QueueFailure {
     /// The same fact can never be queued: it cannot be built or the schema cannot hold it.
     permanent: bool,
 }
@@ -74,7 +75,7 @@ impl QueueFailure {
     /// The fact itself is not representable.
     const UNREPRESENTABLE: Self = Self { permanent: true };
 
-    fn outcome(self, retry_class: &'static str) -> Outcome {
+    pub(crate) fn outcome(self, retry_class: &'static str) -> Outcome {
         if self.permanent {
             Outcome::Reject("unqueueable")
         } else {
@@ -224,10 +225,14 @@ impl<P: LlmProvider> IngestContext<P> {
         // duplicate that drains the queue again, so a failed erasure is finished by the next
         // delivery.
         match collect_pending_blobs(&self.database, &self.blobs).await {
-            Ok(_) => Outcome::Done,
-            Err(error) if error.is_permanent() => Outcome::Reject("unprocessable"),
-            Err(_) => Outcome::Retry("social_removal"),
+            Ok(_) => {}
+            Err(error) if error.is_permanent() => return Outcome::Reject("unprocessable"),
+            Err(_) => return Outcome::Retry("social_removal"),
         }
+        // The rows and the bytes are gone, or the delivery repeats a removal that was applied:
+        // tell the producer (XR-021 CONTRACTS.md R5-11).
+        self.acknowledge(social_acknowledgement(envelope, &removed), "social_removal")
+            .await
     }
 
     async fn queue_social_completion(
@@ -295,7 +300,10 @@ impl<P: LlmProvider> IngestContext<P> {
             .await
         {
             Ok(admission) => admission,
-            Err(error) => return archive_accept_failure(&error, tombstone, &retry),
+            Err(ArchiveEventError::Inbox(SourceInboxError::ForeignSubject)) => {
+                return self.refuse_foreign_tombstone(&envelope).await;
+            }
+            Err(error) => return archive_accept_failure(&error, &retry),
         };
         let inbox = SourceInbox::new(&self.database);
         let (conversation, admitted) = match admission {
@@ -304,11 +312,19 @@ impl<P: LlmProvider> IngestContext<P> {
             // A duplicate tombstone still drains the erasure queue: the delivery that committed
             // the row deletion may have failed or died before the blobs were erased.
             ArchiveEventAdmission::Tombstone | ArchiveEventAdmission::TombstoneDuplicate => {
-                return match collect_pending_blobs(&self.database, &self.blobs).await {
-                    Ok(_) => Outcome::Done,
-                    Err(error) if error.is_permanent() => Outcome::Reject("unprocessable"),
-                    Err(_) => retry("archive_tombstone"),
-                };
+                match collect_pending_blobs(&self.database, &self.blobs).await {
+                    Ok(_) => {}
+                    Err(error) if error.is_permanent() => return Outcome::Reject("unprocessable"),
+                    Err(_) => return retry("archive_tombstone"),
+                }
+                // The rows and the bytes are gone, or the delivery repeats a tombstone that was
+                // applied: tell the producer (XR-021 CONTRACTS.md R5-11).
+                return self
+                    .acknowledge(
+                        archive_acknowledgement(&envelope, false),
+                        "archive_tombstone",
+                    )
+                    .await;
             }
             ArchiveEventAdmission::ObjectRecorded | ArchiveEventAdmission::ObjectDuplicate => {
                 return Outcome::Done;
@@ -351,6 +367,19 @@ impl<P: LlmProvider> IngestContext<P> {
                 Ok(_) => Outcome::Done,
                 Err(error) => analysis_failure(&error, "archive_analysis"),
             }
+        }
+    }
+
+    /// A tombstone whose subject belongs only to another owner: acknowledge it as refused, so the
+    /// producer stops re-sending it, and terminate the delivery. The data stays where it is and
+    /// an operator looks.
+    async fn refuse_foreign_tombstone(&self, envelope: &EventEnvelope) -> Outcome {
+        match self
+            .acknowledge(archive_acknowledgement(envelope, true), "archive_tombstone")
+            .await
+        {
+            Outcome::Done => Outcome::Reject("foreign_subject"),
+            other => other,
         }
     }
 
@@ -451,7 +480,6 @@ fn classify_repository_failure(error: &FamilyPipelineError) -> (AnalysisFailureC
 /// closed class, and a storage failure is left to `retry`.
 fn archive_accept_failure(
     error: &ArchiveEventError,
-    tombstone: bool,
     retry: &impl Fn(&'static str) -> Outcome,
 ) -> Outcome {
     match error {
@@ -459,11 +487,7 @@ fn archive_accept_failure(
         | ArchiveEventError::Inbox(SourceInboxError::Envelope(_)) => Outcome::Reject("undecodable"),
         ArchiveEventError::Unsupported => Outcome::Reject("unsupported"),
         ArchiveEventError::Inbox(SourceInboxError::InvalidArchiveFact) => {
-            Outcome::Reject(if tombstone {
-                "foreign_subject"
-            } else {
-                "invalid_fact"
-            })
+            Outcome::Reject("invalid_fact")
         }
         _ if error.is_permanent() => Outcome::Reject("inbox_invalid"),
         _ => retry("archive_inbox"),
