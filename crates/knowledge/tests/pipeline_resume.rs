@@ -183,6 +183,63 @@ async fn a_run_survives_a_transient_provider_outage_of_any_length() -> TestResul
     Ok(())
 }
 
+/// A spend ceiling that refuses the call is a window that clears, not a verdict on the source:
+/// the refusal costs no provider call and no spent attempt, the run is reopened on every later
+/// drive, and the first drive after the ceiling lifts finishes it (XR-021 CONTRACTS.md R4-05
+/// rule 1).
+#[tokio::test]
+async fn a_run_survives_a_spend_budget_refusal_until_the_budget_clears() -> TestResult {
+    const REFUSED_DRIVES: usize = 8;
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 4_096);
+    let (run_id, context, document) = run_and_context(&database).await?;
+    let mut script: Vec<_> = (0..REFUSED_DRIVES)
+        .map(|_| Err(ProviderError::BudgetExhausted))
+        .collect();
+    script.push(Ok(valid_response("after-the-rollover")));
+    let provider = ScriptedProvider::new(script);
+    let pipeline = pipeline(&database, &provider, &blobs);
+
+    for drive in 1..=REFUSED_DRIVES {
+        let outcome = pipeline
+            .execute(
+                run_id,
+                build_generation_request(&context)?,
+                &context,
+                &document,
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(PipelineError::Provider(ProviderError::BudgetExhausted))
+            ),
+            "drive {drive} must report the refusal, not {outcome:?}"
+        );
+        assert_eq!(
+            provider.call_count()?,
+            drive,
+            "a refusal is not retried inside the drive"
+        );
+    }
+    let recovered = pipeline
+        .execute(
+            run_id,
+            build_generation_request(&context)?,
+            &context,
+            &document,
+        )
+        .await?;
+    assert_eq!(recovered.summary, "A grounded summary.");
+    assert_eq!(
+        run_summary(&database, run_id).await?,
+        ("persisted".to_owned(), 9, 1)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// A run that has spent its ten calls on answers it could not use is not reopened, even when the
 /// last call failed transiently: the budget bounds spending, not outages.
 #[tokio::test]

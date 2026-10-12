@@ -23,11 +23,14 @@ fn io() -> BlobError {
 }
 
 #[test]
-fn only_a_transient_provider_failure_is_worth_another_delivery() {
-    assert!(!ProviderError::Transient.is_permanent());
+fn only_a_transient_or_budget_provider_failure_is_worth_another_delivery() {
+    // A spend ceiling is a daily and monthly window: it clears at the rollover or when the
+    // operator raises it, so a later delivery can succeed.
+    for recovers in [ProviderError::Transient, ProviderError::BudgetExhausted] {
+        assert!(!recovers.is_permanent(), "{recovers:?}");
+    }
     for permanent in [
         ProviderError::Permanent,
-        ProviderError::BudgetExhausted,
         ProviderError::Exhausted,
         ProviderError::Internal,
     ] {
@@ -71,6 +74,7 @@ fn an_article_pipeline_failure_is_permanent_only_when_the_run_cannot_recover() {
         PipelineError::Timeout,
         PipelineError::Conflict,
         PipelineError::Provider(ProviderError::Transient),
+        PipelineError::Provider(ProviderError::BudgetExhausted),
         PipelineError::Persistence(database_outage()),
         PipelineError::Blob(io()),
     ] {
@@ -79,7 +83,6 @@ fn an_article_pipeline_failure_is_permanent_only_when_the_run_cannot_recover() {
     for never in [
         PipelineError::Invalid,
         PipelineError::Provider(ProviderError::Permanent),
-        PipelineError::Provider(ProviderError::BudgetExhausted),
         PipelineError::Persistence(PersistenceError::AttemptBudgetExhausted),
         PipelineError::Blob(BlobError::TooLarge),
     ] {
@@ -93,6 +96,7 @@ fn a_family_pipeline_failure_is_permanent_only_when_the_source_cannot_recover() 
         FamilyPipelineError::Timeout,
         FamilyPipelineError::Conflict,
         FamilyPipelineError::Provider(ProviderError::Transient),
+        FamilyPipelineError::Provider(ProviderError::BudgetExhausted),
         FamilyPipelineError::Persistence(database_outage()),
         FamilyPipelineError::Blob(io()),
         FamilyPipelineError::Inbox(SourceInboxError::Persistence(database_outage())),

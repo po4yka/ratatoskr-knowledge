@@ -66,7 +66,7 @@ Each ingest consumer SHALL verify its Edge-provisioned durable, terminate perman
 
 ### Requirement: A redelivered analysis run resumes from its durable state
 
-Knowledge SHALL drive every analysis run of the document, social, AI-archive and repository lanes from the state the database holds, under a per-run lock, so that a redelivery after a transient provider failure or after the worker stopped mid-call finishes the same run. A response that is already stored SHALL be validated again without a provider call. A run SHALL stop at a ceiling of ten spent calls, where a call that failed transiently is recorded and is not spent, so a provider outage of any length never exhausts a run.
+Knowledge SHALL drive every analysis run of the document, social, AI-archive and repository lanes from the state the database holds, under a per-run lock, so that a redelivery after a transient provider failure or after the worker stopped mid-call finishes the same run. A response that is already stored SHALL be validated again without a provider call. A run SHALL stop at a ceiling of ten spent calls, where a call that failed transiently, or that the provider spend budget refused, is recorded and is not spent, so a provider outage or a budget window of any length never exhausts a run.
 
 #### Scenario: A transient provider failure is finished by the next delivery
 
@@ -77,6 +77,11 @@ Knowledge SHALL drive every analysis run of the document, social, AI-archive and
 
 - **WHEN** the provider fails transiently on sixteen consecutive calls and then answers
 - **THEN** every drive reports the transient failure, the same run is reopened each time, and the seventeenth call persists one accepted output
+
+#### Scenario: A spend-budget refusal is waited out
+
+- **WHEN** the provider spend budget refuses the call on eight consecutive deliveries and then lifts
+- **THEN** each drive makes one refused call, the same run is reopened each time, no delivery is terminated, and the ninth call persists one accepted output
 
 #### Scenario: A run that spent its calls is not reopened
 

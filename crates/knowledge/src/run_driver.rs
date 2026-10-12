@@ -6,9 +6,10 @@
 //! has already advanced:
 //!
 //! - a run at `persisted`, `indexed` or `completed` returns its accepted output;
-//! - a run at `failed` whose last call failed transiently is reopened to `queued`, within the
-//!   per-run budget of spent calls [`MAX_RUN_ATTEMPTS`] (a transient failure is not spent, so a
-//!   provider outage never exhausts it); any other failed run reports its terminal cause;
+//! - a run at `failed` whose last call failed transiently, or was refused by the provider spend
+//!   budget, is reopened to `queued`, within the per-run budget of spent calls
+//!   [`MAX_RUN_ATTEMPTS`] (neither is spent, so a provider outage or a budget window never
+//!   exhausts it); any other failed run reports its terminal cause;
 //! - a run at `model_requested` had a call in flight or between calls: an unfinished call is
 //!   recorded as interrupted and the next call continues the run, and a run whose calls were
 //!   abandoned twice is failed rather than tried a third time;
@@ -314,20 +315,25 @@ impl<P: LlmProvider> RunDriver<'_, P> {
         call: Call,
         generated: Result<Result<ProviderResponse, ProviderFailure>, tokio::time::error::Elapsed>,
     ) -> Result<Called, DriveFailure> {
-        let (outcome, class, status, failure) = match generated {
+        // A recoverable failure is recorded as a transient one, which does not count as a spent
+        // call. Only a transient failure is worth a second call in the same drive: a spend-budget
+        // refusal would be refused again, so it waits for a later delivery.
+        let (outcome, retry_now, class, status, failure) = match generated {
             Ok(Ok(response)) => return Ok(Called::Response(response)),
             Err(_) => (
                 AttemptOutcome::TransientFailure,
+                true,
                 ProviderFailureClass::Timeout,
                 None,
                 DriveFailure::Timeout,
             ),
             Ok(Err(error)) => (
-                if error.is_transient() {
+                if error.is_recoverable() {
                     AttemptOutcome::TransientFailure
                 } else {
                     AttemptOutcome::PermanentFailure
                 },
+                error.is_transient(),
                 error.class,
                 error
                     .http_status
@@ -345,7 +351,7 @@ impl<P: LlmProvider> RunDriver<'_, P> {
                 call.duration_ms,
             )
             .await?;
-        if outcome == AttemptOutcome::TransientFailure && !call.last {
+        if retry_now && !call.last {
             return Ok(Called::Retry);
         }
         self.fail_requested(call.run_id).await?;

@@ -261,7 +261,7 @@ are redelivered, with no delivery budget, after `min(2 s * 2^(delivered - 1), 60
 outage of any length never drops a document, a social capture, an X removal or an AI conversation;
 the ingestion is applied once the database recovers. A provider outage is no exception: a call that
 failed transiently is recorded and not spent, so it never counts against the run's ten spent calls, and
-the run is reopened by every delivery until the provider answers. Each redelivery is counted by the label-free
+the run is reopened by every delivery until the provider answers. A refusal by the provider spend budget is a wait in the same way: the daily and monthly ceilings clear at their rollover or when the operator raises them, so the call is recorded as a non-spent refusal and the capture is redelivered until the window clears (the events stream keeps a message for seven days, which bounds a very long refusal). Each redelivery is counted by the label-free
 `knowledge_ingest_redeliveries_total` on the operator listener, and from the second delivery on it
 logs the family, the class and the delivery count, never content. A delivery that can never succeed
 (a response that stayed invalid, a permanent provider failure, a source the schema cannot hold) is

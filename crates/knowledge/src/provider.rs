@@ -48,12 +48,15 @@ pub enum ProviderError {
 impl ProviderError {
     /// Whether a later delivery of the same input can never succeed after this failure.
     ///
-    /// Only a transient failure is worth another call. Every other failure is recorded on the run
-    /// as a permanent one, and a run that failed permanently reports that failure again on every
-    /// later drive instead of calling the provider.
+    /// A transient failure and a spend-budget refusal are worth another delivery: the budget is a
+    /// daily and monthly window that clears at its rollover or when the operator raises the
+    /// ceiling, so waiting is the remedy and losing the capture is not (XR-021 CONTRACTS.md R4-05
+    /// rule 1). Every other failure is recorded on the run as a permanent one, and a run that
+    /// failed permanently reports that failure again on every later drive instead of calling the
+    /// provider.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
-        !matches!(self, Self::Transient)
+        !matches!(self, Self::Transient | Self::BudgetExhausted)
     }
 }
 
@@ -123,9 +126,18 @@ impl ProviderFailure {
     }
 
     /// Reports whether the pipeline may retry within its shared call budget.
+    ///
+    /// A spend-budget refusal is not transient in this sense: a second call in the same drive
+    /// would be refused too.
     #[must_use]
     pub const fn is_transient(&self) -> bool {
         matches!(self.error, ProviderError::Transient)
+    }
+
+    /// Reports whether a later delivery of the same input can succeed after this failure.
+    #[must_use]
+    pub const fn is_recoverable(&self) -> bool {
+        !self.error.is_permanent()
     }
 }
 

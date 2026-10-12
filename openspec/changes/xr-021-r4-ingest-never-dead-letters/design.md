@@ -20,12 +20,14 @@ A redelivery without a budget is only safe for a delivery that a later attempt c
 |---|---|---|
 | `PersistenceError` | invalid source, invalid identity, attempt budget exhausted, value overflow, encode, a permanent blob error | connect, schema, query, a recoverable blob error |
 | `BlobError` | too large, invalid reference | unavailable, io |
-| `ProviderError` | everything but `Transient` | `Transient` |
+| `ProviderError` | everything but `Transient` and `BudgetExhausted` | `Transient`, `BudgetExhausted` |
 | `PipelineError` and `FamilyPipelineError` | invalid response, permanent provider or persistence or blob, source identity, contract encoding, corrupt README, a permanent inbox error | timeout, a run held by another executor, transient provider, a recoverable storage error, an unavailable README |
 | `DocumentIntakeError` | unsupported event, wrong producer, missing tenant, invalid payload, context, request, plus the permanent persistence and analysis cases | the rest |
 | `SourceInboxError`, `ArchiveEventError`, `EventOutboxError`, `DeletionError` | undecodable envelope, unencodable snapshot, contradictory archive fact, unrepresentable value | storage and deletion failures |
 
 The repository family keeps its own classification (`classify_repository_failure`, whose unit test pins `Invalid` as retryable): its handler stops retrying at `TERMINAL_DELIVERY` and settles a fact, so a response that stays invalid still ends in a failed fact, not in a termination.
+
+The repository family's retry delay grows with the schedule (2, 4, 8, 16 s) instead of staying at 2 s, so a requester waits about 30 s instead of about 8 s for the failed fact; this is deliberate.
 
 A permanent failure is `Reject` with a closed class: `document`, `unanalysable`, `inbox_invalid`, `unqueueable`, `unprocessable`, next to the existing `undecodable`, `producer`, `tenant`, `owner`, `payload`, `type`, `unsupported`, `foreign_subject`, `invalid_fact` and `repository_request`.
 
@@ -36,6 +38,19 @@ Each delivery makes up to two provider calls, and the run used to record at most
 - `record_attempt` and the run driver's reopen check count the calls whose outcome is not `transient_failure` against `MAX_RUN_ATTEMPTS`. Answers, invalid answers, permanent failures and abandoned (`requested`, `interrupted`) calls still count, so a run that keeps getting unusable answers, or whose worker keeps dying mid-call, stops after ten calls, and the abandoned-call rule (a run fails after two) is unchanged.
 - The ordinal check in `schema.sql` is now `ordinal >= 1`, because a spend guard cannot be a row check. The ordinal column stays a `smallint`: the worst case is two transient rows per delivery, one delivery a minute once the schedule has reached its cap, so a single run holds about 32 thousand rows after an outage of about eleven days, and `record_attempt` then reports `AttemptBudgetExhausted` rather than overflowing. Transient rows hold no raw response and no token counts.
 - The alternative of compacting transient rows on reopen was rejected: it loses the record of how often the provider failed, which the operator needs, for a bound that no real outage reaches.
+
+### A spend-budget refusal is a wait, not a verdict
+
+The provider budget is a daily and monthly window (`BudgetWindow::Daily`, `Monthly`) that clears at its rollover or when the operator raises the ceiling. The first version of this change classified `BudgetExhausted` as permanent, so the first capture past the daily cap, for example in a bulk archive import, was rejected as `unanalysable` and lost for good: the R4-05 hazard again, for a failure that redelivery can fix. The review rejected it, and the refusal is now recoverable.
+
+- `ProviderError::is_permanent` is false for `BudgetExhausted`, and `ProviderFailure::is_recoverable` is the one question the run driver asks.
+- The run driver records a refusal as a `transient_failure` attempt with the class `budget_exhausted`, so it is not a spent call and the next delivery reopens the run. Unlike a transient failure it is not retried inside the same drive, because the second call would be refused too and would only add a row.
+- The repository family needs no change: it already retries any failure until `TERMINAL_DELIVERY` and then settles a retryable `DependencyUnavailable` fact.
+- Limit, named on purpose: one attempt row is recorded per delivery and a delivery comes at most once a minute, so a refusal that lasts more than about 22 days (a monthly ceiling exhausted early in the month) reaches the `smallint` ordinal and then fails with `AttemptBudgetExhausted`. The events stream keeps a message for seven days (XR-021 CONTRACTS.md S04 retention note), so the stream drops it first. Neither case is addressed here.
+
+### Known limit: every query error recovers
+
+`PersistenceError::Query` is classified as recoverable whatever the SQLSTATE, because a unique violation or a serialization conflict between two workers is a race that a redelivery fixes, and the connection errors are the common case. A deterministic constraint or encoding violation on a path that is not otherwise classified permanent (SQLSTATE class 22 or a check violation) is therefore redelivered once a minute for ever and is visible only through `knowledge_ingest_redeliveries_total` and the WARN line, which names the family, the class and the delivery count. Classifying those SQLSTATEs as permanent is a possible follow-up; it needs a real example of one before it is worth a rule.
 
 ### Visibility
 

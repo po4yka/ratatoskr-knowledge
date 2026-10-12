@@ -348,6 +348,50 @@ async fn a_provider_outage_longer_than_five_deliveries_does_not_lose_a_capture()
     Ok(())
 }
 
+/// A spend ceiling that refuses the call for eight deliveries and then lifts: the capture is
+/// redelivered, never termed, and analysed once after the rollover. The ceiling is a daily and
+/// monthly window, so a refusal is a wait and not a verdict on the capture (XR-021 CONTRACTS.md
+/// R4-05 rule 1).
+#[tokio::test]
+async fn a_spend_budget_refusal_longer_than_five_deliveries_does_not_lose_a_capture() -> TestResult
+{
+    let _serial = BROKER.lock().await;
+    let harness = Harness::start_fast().await?;
+    let mut script: Vec<_> = (0..DELIVERIES_PAST_THE_OLD_BUDGET)
+        .map(|_| Err(ProviderError::BudgetExhausted))
+        .collect();
+    script.push(Ok(response(SOCIAL_ANALYSIS)));
+    let worker = harness.spawn(Arc::new(ScriptedProvider::new(script)));
+    publish_capture(&harness).await?;
+
+    redelivered_until(
+        &harness,
+        IngestFamily::Social,
+        DELIVERIES_PAST_THE_OLD_BUDGET,
+    )
+    .await?;
+    eventually("the capture is analysed once the budget clears", || async {
+        Ok(harness.search_documents().await? == 1)
+    })
+    .await?;
+    eventually("the completion fact is published once", || async {
+        Ok(harness.facts_on(COMPLETED_SUBJECT).await?.len() == 1)
+    })
+    .await?;
+    quiet(&harness, IngestFamily::Social).await?;
+    assert_eq!(
+        harness
+            .rows_in(&["analysis_runs", "analysis_outputs"])
+            .await?,
+        2
+    );
+    assert_eq!(harness.rows_in(&["event_outbox"]).await?, 1);
+    assert_counted(&harness).await?;
+    worker.stop().await?;
+    harness.database.cleanup().await?;
+    Ok(())
+}
+
 /// Three deliveries of provider errors followed by four of a refused completion fact: the
 /// capture is analysed once and its completion fact is queued once, after eight deliveries. The
 /// two faults are of different kinds, so each recovery path is exercised in one message's life.

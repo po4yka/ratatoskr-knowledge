@@ -36,8 +36,8 @@ the digest settle it as a non-retryable failure on the first delivery. `tenant.r
 capture, a social removal, an archive conversation, an archive tombstone and a repository request
 whose payload owner differs from the envelope `tenant_id` are terminated and leave no row in any
 table. `redelivery.rs`: a document, a social capture, a social removal and an AI-archive conversation
-survive a database fault of eight deliveries, a provider outage of eight deliveries and a provider
-outage followed by a database outage, with no termination, the fact applied once and
+survive a database fault of eight deliveries, a provider outage of eight deliveries, a spend-budget
+refusal of eight deliveries and a provider outage followed by a database outage, with no termination, the fact applied once and
 `knowledge_ingest_redeliveries_total` counted; a permanent failure and an undecodable message are
 terminated at the first delivery; the repository family still settles its failed fact on the fifth.
 `ingest_outage.rs` proves that readiness follows the broker.
