@@ -633,3 +633,103 @@ async fn manifest_retrieval_is_bounded_and_resumes_after_restart()
     exhausted_database.cleanup().await?;
     Ok(())
 }
+
+fn authority_of(request: &KnowledgeChannelDigestRecapRequested) -> DigestManifestRequest {
+    DigestManifestRequest {
+        owner: request.owner.user_id().0,
+        digest_run_id: request.digest_run_id.as_uuid(),
+        manifest_ref: request.manifest_ref.to_string(),
+        manifest_digest_hex: request.manifest_digest.hex.to_string(),
+    }
+}
+
+/// XR-021 CONTRACTS.md R6-02 rule 5: a `410` is a manifest whose text is gone, a distinct and
+/// terminal answer; every other non-success status, `404` and `503` included, stays unavailable.
+#[tokio::test]
+async fn a_410_is_a_gone_manifest_and_404_and_503_stay_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manifest = manifest_json();
+    let authority = authority_of(&linked_request(&manifest)?);
+    for (status, expected) in [
+        (410, DigestSourceClientError::Gone),
+        (404, DigestSourceClientError::Unavailable),
+        (503, DigestSourceClientError::Unavailable),
+    ] {
+        let transport = FakeTransport::start(vec![FakeReply::bytes(status, Vec::new())]).await?;
+        let client = DigestSourceClient::new(digest_source_settings(
+            &transport,
+            Duration::from_secs(1),
+            64,
+        ))?;
+        assert_eq!(
+            client.fetch_manifest(&authority).await,
+            Err(expected),
+            "status {status}"
+        );
+        assert_eq!(transport.request_count()?, 1, "one request for {status}");
+    }
+    Ok(())
+}
+
+/// XR-021 CONTRACTS.md R6-02 rule 5: a manifest that is gone never comes back, so the first
+/// attempt settles `manifest_unavailable` at once and schedules no retry, however many times the
+/// attempt is repeated afterwards; a first `503` still schedules its one retry.
+#[tokio::test]
+async fn a_gone_manifest_settles_at_once_and_is_not_retried()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manifest = manifest_json();
+    let request = linked_request(&manifest)?;
+    let mut command = command_json();
+    command["payload"] = serde_json::to_value(&request)?;
+    let envelope: CommandEnvelope = serde_json::from_value(command)?;
+    let database = TestDatabase::create().await?;
+    assert_eq!(
+        ChannelRecapInbox::new(&database.database)
+            .accept(&envelope)
+            .await?,
+        ChannelRecapInboxAdmission::Accepted
+    );
+    let run_id: uuid::Uuid = sqlx::query_scalar(
+        "select recap_run_id from knowledge.channel_recap_runs where inbox_command_id = $1",
+    )
+    .bind(envelope.command_id.0)
+    .fetch_one(database.database.pool())
+    .await?;
+    let transport = FakeTransport::start(vec![FakeReply::bytes(410, Vec::new())]).await?;
+    let client = DigestSourceClient::new(digest_source_settings(
+        &transport,
+        Duration::from_secs(1),
+        64,
+    ))?;
+    let runs = ChannelRecapRunStore::new(&database.database);
+
+    for _ in 0..2 {
+        assert_eq!(
+            attempt_digest_manifest(&client, &runs, run_id, &request).await?,
+            DigestManifestAttemptOutcome::Failed
+        );
+    }
+
+    assert_eq!(transport.request_count()?, 1, "no second request, no retry");
+    let terminal: (String, i16, Option<String>, i64) = sqlx::query_as(
+        "select state, manifest_attempt_count, failure_code,
+                (select count(*) from knowledge.channel_recap_outbox
+                 where recap_run_id = $1)
+         from knowledge.channel_recap_runs where recap_run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(
+        terminal,
+        (
+            "failed".to_owned(),
+            1,
+            Some("manifest_unavailable".to_owned()),
+            1,
+        ),
+        "failed, one attempt spent, the failure fact queued once"
+    );
+    database.cleanup().await?;
+    Ok(())
+}

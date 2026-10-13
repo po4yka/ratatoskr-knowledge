@@ -93,6 +93,9 @@ pub enum DigestSourceClientError {
     /// The source could not be retrieved through the configured boundary.
     #[error("the digest source is unavailable")]
     Unavailable,
+    /// The source no longer holds the text: a manifest that is gone does not come back.
+    #[error("the digest source no longer holds the manifest")]
+    Gone,
 }
 
 /// Authenticated, bounded client for immutable digest manifests.
@@ -221,6 +224,9 @@ impl DigestSourceClient {
             .send()
             .await
             .map_err(|_| DigestSourceClientError::Unavailable)?;
+        if response.status() == reqwest::StatusCode::GONE {
+            return Err(DigestSourceClientError::Gone);
+        }
         if !response.status().is_success() {
             return Err(DigestSourceClientError::Unavailable);
         }
@@ -364,6 +370,7 @@ pub async fn attempt_digest_manifest(
         Err(
             DigestSourceClientError::Unavailable
             | DigestSourceClientError::Timeout
+            | DigestSourceClientError::Gone
             | DigestSourceClientError::InvalidConfiguration
             | DigestSourceClientError::InvalidRequest,
         ) => {
