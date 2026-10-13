@@ -70,7 +70,11 @@ read-through boundary for the channel-digest service, not a public analysis API.
 - `DigestSourceClient` accepts only a loopback origin and reads `GET /v1/manifests/<bare uuid>` with the
   service bearer and the three contract headers (`x-ratatoskr-owner-id`, `x-ratatoskr-digest-run-id`,
   `x-ratatoskr-manifest-digest`), all named by `ratatoskr-channel-digest-contracts`; it refuses
-  redirects and probes `GET /ready` with the bearer only before the consumer is ready.
+  redirects and probes `GET /ready` with the bearer only before the consumer is ready. A `410` from the manifest
+  route means the digest service no longer holds the text (retention or withdrawal minimized it): the client
+  returns `DigestSourceClientError::Gone`, and `attempt_digest_manifest` settles `manifest_unavailable` at once
+  without the single retry that `Unavailable` and `Timeout` get, because a minimized manifest never comes back
+  (XR-021 CONTRACTS.md R6-02 rule 5). A `404` and a `503` stay `Unavailable`.
   `verify_digest_manifest` hashes the bytes, decodes them with `ChannelDigestManifest::from_canonical_bytes`
   (which refuses anything but the canonical rendering) and checks owner, run, reference, window and
   counts against the request.
