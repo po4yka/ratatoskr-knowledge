@@ -33,7 +33,7 @@ use crate::ingest_support::{TestResult, eventually};
 use crate::log_capture::capture;
 
 /// The deliveries a fault must outlast: three more than the budget that used to end a delivery.
-const DELIVERIES_PAST_THE_OLD_BUDGET: u64 = 8;
+pub(crate) const DELIVERIES_PAST_THE_OLD_BUDGET: u64 = 8;
 
 const COMPLETED_SUBJECT: &str = "evt.knowledge.analysis.completed.v1";
 const FAILED_SUBJECT: &str = "evt.knowledge.repository_analysis.failed.v1";
@@ -68,7 +68,11 @@ async fn deliveries(
 
 /// Waits until `family` has delivered at least `count` times: the message was redelivered that
 /// often, so none of those deliveries was terminated.
-async fn redelivered_until(harness: &Harness, family: IngestFamily, count: u64) -> TestResult {
+pub(crate) async fn redelivered_until(
+    harness: &Harness,
+    family: IngestFamily,
+    count: u64,
+) -> TestResult {
     eventually("the fault outlasts the old delivery budget", || async {
         Ok(deliveries(harness, family).await? >= count)
     })
@@ -76,7 +80,7 @@ async fn redelivered_until(harness: &Harness, family: IngestFamily, count: u64) 
 }
 
 /// Waits until `family` holds no open delivery and has nothing left to deliver.
-async fn quiet(harness: &Harness, family: IngestFamily) -> TestResult {
+pub(crate) async fn quiet(harness: &Harness, family: IngestFamily) -> TestResult {
     eventually("the durable is quiet", || async {
         let (ack_pending, pending, _) = harness.durable(family).await?;
         Ok(ack_pending == 0 && pending == 0)
@@ -85,7 +89,9 @@ async fn quiet(harness: &Harness, family: IngestFamily) -> TestResult {
 }
 
 /// The value of `knowledge_ingest_redeliveries_total` as the operator listener serves it.
-async fn operator_redeliveries(harness: &Harness) -> Result<u64, Box<dyn std::error::Error>> {
+pub(crate) async fn operator_redeliveries(
+    harness: &Harness,
+) -> Result<u64, Box<dyn std::error::Error>> {
     let operator = admin_router(Lifecycle::starting(), Arc::clone(&harness.metrics));
     let response = operator
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
@@ -99,7 +105,7 @@ async fn operator_redeliveries(harness: &Harness) -> Result<u64, Box<dyn std::er
     Ok(value.parse()?)
 }
 
-async fn assert_counted(harness: &Harness) -> TestResult {
+pub(crate) async fn assert_counted(harness: &Harness) -> TestResult {
     let counted = operator_redeliveries(harness).await?;
     assert!(
         counted >= DELIVERIES_PAST_THE_OLD_BUDGET - 1,
@@ -588,7 +594,7 @@ async fn a_redelivery_from_the_second_on_logs_family_class_and_count_without_con
 /// A real adapter over a loopback transport that answers `status` to the first `rejected`
 /// requests and then a chat completion carrying `content`: the failure is classified by
 /// `classify_error`, not scripted.
-async fn rejecting_provider(
+pub(crate) async fn rejecting_provider(
     status: u16,
     rejected: usize,
     content: &str,

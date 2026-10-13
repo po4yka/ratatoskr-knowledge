@@ -22,13 +22,13 @@ const REQUESTED_SUBJECT: &str = "evt.knowledge.repository_analysis.requested.v1"
 const COMPLETED_SUBJECT: &str = "evt.knowledge.repository_analysis.completed.v1";
 const FAILED_SUBJECT: &str = "evt.knowledge.repository_analysis.failed.v1";
 
-fn readme_path() -> String {
+pub(crate) fn readme_path() -> String {
     format!("/internal/v1/readme-blobs/{}", readme_hex(README))
 }
 
 /// Publishes the request for `README` and returns the worker configuration that reads it from
 /// `stub`.
-async fn publish_request(
+pub(crate) async fn publish_request(
     harness: &Harness,
     stub: &HttpStub,
 ) -> Result<ratatoskr_knowledge::Config, Box<dyn std::error::Error>> {
@@ -50,13 +50,13 @@ async fn publish_request(
     Ok(config)
 }
 
-async fn request_state(harness: &Harness) -> Result<String, sqlx::Error> {
+pub(crate) async fn request_state(harness: &Harness) -> Result<String, sqlx::Error> {
     sqlx::query_scalar("select state from knowledge.repository_analysis_requests")
         .fetch_one(harness.database.database.pool())
         .await
 }
 
-async fn only_fact(
+pub(crate) async fn only_fact(
     harness: &Harness,
     subject: &str,
 ) -> Result<EventEnvelope, Box<dyn std::error::Error>> {

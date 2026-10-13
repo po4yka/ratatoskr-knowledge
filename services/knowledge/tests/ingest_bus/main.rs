@@ -18,6 +18,7 @@ mod lifecycle;
 mod recap_source;
 mod redelivery;
 mod repository;
+mod repository_wait;
 mod resume;
 mod tenant;
 mod tombstone;

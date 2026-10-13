@@ -30,11 +30,16 @@ use crate::{Lifecycle, Metrics};
 /// The one events stream every ingest durable belongs to.
 pub const EVENTS_STREAM: &str = "ratatoskr_events";
 
-/// The delivery on which the repository family settles a failed fact instead of retrying.
+/// The delivery on which the repository family settles a failed fact instead of retrying a plain
+/// transient fault.
 ///
 /// Only the repository family has a delivery budget: its terminal delivery ends in a
-/// `knowledge.repository_analysis.failed.v1` fact that the requester waits for. Every other family
-/// is redelivered until it succeeds or turns out never to be able to (XR-021 CONTRACTS.md R4-05).
+/// `knowledge.repository_analysis.failed.v1` fact that the requester waits for. The budget covers
+/// plain transient faults only (a transient provider failure, a timeout, a held run, an invalid
+/// response, an unavailable README). A rejected credential, an empty balance, a withdrawn model
+/// and a spend-budget refusal are redelivered without a budget, like every other family, which is
+/// redelivered until it succeeds or turns out never to be able to (XR-021 CONTRACTS.md R4-05 and
+/// R6-01).
 pub const TERMINAL_DELIVERY: i64 = 5;
 
 /// How long the completion publisher may keep failing before the worker stops being ready.

@@ -17,9 +17,9 @@ use ratatoskr_identifiers::{EntityRef, Extensions, TenantRef, WireTimestamp};
 use ratatoskr_knowledge::{
     ArchiveEventAdmission, ArchiveEventConsumer, ArchiveEventError, DocumentIntake,
     DocumentIntakeError, EventCause, EventOutbox, EventOutboxError, FamilyPipeline,
-    FamilyPipelineError, LlmProvider, OutboxFact, OutboxSubject, RepositoryAnalysisConsumer,
-    RepositoryReadmeError, SourceInbox, SourceInboxAdmission, SourceInboxError,
-    collect_pending_blobs,
+    FamilyPipelineError, LlmProvider, OutboxFact, OutboxSubject, ProviderError,
+    RepositoryAnalysisConsumer, RepositoryReadmeError, SourceInbox, SourceInboxAdmission,
+    SourceInboxError, collect_pending_blobs,
 };
 use ratatoskr_social_contracts::{
     SocialSourceAnalysisCompleted, SocialSourceCaptured, SocialSourceRemoved, SocialSourceSnapshot,
@@ -50,8 +50,10 @@ pub(crate) enum Outcome {
     /// grows with the delivery count, until it succeeds or turns out to be a [`Outcome::Reject`].
     /// The class is logged, never content.
     ///
-    /// The repository family is the one exception to the missing delivery budget: its handler
-    /// stops returning this outcome at [`TERMINAL_DELIVERY`] and settles a failed fact instead.
+    /// The repository family is the one exception to the missing delivery budget, and the budget
+    /// covers plain transient faults only: its handler stops returning this outcome for such a
+    /// fault at [`TERMINAL_DELIVERY`] and settles a failed fact instead. An operator-fixable
+    /// provider failure and a spend-budget refusal keep returning it at every delivery.
     Retry(&'static str),
 }
 
@@ -439,10 +441,13 @@ impl<P: LlmProvider> IngestContext<P> {
         else {
             return Outcome::Done;
         };
-        let (code, retryable, transient) = classify_repository_failure(&failure);
-        if transient && delivered < TERMINAL_DELIVERY {
-            return Outcome::Retry("repository_analysis");
-        }
+        let (code, retryable) = match repository_disposition(&failure, delivered) {
+            RepositoryDisposition::Wait(class) => return Outcome::Retry(class),
+            RepositoryDisposition::RetryWithinBudget => {
+                return Outcome::Retry("repository_analysis");
+            }
+            RepositoryDisposition::Settle(code, retryable) => (code, retryable),
+        };
         let settlement_retry = Outcome::Retry("repository_settlement");
         let consumer = RepositoryAnalysisConsumer::new(&self.database);
         // The pipeline can fail before it stored the request, and a request that is not stored
@@ -458,6 +463,44 @@ impl<P: LlmProvider> IngestContext<P> {
             Ok(_) => Outcome::Done,
             Err(_) => settlement_retry,
         }
+    }
+}
+
+/// What the repository handler does with one failed delivery (XR-021 CONTRACTS.md R6-01 rule 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryDisposition {
+    /// The provider cannot answer until an operator or the spend window changes; redeliver at
+    /// every delivery under this log class, and never settle.
+    Wait(&'static str),
+    /// A plain transient fault with budget left; redeliver.
+    RetryWithinBudget,
+    /// Record the request and settle this failure code; the flag says whether a later fresh
+    /// request may succeed.
+    Settle(AnalysisFailureCode, bool),
+}
+
+/// Decides the disposition of a failed repository delivery.
+///
+/// The five-delivery budget covers plain transient faults only: a transient provider failure, a
+/// timeout, a held run, an invalid response and an unavailable README. A rejected credential, an
+/// empty balance, a withdrawn model and a spend-budget refusal are waited out instead, because the
+/// requester is told only by the terminal fact and GitHub never re-queues a request that settled
+/// as failed (XR-021 CONTRACTS.md R6-01).
+fn repository_disposition(error: &FamilyPipelineError, delivered: i64) -> RepositoryDisposition {
+    if error.needs_operator() {
+        return RepositoryDisposition::Wait(OPERATOR_ACTION);
+    }
+    if matches!(
+        error,
+        FamilyPipelineError::Provider(ProviderError::BudgetExhausted)
+    ) {
+        return RepositoryDisposition::Wait("repository_analysis");
+    }
+    let (code, retryable, transient) = classify_repository_failure(error);
+    if transient && delivered < TERMINAL_DELIVERY {
+        RepositoryDisposition::RetryWithinBudget
+    } else {
+        RepositoryDisposition::Settle(code, retryable)
     }
 }
 
@@ -531,9 +574,12 @@ fn archive_owner(envelope: &EventEnvelope) -> Result<TenantRef, Outcome> {
 #[cfg(test)]
 mod tests {
     use ratatoskr_github_contracts::AnalysisFailureCode;
-    use ratatoskr_knowledge::{FamilyPipelineError, ProviderError};
+    use ratatoskr_knowledge::{FamilyPipelineError, ProviderError, RepositoryReadmeError};
 
-    use super::classify_repository_failure;
+    use super::{
+        RepositoryDisposition, TERMINAL_DELIVERY, classify_repository_failure,
+        repository_disposition,
+    };
 
     /// A run another executor holds, a provider that failed and a response that was invalid are
     /// all things a later delivery may not meet again; only a source that can never be analysed is
@@ -556,5 +602,77 @@ mod tests {
             classify_repository_failure(&FamilyPipelineError::Source),
             (AnalysisFailureCode::ContractInvalid, false, false)
         );
+    }
+
+    /// The table of R6-01 rule 2: only a refusal that waiting can cure never settles; a plain
+    /// transient fault keeps the five-delivery budget; a source that can never be analysed settles
+    /// at once.
+    #[test]
+    fn repository_disposition_table() {
+        for delivered in [1, 5, 6, 1000] {
+            assert_eq!(
+                repository_disposition(
+                    &FamilyPipelineError::Provider(ProviderError::OperatorAction),
+                    delivered
+                ),
+                RepositoryDisposition::Wait("provider_operator_action"),
+                "an operator-fixable failure waits at delivery {delivered}"
+            );
+            assert_eq!(
+                repository_disposition(
+                    &FamilyPipelineError::Provider(ProviderError::BudgetExhausted),
+                    delivered
+                ),
+                RepositoryDisposition::Wait("repository_analysis"),
+                "a spend-budget refusal waits at delivery {delivered}"
+            );
+        }
+        let unavailable =
+            || FamilyPipelineError::RepositorySource(RepositoryReadmeError::Unavailable);
+        let budgeted: [(FamilyPipelineError, AnalysisFailureCode); 5] = [
+            (
+                FamilyPipelineError::Provider(ProviderError::Transient),
+                AnalysisFailureCode::DependencyUnavailable,
+            ),
+            (
+                FamilyPipelineError::Timeout,
+                AnalysisFailureCode::DependencyUnavailable,
+            ),
+            (
+                FamilyPipelineError::Conflict,
+                AnalysisFailureCode::DependencyUnavailable,
+            ),
+            (
+                FamilyPipelineError::Invalid,
+                AnalysisFailureCode::DependencyUnavailable,
+            ),
+            (unavailable(), AnalysisFailureCode::SourceUnavailable),
+        ];
+        for (failure, code) in budgeted {
+            for delivered in 1..TERMINAL_DELIVERY {
+                assert_eq!(
+                    repository_disposition(&failure, delivered),
+                    RepositoryDisposition::RetryWithinBudget,
+                    "{failure:?} retries at delivery {delivered}"
+                );
+            }
+            for delivered in [TERMINAL_DELIVERY, TERMINAL_DELIVERY + 1, 1000] {
+                assert_eq!(
+                    repository_disposition(&failure, delivered),
+                    RepositoryDisposition::Settle(code, true),
+                    "{failure:?} settles at delivery {delivered}"
+                );
+            }
+        }
+        for permanent in [
+            FamilyPipelineError::Source,
+            FamilyPipelineError::RepositorySource(RepositoryReadmeError::Integrity),
+        ] {
+            assert_eq!(
+                repository_disposition(&permanent, 1),
+                RepositoryDisposition::Settle(AnalysisFailureCode::ContractInvalid, false),
+                "{permanent:?}"
+            );
+        }
     }
 }

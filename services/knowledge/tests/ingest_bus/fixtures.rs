@@ -231,6 +231,9 @@ fn repeated_digest(digit: char) -> Result<ContentDigest, Box<dyn std::error::Err
     })
 }
 
+/// The replies of one route, in the order its requests arrive; the last one repeats.
+pub(crate) type Script = Vec<(u16, Vec<u8>)>;
+
 /// One request the stub observed.
 #[derive(Debug, Clone)]
 pub(crate) struct StubRequest {
@@ -259,14 +262,31 @@ impl HttpStub {
         address: SocketAddr,
         routes: Vec<(String, u16, Vec<u8>)>,
     ) -> Result<Self, std::io::Error> {
-        let listener = tokio::net::TcpListener::bind(address).await?;
-        let address = listener.local_addr()?;
-        let routes: Arc<HashMap<String, (u16, Vec<u8>)>> = Arc::new(
+        Self::start_scripted_at(
+            address,
             routes
                 .into_iter()
-                .map(|(path, status, body)| (path, (status, body)))
+                .map(|(path, status, body)| (path, vec![(status, body)]))
                 .collect(),
-        );
+        )
+        .await
+    }
+
+    /// Serves each path from a script: the n-th request for a path gets the n-th reply, and the
+    /// last reply repeats. A route that fails a few times and then recovers is one script.
+    pub(crate) async fn start_scripted(
+        routes: Vec<(String, Script)>,
+    ) -> Result<Self, std::io::Error> {
+        Self::start_scripted_at(SocketAddr::from(([127, 0, 0, 1], 0)), routes).await
+    }
+
+    async fn start_scripted_at(
+        address: SocketAddr,
+        routes: Vec<(String, Script)>,
+    ) -> Result<Self, std::io::Error> {
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        let address = listener.local_addr()?;
+        let routes: Arc<HashMap<String, Script>> = Arc::new(routes.into_iter().collect());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
         let accept = tokio::spawn(async move {
@@ -314,7 +334,7 @@ impl Drop for HttpStub {
 
 async fn serve(
     mut stream: tokio::net::TcpStream,
-    routes: &HashMap<String, (u16, Vec<u8>)>,
+    routes: &HashMap<String, Script>,
     seen: &Mutex<Vec<StubRequest>>,
 ) -> Result<(), std::io::Error> {
     let mut head = Vec::new();
@@ -339,7 +359,12 @@ async fn serve(
             .eq_ignore_ascii_case("authorization")
             .then(|| value.trim().to_owned())
     });
+    let mut nth = 0;
     if let Ok(mut requests) = seen.lock() {
+        nth = requests
+            .iter()
+            .filter(|request| request.path == path)
+            .count();
         requests.push(StubRequest {
             path: path.clone(),
             authorization,
@@ -347,6 +372,7 @@ async fn serve(
     }
     let (status, body) = routes
         .get(&path)
+        .and_then(|script| script.get(nth).or_else(|| script.last()))
         .map_or((404, Vec::new()), |(status, body)| (*status, body.clone()));
     let head = format!(
         "HTTP/1.1 {status} STUB\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
