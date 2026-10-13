@@ -39,7 +39,7 @@ table. `redelivery.rs`: a document, a social capture, a social removal and an AI
 survive a database fault of eight deliveries, a provider outage of eight deliveries, a spend-budget
 refusal of eight deliveries, a rejected credential (HTTP 401 through the real adapter) of eight deliveries and a provider outage followed by a database outage, with no termination, the fact applied once and
 `knowledge_ingest_redeliveries_total` counted; a permanent failure and an undecodable message are
-terminated at the first delivery; the repository family still settles its failed fact on the fifth.
+terminated at the first delivery; the repository family still settles its failed fact on the fifth delivery of a plain transient fault. `repository_wait.rs`: a repository request survives a rejected credential (HTTP 401 through the real adapter), an operator-action failure and a spend-budget refusal of eight deliveries with no failed fact at any time, one completed fact, unspent run attempts and the redeliveries counted and logged without content, while a README source that recovers within four deliveries completes and a transient provider failure on five deliveries settles one retryable failed fact.
 `deletion_ack.rs` shows that an applied tombstone and an applied social removal produce exactly one
 `knowledge.deletion.acknowledged.v1` after the blobs are erased and none while the erasure fails, that
 a redelivery after the re-arm window produces a lost acknowledgement again and one inside it does not,

@@ -270,8 +270,13 @@ the run is reopened by every delivery until the provider answers. A refusal by t
 logs the family, the class and the delivery count, never content. A delivery that can never succeed
 (a response that stayed invalid, a permanent provider failure, a source the schema cannot hold) is
 terminated at its first delivery with a closed class. Repository requests keep a budget of five
-deliveries, because their terminal delivery settles a `knowledge.repository_analysis.failed.v1` fact
-so the requester is told. A redelivered tombstone also drains the blob erasure queue
+deliveries for a plain transient fault only (a transient provider failure, a timeout, a held run, an
+invalid response, an unavailable README), because their terminal delivery settles a
+`knowledge.repository_analysis.failed.v1` fact so the requester is told. A repository request waits
+like the other families when the provider rejects the credential, has an empty balance, withdrew the
+model or refuses a spend-budget call (XR-021 CONTRACTS.md R6-01): it is redelivered at every delivery,
+never settles a failed fact, and GitHub keeps the request pending until the completed fact arrives.
+A redelivered tombstone also drains the blob erasure queue
 before it is acknowledged, so a delivery that committed the row deletion and then failed finishes
 the byte erasure. A redelivery whose inbox
 row was committed before the analysis ran resumes the analysis when that delivery is still the head

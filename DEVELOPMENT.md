@@ -194,7 +194,7 @@ refuse the durable and the worker would never consume.
 `RATATOSKR__INGEST__FETCH_BATCH` defaults to 1. A worker handles one delivery at a time while the broker
 starts each message's ack-wait clock when it delivers it, so a batch above 1 prefetches messages whose
 120 s can run out behind a slow analysis; the expired deliveries come back with a higher delivery count
-and can use up the repository family's five-delivery budget early. Raise it only when the batch size times the
+and can use up the repository family's five-delivery budget early (that budget covers plain transient faults only; a rejected credential, an empty balance and a spend-budget refusal are waited out without one). Raise it only when the batch size times the
 worst-case handler time (provider timeout times attempts) stays below the ack wait.
 
 A redelivered analysis continues the same run instead of failing on a state that has already advanced
