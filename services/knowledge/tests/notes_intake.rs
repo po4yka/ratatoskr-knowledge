@@ -364,3 +364,135 @@ async fn missing_blob_is_transient() -> TestResult {
     );
     setup.finish(worker).await
 }
+
+/// Keeps every disconnection transaction open for four seconds after it deleted the guard rows of
+/// its files, so a file change can be analysed while the removal has not committed.
+const SLOW_DISCONNECTION: &str = "
+    create function knowledge.slow_disconnection() returns trigger language plpgsql as $$
+    begin perform pg_sleep(4); return null; end $$;
+    create trigger slow_disconnection after delete on knowledge.notes_files
+        for each statement execute function knowledge.slow_disconnection();";
+
+/// The search entries of notes, of every owner.
+const NOTE_SEARCH_DOCUMENTS: &str =
+    "select count(*) from knowledge.search_documents where owner_context = 'ratatoskr-notes'";
+
+fn disconnected(event: &str) -> Vec<u8> {
+    envelope(
+        event,
+        "notes.vault.disconnected.v1",
+        &format!("notes_connection:{CONNECTION}"),
+        &serde_json::json!({
+            "connection_id": CONNECTION,
+            "channel": "plugin",
+            "vault_display_name": "Personal",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn disconnect_during_analysis_leaves_nothing() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    sqlx::raw_sql(SLOW_DISCONNECTION)
+        .execute(setup.database.database.pool())
+        .await?;
+    let revision = setup.store_note(NOTE_TEXT.as_bytes())?;
+    let worker = setup.spawn(analyses(1));
+    setup
+        .publish(
+            "evt.notes.vault.disconnected.v1",
+            &event_id(500),
+            disconnected(&event_id(500)),
+        )
+        .await?;
+    // The disconnection is delivered and sleeps inside its transaction.
+    eventually("the disconnection is in flight", || async {
+        Ok(setup.durable(VAULTS_DURABLE).await? == (1, 0, 1))
+    })
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let created = Change {
+        file_id: FILE,
+        sequence: 1,
+        kind: "created",
+        path: "Projects/Garden.md",
+        revision: &revision,
+        media_type: "text/markdown",
+        length: NOTE_TEXT.len(),
+    };
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(501),
+            created.envelope(&event_id(501)),
+        )
+        .await?;
+
+    assert_eq!(setup.settle(FILES_DURABLE, 1).await?, (0, 0, 1));
+    assert_eq!(setup.settle(VAULTS_DURABLE, 1).await?, (0, 0, 1));
+    assert_eq!(
+        setup.runs_for(FILE, &revision).await?,
+        0,
+        "no run of a file whose connection was removed during its analysis"
+    );
+    assert_eq!(
+        setup.count(NOTE_SEARCH_DOCUMENTS).await?,
+        0,
+        "no search entry of the removed connection"
+    );
+    setup.finish(worker).await
+}
+
+#[tokio::test]
+async fn redelivery_after_a_missed_removal_removes_the_file() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let revision = setup.store_note(NOTE_TEXT.as_bytes())?;
+    let worker = setup.spawn(analyses(1));
+    let created = Change {
+        file_id: FILE,
+        sequence: 1,
+        kind: "created",
+        path: "Projects/Garden.md",
+        revision: &revision,
+        media_type: "text/markdown",
+        length: NOTE_TEXT.len(),
+    };
+    let event = event_id(510);
+    setup
+        .publish(FILES_SUBJECT, &event, created.envelope(&event))
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 1).await?, (0, 0, 1));
+    assert_eq!(
+        setup.runs_for(FILE, &revision).await?,
+        1,
+        "the note is analysed"
+    );
+    // What a removal that committed between the claim and the persisted analysis leaves, when the
+    // worker then dies before its check: the connection is removed, the guard row is gone and the
+    // analysis stays.
+    sqlx::raw_sql(&format!(
+        "insert into knowledge.notes_disconnections (tenant_ref, connection_id)
+         values ('{OWNER}', '{CONNECTION}');
+         delete from knowledge.notes_files;"
+    ))
+    .execute(setup.database.database.pool())
+    .await?;
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &format!("{event}-again"),
+            created.envelope(&event),
+        )
+        .await?;
+
+    assert_eq!(setup.settle(FILES_DURABLE, 2).await?, (0, 0, 2));
+    assert_eq!(
+        setup.runs_for(FILE, &revision).await?,
+        0,
+        "the redelivery removes the analysis of the removed connection"
+    );
+    assert_eq!(setup.count(NOTE_SEARCH_DOCUMENTS).await?, 0);
+    setup.finish(worker).await
+}
