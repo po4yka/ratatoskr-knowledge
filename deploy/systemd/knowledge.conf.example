@@ -17,6 +17,10 @@ RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9081
 # `01-database-and-roles.sql`, then that file, then this service.
 RATATOSKR__STORAGE__DATABASE_URL=postgres://ratatoskr_knowledge:CHANGE-ME@127.0.0.1:5432/ratatoskr
 RATATOSKR__STORAGE__BLOB_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-knowledge
+# The notes blob root, owned by ratatoskr-notes (changeset OBS-023). Knowledge reads note bytes
+# there read-only, through the group ratatoskr-notes-blobs that the unit adds, and never writes
+# there. Without this key no note is analysed: each note change waits on the durable.
+RATATOSKR__BLOBS__NOTES_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-notes
 
 # Inference. Both flows below use the openrouter provider, which needs this key and model.
 RATATOSKR__PROVIDER__OPENROUTER__API_KEY=CHANGE-ME

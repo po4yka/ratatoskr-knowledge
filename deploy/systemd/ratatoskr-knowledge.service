@@ -1,0 +1,64 @@
+[Unit]
+Description=Ratatoskr Knowledge
+Documentation=https://github.com/po4yka/ratatoskr-knowledge/blob/main/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+# Stopped and restarted with the rest of the deployment; see ratatoskr.target in ratatoskr-platform.
+PartOf=ratatoskr.target
+
+[Service]
+Type=exec
+User=ratatoskr-knowledge
+Group=ratatoskr-knowledge
+EnvironmentFile=/etc/ratatoskr/knowledge.conf
+ExecStartPre=/usr/local/bin/ratatoskr-knowledge-service check-config
+ExecStart=/usr/local/bin/ratatoskr-knowledge-service
+Restart=always
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=35s
+
+StandardOutput=append:/mnt/nvme/ratatoskr/logs/knowledge.log
+StandardError=append:/mnt/nvme/ratatoskr/logs/knowledge.log
+
+MemoryHigh=768M
+MemoryMax=1G
+CPUQuota=200%
+TasksMax=256
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# `ratatoskr` is the shared group of every Ratatoskr unit: /etc/ratatoskr is 0750 root:ratatoskr and
+# /mnt/nvme/ratatoskr/logs 0770 root:ratatoskr (ratatoskr-platform deploy/README.md step 1), so
+# without it this process cannot reach its own nkey seed. `Group=` sets the primary group only.
+# `ratatoskr-notes-blobs` is the read group of the notes blob root (changeset OBS-023, workspace
+# design D12): the root is 2750 and each note blob 0640 with that group, so Knowledge can read a
+# note and never write one.
+SupplementaryGroups=ratatoskr ratatoskr-notes-blobs
+ReadWritePaths=/mnt/nvme/ratatoskr/blobs/ratatoskr-knowledge
+ReadOnlyPaths=/etc/ratatoskr/knowledge.nkey /mnt/nvme/ratatoskr/blobs/ratatoskr-notes
+
+[Install]
+WantedBy=ratatoskr.target

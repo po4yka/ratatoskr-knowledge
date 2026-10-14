@@ -368,6 +368,7 @@ fn apply_entry(
             }
             config.storage.blob_root = PathBuf::from(value);
         }
+        "RATATOSKR__BLOBS__NOTES_ROOT" => config.blobs.notes_root = Some(PathBuf::from(value)),
         "RATATOSKR__PROVIDER__OPENROUTER__API_KEY" => {
             if value.is_empty() {
                 return Err(ConfigError::new(key, "must be a non-empty credential"));

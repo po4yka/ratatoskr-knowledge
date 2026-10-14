@@ -15,4 +15,4 @@
 ## 3. The notes blob root (workspace tasks 10.5 and 10.6)
 
 - [x] 3.1 RED: `services/knowledge/tests/notes_intake.rs::missing_blob_is_transient` loads the configuration with `RATATOSKR__BLOBS__NOTES_ROOT` and asserts a negative acknowledgement with the transient delay and no run when the blob is missing; `services/knowledge/tests/deployment_profile.rs::the_unit_reads_the_notes_blob_root_through_its_group` asserts the key in the example and the group in the unit. Confirm that both fail because the notes blob root is not configured.
-- [ ] 3.2 GREEN: read the notes blob root read-only with the configuration key `RATATOSKR__BLOBS__NOTES_ROOT`, and add the Knowledge unit with `SupplementaryGroups=ratatoskr ratatoskr-notes-blobs`. Verify 3.1 and the deployment-profile test with the new key.
+- [x] 3.2 GREEN: read the notes blob root read-only with the configuration key `RATATOSKR__BLOBS__NOTES_ROOT`, and add the Knowledge unit with `SupplementaryGroups=ratatoskr ratatoskr-notes-blobs`. Verify 3.1 and the deployment-profile test with the new key.

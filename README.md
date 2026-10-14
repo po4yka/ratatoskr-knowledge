@@ -144,6 +144,7 @@ RATATOSKR__ADMIN__LISTEN_ADDRESS
 RATATOSKR__API__LISTEN_ADDRESS
 RATATOSKR__STORAGE__DATABASE_URL
 RATATOSKR__STORAGE__BLOB_ROOT
+RATATOSKR__BLOBS__NOTES_ROOT
 RATATOSKR__LIMITS__DATABASE_CONNECTIONS
 RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS
 RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS
@@ -338,6 +339,14 @@ The provider failure classes recorded on an attempt, and what the ingest worker 
 repository facts are rows of `knowledge.event_outbox`, committed with the state change that produced
 them and published to `evt.<subject>` with `Nats-Msg-Id` equal to the outbox id, so a crash between
 the broker's acknowledgement and the `published_at` update republishes a message the broker drops.
+A note change reads its bytes from `RATATOSKR__BLOBS__NOTES_ROOT`, the notes blob root that
+`ratatoskr-notes` owns, read-only. Knowledge refuses a note above `RATATOSKR__LIMITS__BLOB_BYTES`
+(class `note_too_large`) and checks the length and the SHA-256 digest of the bytes against the
+event. An absent blob, a wrong length or digest and an unset root are redelivered with the class
+`notes_blob`, because the notes service can still write the blob. A file that is not
+`text/markdown` is acknowledged with no run. The note analysis is `note_analysis_v1` with the
+prompt `note_prompt_v1`; the fixture provider does not answer it.
+
 `/ready` additionally requires the six consumers to be verified and connected and the publisher not
 to have failed for more than 30 seconds. If a worker task ends for any reason before shutdown, the
 process begins drain and exits non-zero.
