@@ -24,7 +24,7 @@
 
 ## 5. Only the current revision is searchable (workspace tasks 10.9 and 10.10)
 
-- [ ] 5.1 RED: `services/knowledge/tests/notes_intake.rs::updated_note_replaces_its_search_entry` asserts that the text of the first revision is not found after an `updated` change; `rename_updates_the_title` asserts that a `renamed` change with the same revision changes the search title; `rename_to_non_markdown_removes_the_entry` asserts that a rename to `image/png` leaves no search entry. Confirm that all three fail because the projection of an earlier revision and the earlier title stay.
+- [x] 5.1 RED: `services/knowledge/tests/notes_intake.rs::updated_note_replaces_its_search_entry` asserts that the text of the first revision is not found after an `updated` change; `rename_updates_the_title` asserts that a `renamed` change with the same revision changes the search title; `rename_to_non_markdown_removes_the_entry` asserts that a rename to `image/png` leaves no search entry. Confirm that all three fail because the projection of an earlier revision and the earlier title stay.
 - [ ] 5.2 GREEN: when a note revision is persisted, retire the search projections of every other revision of the same `(tenant, ratatoskr-notes, file_id)`; set the search title from the latest change; remove the derived data of a file whose current change is not Markdown. Verify 5.1.
 
 ## 6. Bounded, encoded note context and a strict root (workspace tasks 10.11 and 10.12)

@@ -251,6 +251,20 @@ impl Change<'_> {
         payload
     }
 
+    /// The envelope of a `renamed` change from `previous_path`.
+    pub(crate) fn renamed_from(&self, event_id: &str, previous_path: &str) -> Vec<u8> {
+        let mut payload = self.payload();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("previous_path".to_owned(), serde_json::json!(previous_path));
+        }
+        envelope(
+            event_id,
+            "notes.file.changed.v1",
+            &format!("notes_file:{}", self.file_id),
+            &payload,
+        )
+    }
+
     pub(crate) fn envelope(&self, event_id: &str) -> Vec<u8> {
         envelope(
             event_id,

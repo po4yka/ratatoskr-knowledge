@@ -496,3 +496,163 @@ async fn redelivery_after_a_missed_removal_removes_the_file() -> TestResult {
     assert_eq!(setup.count(NOTE_SEARCH_DOCUMENTS).await?, 0);
     setup.finish(worker).await
 }
+
+/// The first revision of the garden note: it also names alpacas.
+const FIRST_TEXT: &str =
+    "# Garden\n\nAlpaca beds come first.\n\nThe garden plan starts in spring.\n";
+
+/// The owner's search results that are notes, for one query.
+async fn note_hits(setup: &Setup, query: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let page = search_page(
+        setup.database.database.pool(),
+        &SearchQuery::new(OWNER, query, 100, 0)?,
+    )
+    .await?;
+    Ok(page
+        .results
+        .iter()
+        .filter(|result| result.owner_context == "ratatoskr-notes")
+        .count())
+}
+
+/// The search titles of notes.
+async fn note_titles(setup: &Setup) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select title from knowledge.search_documents where owner_context = 'ratatoskr-notes'
+         order by title",
+    )
+    .fetch_all(setup.database.database.pool())
+    .await
+}
+
+/// A change of the garden note.
+fn garden<'a>(sequence: u64, kind: &'a str, path: &'a str, revision: &'a str) -> Change<'a> {
+    Change {
+        file_id: FILE,
+        sequence,
+        kind,
+        path,
+        revision,
+        media_type: "text/markdown",
+        length: NOTE_TEXT.len(),
+    }
+}
+
+#[tokio::test]
+async fn updated_note_replaces_its_search_entry() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let first = setup.store_note(FIRST_TEXT.as_bytes())?;
+    let second = setup.store_note(NOTE_TEXT.as_bytes())?;
+    let worker = setup.spawn(analyses(2));
+    let created = Change {
+        length: FIRST_TEXT.len(),
+        ..garden(1, "created", "Projects/Garden.md", &first)
+    };
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(600),
+            created.envelope(&event_id(600)),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 1).await?, (0, 0, 1));
+    assert_eq!(
+        note_hits(&setup, "alpaca").await?,
+        1,
+        "the first revision is found"
+    );
+
+    let updated = garden(2, "updated", "Projects/Garden.md", &second);
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(601),
+            updated.envelope(&event_id(601)),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 2).await?, (0, 0, 2));
+    assert_eq!(
+        setup.runs_for(FILE, &second).await?,
+        1,
+        "the update is analysed"
+    );
+    assert_eq!(
+        note_hits(&setup, "alpaca").await?,
+        0,
+        "the text of the first revision is not found"
+    );
+    assert_eq!(
+        setup.count(NOTE_SEARCH_DOCUMENTS).await?,
+        1,
+        "one search entry for the file"
+    );
+    setup.finish(worker).await
+}
+
+#[tokio::test]
+async fn rename_updates_the_title() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let revision = setup.store_note(NOTE_TEXT.as_bytes())?;
+    let worker = setup.spawn(analyses(1));
+    let created = garden(1, "created", "Projects/Garden.md", &revision);
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(610),
+            created.envelope(&event_id(610)),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 1).await?, (0, 0, 1));
+    let renamed = garden(2, "renamed", "Projects/Orchard.md", &revision);
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(611),
+            renamed.renamed_from(&event_id(611), "Projects/Garden.md"),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 2).await?, (0, 0, 2));
+    assert_eq!(
+        note_titles(&setup).await?,
+        ["Orchard"],
+        "the search title follows the rename"
+    );
+    setup.finish(worker).await
+}
+
+#[tokio::test]
+async fn rename_to_non_markdown_removes_the_entry() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let revision = setup.store_note(NOTE_TEXT.as_bytes())?;
+    let worker = setup.spawn(analyses(1));
+    let created = garden(1, "created", "Projects/Garden.md", &revision);
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(620),
+            created.envelope(&event_id(620)),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 1).await?, (0, 0, 1));
+    let renamed = Change {
+        media_type: "image/png",
+        ..garden(2, "renamed", "Projects/Garden.png", &revision)
+    };
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(621),
+            renamed.renamed_from(&event_id(621), "Projects/Garden.md"),
+        )
+        .await?;
+    assert_eq!(setup.settle(FILES_DURABLE, 2).await?, (0, 0, 2));
+    assert_eq!(
+        setup.count(NOTE_SEARCH_DOCUMENTS).await?,
+        0,
+        "a file that is no longer Markdown has no search entry"
+    );
+    setup.finish(worker).await
+}
