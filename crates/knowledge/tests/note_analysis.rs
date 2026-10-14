@@ -256,7 +256,7 @@ async fn the_context_cap_is_recorded_with_the_run() -> TestResult {
     assert_eq!(
         versions,
         [format!(
-            "note_context_v1:max_characters={NOTE_CONTEXT_CHARACTERS}"
+            "note_context_v1-max-characters-{NOTE_CONTEXT_CHARACTERS}"
         )],
         "the run records the character cap of its context"
     );
