@@ -210,3 +210,59 @@ fn the_example_names_the_shared_database_and_the_role_file_exists() -> Result<()
     );
     Ok(())
 }
+
+const UNIT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../deploy/systemd/ratatoskr-knowledge.service"
+);
+
+/// The notes blob root of `docs/DEPLOYMENT_TARGET.md`, owned by `ratatoskr-notes`.
+const NOTES_ROOT: &str = "/mnt/nvme/ratatoskr/blobs/ratatoskr-notes";
+
+/// The space-separated values of every `key=` line of a unit file.
+fn unit_values<'a>(unit: &'a str, key: &str) -> Vec<&'a str> {
+    unit.lines()
+        .filter_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
+/// Changeset OBS-023, workspace design D12: Knowledge reads note bytes read-only through the read
+/// group of the notes blob root.
+#[test]
+fn the_unit_reads_the_notes_blob_root_through_its_group() -> Result<(), Box<dyn std::error::Error>>
+{
+    let text = std::fs::read_to_string(EXAMPLE)?;
+    let entries = parse_environment_file(&text)?;
+    assert_eq!(
+        entries
+            .get("RATATOSKR__BLOBS__NOTES_ROOT")
+            .map(String::as_str),
+        Some(NOTES_ROOT),
+        "the example names the notes blob root"
+    );
+    let (directory, seed) = temporary_seed()?;
+    let config = load(&entries, &seed);
+    let _ignored = std::fs::remove_dir_all(directory);
+    assert_eq!(
+        config?.blobs.notes_root,
+        Some(PathBuf::from(NOTES_ROOT)),
+        "the key configures the root"
+    );
+
+    let unit = std::fs::read_to_string(UNIT).unwrap_or_default();
+    let groups = unit_values(&unit, "SupplementaryGroups");
+    assert!(
+        groups.contains(&"ratatoskr-notes-blobs") && groups.contains(&"ratatoskr"),
+        "the unit joins the shared group and the notes read group: {groups:?}"
+    );
+    assert!(
+        unit_values(&unit, "ReadOnlyPaths").contains(&NOTES_ROOT),
+        "the unit sees the notes blob root read-only"
+    );
+    assert!(
+        !unit_values(&unit, "ReadWritePaths").contains(&NOTES_ROOT),
+        "the unit never writes the notes blob root"
+    );
+    Ok(())
+}

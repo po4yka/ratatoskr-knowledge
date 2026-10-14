@@ -563,3 +563,89 @@ async fn older_event_after_delete_creates_nothing() -> TestResult {
     );
     setup.finish(worker).await
 }
+
+/// The configuration key of the notes blob root.
+const NOTES_ROOT_KEY: &str = "RATATOSKR__BLOBS__NOTES_ROOT";
+
+/// The value of the label-free redelivery counter on the operator plane.
+fn redeliveries(metrics: &Metrics) -> u64 {
+    metrics
+        .render()
+        .lines()
+        .find_map(|line| line.strip_prefix("knowledge_ingest_redeliveries_total "))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn missing_blob_is_transient() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let (logs, _guard) = capture();
+    let setup = Setup::start().await?;
+    let root = setup.notes_root.path().display().to_string();
+    let config = Config::from_environment([
+        ("RATATOSKR__INGEST__ENABLED", "true"),
+        ("RATATOSKR__INGEST__BUS_ENDPOINT", setup.url.as_str()),
+        ("RATATOSKR__INGEST__PROVIDER_MODE", "fixture"),
+        (
+            "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET",
+            "readme-secret",
+        ),
+        ("RATATOSKR__LIMITS__PROVIDER_TIMEOUT_MS", "5000"),
+        (NOTES_ROOT_KEY, root.as_str()),
+    ]);
+    assert!(
+        config.is_ok(),
+        "the notes blob root is configured through {NOTES_ROOT_KEY}: {:?}",
+        config.as_ref().err()
+    );
+    let worker = setup.spawn_with(config?, analyses(1));
+    // A revision that ratatoskr-notes has not written to its root.
+    let revision = "2".repeat(64);
+    let created = Change {
+        file_id: FILE,
+        sequence: 1,
+        kind: "created",
+        path: "Projects/Garden.md",
+        revision: &revision,
+        media_type: "text/markdown",
+        length: NOTE_TEXT.len(),
+    };
+    setup
+        .publish(
+            FILES_SUBJECT,
+            &event_id(400),
+            created.envelope(&event_id(400)),
+        )
+        .await?;
+
+    let _timed_out = eventually("the change is redelivered", || async {
+        Ok(setup.durable(FILES_DURABLE).await?.2 >= 3)
+    })
+    .await;
+    let delivered = setup.durable(FILES_DURABLE).await?.2;
+    assert!(
+        delivered >= 3,
+        "the change is negatively acknowledged and redelivered: {delivered} deliveries"
+    );
+    assert!(
+        redeliveries(&setup.metrics) >= 2,
+        "each redelivery waits the transient delay of the schedule"
+    );
+    assert_eq!(
+        setup.runs_for(FILE, &revision).await?,
+        0,
+        "no run without the bytes"
+    );
+    assert!(
+        logs.lines_containing("notes_blob") >= 1,
+        "the redelivery is logged with the class notes_blob: {}",
+        logs.text()
+    );
+    assert_eq!(
+        logs.lines_containing("ingest delivery rejected"),
+        0,
+        "a missing blob is never terminal"
+    );
+    setup.finish(worker).await
+}
