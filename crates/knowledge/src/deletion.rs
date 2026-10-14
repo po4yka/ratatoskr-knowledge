@@ -415,8 +415,8 @@ async fn run_child_first_deletion(
         repository_analysis_requests: inbox_state.repository_analysis_requests,
         ai_archive_tombstones: inbox_state.ai_archive_tombstones,
         social_tombstones: inbox_state.social_tombstones,
-        notes_files: 0,
-        notes_disconnections: 0,
+        notes_files: inbox_state.notes_files,
+        notes_disconnections: inbox_state.notes_disconnections,
         event_outbox: inbox_state.event_outbox,
         channel_recap_rows,
     };

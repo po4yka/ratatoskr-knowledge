@@ -19,6 +19,8 @@ pub(crate) struct InboxStateCounts {
     pub(crate) ai_archive_tombstones: u64,
     pub(crate) social_tombstones: u64,
     pub(crate) event_outbox: u64,
+    pub(crate) notes_files: u64,
+    pub(crate) notes_disconnections: u64,
 }
 
 async fn delete_one(
@@ -101,6 +103,9 @@ async fn delete_tenant_state(
     let social_tombstones =
         delete_tenant_rows(transaction, "social_tombstones", tenant_ref).await?;
     let event_outbox = delete_tenant_rows(transaction, "event_outbox", tenant_ref).await?;
+    let notes_files = delete_tenant_rows(transaction, "notes_files", tenant_ref).await?;
+    let notes_disconnections =
+        delete_tenant_rows(transaction, "notes_disconnections", tenant_ref).await?;
     Ok(InboxStateCounts {
         source_analysis_inbox,
         source_analysis_heads,
@@ -109,6 +114,8 @@ async fn delete_tenant_state(
         ai_archive_tombstones,
         social_tombstones,
         event_outbox,
+        notes_files,
+        notes_disconnections,
     })
 }
 
@@ -226,7 +233,9 @@ pub(crate) async fn inbox_state_survivors(
                     where tenant_ref = $1)
                  + (select count(*) from knowledge.ai_archive_tombstones where tenant_ref = $1)
                  + (select count(*) from knowledge.social_tombstones where tenant_ref = $1)
-                 + (select count(*) from knowledge.event_outbox where tenant_ref = $1)",
+                 + (select count(*) from knowledge.event_outbox where tenant_ref = $1)
+                 + (select count(*) from knowledge.notes_files where tenant_ref = $1)
+                 + (select count(*) from knowledge.notes_disconnections where tenant_ref = $1)",
             )
             .bind(tenant_ref)
             .fetch_one(pool)

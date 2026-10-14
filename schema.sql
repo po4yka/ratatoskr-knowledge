@@ -153,6 +153,8 @@ create table if not exists knowledge.deletion_records (
     social_tombstones_deleted integer not null default 0,
     event_outbox_deleted integer not null default 0,
     channel_recap_rows_deleted integer not null default 0,
+    notes_files_deleted integer not null default 0,
+    notes_disconnections_deleted integer not null default 0,
     blob_digests_removed integer not null,
     completed_at timestamptz not null default now(),
     constraint deletion_records_scope_check check (scope in ('tenant', 'source', 'archive'))

@@ -35,7 +35,7 @@
 ## 7. Tenant deletion covers the notes guards (workspace tasks 10.13 and 10.14)
 
 - [x] 7.1 RED: `crates/knowledge/tests/deletion_state.rs::tenant_deletion_removes_the_notes_guards` seeds `knowledge.notes_files` and `knowledge.notes_disconnections` rows for two tenants, deletes one tenant, and asserts that its rows are gone, the other tenant's rows stay, and the receipt and `knowledge.deletion_records` count them. Confirm that it fails because the rows stay.
-- [ ] 7.2 GREEN: delete both tables in the tenant scope, count them in `DeletionCounts` and in the new columns `notes_files_deleted` and `notes_disconnections_deleted`, and include them in the tenant survivor check. Verify 7.1.
+- [x] 7.2 GREEN: delete both tables in the tenant scope, count them in `DeletionCounts` and in the new columns `notes_files_deleted` and `notes_disconnections_deleted`, and include them in the tenant survivor check. Verify 7.1.
 
 ## 8. Release artifact
 

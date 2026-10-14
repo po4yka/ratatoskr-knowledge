@@ -23,9 +23,11 @@ pub(crate) async fn insert_audit_row(
              source_analysis_inbox_deleted, source_analysis_heads_deleted,
              ai_archive_object_inbox_deleted, repository_analysis_requests_deleted,
              ai_archive_tombstones_deleted, social_tombstones_deleted, event_outbox_deleted,
-             channel_recap_rows_deleted, blob_digests_removed
+             channel_recap_rows_deleted, notes_files_deleted, notes_disconnections_deleted,
+             blob_digests_removed
          ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, 0)",
+                   $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+                   0)",
     )
     .bind(deletion_id)
     .bind(scope.tenant_ref())
@@ -56,6 +58,8 @@ pub(crate) async fn insert_audit_row(
     .bind(i32_count(counts.social_tombstones)?)
     .bind(i32_count(counts.event_outbox)?)
     .bind(i32_count(counts.channel_recap_rows)?)
+    .bind(i32_count(counts.notes_files)?)
+    .bind(i32_count(counts.notes_disconnections)?)
     .execute(&mut **transaction)
     .await
     .map_err(DeletionError::Query)?;
