@@ -72,7 +72,7 @@ impl<P: LlmProvider> IngestContext<P> {
                 Err(error) => inbox_failure(&error, REMOVAL),
             };
         }
-        let outcome = self.analyse(tenant, change).await;
+        let outcome = self.analyse(tenant, change, &guard).await;
         if outcome != Outcome::Done {
             return outcome;
         }
@@ -86,7 +86,12 @@ impl<P: LlmProvider> IngestContext<P> {
     }
 
     /// Reads the bytes of a Markdown revision and runs its one analysis.
-    async fn analyse(&self, tenant: TenantRef, change: FileChanged) -> Outcome {
+    async fn analyse(
+        &self,
+        tenant: TenantRef,
+        change: FileChanged,
+        guard: &NoteChange<'_>,
+    ) -> Outcome {
         let Some(blob) = change.blob else {
             return Outcome::Reject("payload");
         };
@@ -95,9 +100,15 @@ impl<P: LlmProvider> IngestContext<P> {
         };
         let text = match read_note_text(root, &blob, self.config.limits.blob_bytes).await {
             Ok(text) => text,
-            Err(NoteBlobError::TooLarge) => return Outcome::Reject("note_too_large"),
-            Err(NoteBlobError::NotUtf8) => return Outcome::Reject("note_encoding"),
-            Err(NoteBlobError::TooLong) => return Outcome::Reject("note_too_long"),
+            Err(NoteBlobError::TooLarge) => {
+                return self.reject_revision(guard, "note_too_large").await;
+            }
+            Err(NoteBlobError::NotUtf8) => {
+                return self.reject_revision(guard, "note_encoding").await;
+            }
+            Err(NoteBlobError::TooLong) => {
+                return self.reject_revision(guard, "note_too_long").await;
+            }
             Err(_) => return Outcome::Retry(BLOB_UNAVAILABLE),
         };
         let note = NoteRevision {
@@ -110,6 +121,19 @@ impl<P: LlmProvider> IngestContext<P> {
         match self.pipeline().execute_note(&note).await {
             Ok(_) => Outcome::Done,
             Err(error) => analysis_failure(&error, "note_analysis"),
+        }
+    }
+
+    /// Rejects a revision that can never be analysed. The guard already holds it as the current
+    /// change of its file, so the derived data of every earlier revision is removed and its text
+    /// does not stay searchable. A redelivery removes again, which changes nothing.
+    async fn reject_revision(&self, guard: &NoteChange<'_>, class: &'static str) -> Outcome {
+        match NotesInbox::new(&self.database).remove_derived(guard).await {
+            Ok(()) => match self.erase_removed_blobs().await {
+                Outcome::Done => Outcome::Reject(class),
+                failure => failure,
+            },
+            Err(error) => inbox_failure(&error, REMOVAL),
         }
     }
 

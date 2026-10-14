@@ -155,6 +155,9 @@ impl<'a> NotesInbox<'a> {
         &self,
         change: &NoteChange<'_>,
     ) -> Result<NoteAdmission, SourceInboxError> {
+        // Only a removal of the connection is checked here. A deletion of the same file cannot
+        // overlap this analysis, because the notes files durable is consumed serially: its
+        // deletion is handled only after this change is settled.
         let mut transaction = self.begin().await?;
         lock_connection(
             &mut transaction,
