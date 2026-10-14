@@ -9,8 +9,8 @@
 use ratatoskr_event_envelope::{EventEnvelope, EventPayload as _};
 use ratatoskr_identifiers::TenantRef;
 use ratatoskr_knowledge::{
-    LlmProvider, NoteAdmission, NoteChange, NoteRevision, NotesInbox, collect_pending_blobs,
-    is_markdown, read_note_blob,
+    LlmProvider, NoteAdmission, NoteBlobError, NoteChange, NoteRevision, NotesInbox,
+    collect_pending_blobs, is_markdown, read_note_text,
 };
 use ratatoskr_notes_contracts::{FileChangeKind, FileChanged, VaultConnected, VaultDisconnected};
 
@@ -93,13 +93,12 @@ impl<P: LlmProvider> IngestContext<P> {
         let Some(root) = self.config.blobs.notes_root.as_deref() else {
             return Outcome::Retry(BLOB_UNAVAILABLE);
         };
-        let bytes = match read_note_blob(root, &blob, self.config.limits.blob_bytes).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.is_permanent() => return Outcome::Reject("note_too_large"),
+        let text = match read_note_text(root, &blob, self.config.limits.blob_bytes).await {
+            Ok(text) => text,
+            Err(NoteBlobError::TooLarge) => return Outcome::Reject("note_too_large"),
+            Err(NoteBlobError::NotUtf8) => return Outcome::Reject("note_encoding"),
+            Err(NoteBlobError::TooLong) => return Outcome::Reject("note_too_long"),
             Err(_) => return Outcome::Retry(BLOB_UNAVAILABLE),
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
-            return Outcome::Reject("note_encoding");
         };
         let note = NoteRevision {
             tenant,

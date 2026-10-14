@@ -81,14 +81,24 @@ pub fn is_markdown(media_type: &str) -> bool {
         .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/markdown"))
 }
 
+/// The context builder version that a note run records: `note_context_v1` and its character cap.
+#[must_use]
+pub fn note_context_version() -> String {
+    format!("note_context_v1-max-characters-{NOTE_CONTEXT_CHARACTERS}")
+}
+
 /// Builds deterministic note evidence with a distinct prompt identity.
+///
+/// The context is one JSON object, so the note text is one JSON string: a line of the note can
+/// never forge another field of the context.
 #[must_use]
 pub fn note_context(note: &NoteRevision) -> String {
-    format!(
-        "family: note\ntitle: {}\nnote_text: {}\n",
-        note.title(),
-        note.text
-    )
+    serde_json::json!({
+        "family": "note",
+        "title": note.title(),
+        "note_text": note.text,
+    })
+    .to_string()
 }
 
 /// Generates the strict JSON Schema for note analysis.
@@ -162,7 +172,7 @@ impl NoteBlobError {
     /// Whether a later delivery of the same reference can never succeed.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
-        matches!(self, Self::TooLarge)
+        matches!(self, Self::TooLarge | Self::NotUtf8 | Self::TooLong)
     }
 }
 
@@ -213,12 +223,18 @@ pub async fn read_note_blob(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`read_note_blob`].
+/// Returns the errors of [`read_note_blob`], [`NoteBlobError::NotUtf8`] for bytes that are not
+/// UTF-8, and [`NoteBlobError::TooLong`] for a text of more than [`NOTE_CONTEXT_CHARACTERS`]
+/// characters. The note is refused whole, never cut.
 pub async fn read_note_text(
     root: &Path,
     blob: &BlobRef,
     ceiling: u64,
 ) -> Result<String, NoteBlobError> {
     let bytes = read_note_blob(root, blob, ceiling).await?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let text = String::from_utf8(bytes).map_err(|_| NoteBlobError::NotUtf8)?;
+    if text.chars().count() > NOTE_CONTEXT_CHARACTERS {
+        return Err(NoteBlobError::TooLong);
+    }
+    Ok(text)
 }

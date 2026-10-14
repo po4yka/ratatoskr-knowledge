@@ -343,9 +343,13 @@ A note change reads its bytes from `RATATOSKR__BLOBS__NOTES_ROOT`, the notes blo
 `ratatoskr-notes` owns, read-only. Knowledge refuses a note above `RATATOSKR__LIMITS__BLOB_BYTES`
 (class `note_too_large`) and checks the length and the SHA-256 digest of the bytes against the
 event. An absent blob, a wrong length or digest and an unset root are redelivered with the class
-`notes_blob`, because the notes service can still write the blob. A file that is not
-`text/markdown` is acknowledged with no run. The note analysis is `note_analysis_v1` with the
-prompt `note_prompt_v1`; the fixture provider does not answer it.
+`notes_blob`, because the notes service can still write the blob. A note that is not UTF-8
+(`note_encoding`) or longer than 32000 characters (`note_too_long`) is refused whole at its first
+delivery; the run records the cap in its context builder version,
+`note_context_v1-max-characters-32000`, and the context carries the note text as one JSON string.
+A file that is not `text/markdown` is acknowledged with no run, and a note renamed to another media
+type leaves the search. The note analysis is `note_analysis_v1` with the prompt `note_prompt_v1`;
+the fixture provider does not answer it. `RATATOSKR__BLOBS__NOTES_ROOT` must be an absolute path.
 
 `/ready` additionally requires the six consumers to be verified and connected and the publisher not
 to have failed for more than 30 seconds. If a worker task ends for any reason before shutdown, the

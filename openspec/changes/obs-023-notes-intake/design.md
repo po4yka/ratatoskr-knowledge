@@ -41,7 +41,10 @@ the same class.
 ### The note analysis family
 
 `note_analysis_v1` has a summary, at most 12 topics and one exact excerpt from the note. The
-validator refuses an excerpt that is not in the note text. The search title is the file name
+validator refuses an excerpt that is not in the note text. The context `note_context_v1` is one
+JSON object, so the note text is one JSON string, and it holds at most 32000 characters: a longer
+note, and bytes that are not UTF-8, are refused whole and permanently, never cut. The run records
+the cap in its context builder version, `note_context_v1-max-characters-32000`. The search title is the file name
 without the `.md` suffix, the lead is the first 280 characters of the note and the body is the note
 text.
 

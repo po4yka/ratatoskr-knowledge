@@ -29,9 +29,10 @@ use crate::{
     PersistenceError, ProviderError, RepositoryAnalysis, RepositoryAnalysisAdmission,
     RepositoryAnalysisConsumer, RepositoryAnalysisError, SocialAnalysis, SourceInbox,
     SourceInboxError, SourceReference, archive_generation_request,
-    archive_project_generation_request, note_generation_request, repository_generation_request,
-    social_generation_request, validate_archive_analysis, validate_archive_project_analysis,
-    validate_note_analysis, validate_repository_analysis, validate_social_analysis,
+    archive_project_generation_request, note_context_version, note_generation_request,
+    repository_generation_request, social_generation_request, validate_archive_analysis,
+    validate_archive_project_analysis, validate_note_analysis, validate_repository_analysis,
+    validate_social_analysis,
 };
 
 /// Authorized byte resolver for a GitHub-owned README reference.
@@ -424,7 +425,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                 source,
                 "note_analysis_v1",
                 "note_prompt_v1",
-                "note_context_v1",
+                &note_context_version(),
             )
             .await?;
         let request = note_generation_request(note)?;

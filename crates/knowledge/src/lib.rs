@@ -152,8 +152,8 @@ pub use indexer::{
 };
 pub use note_analysis::{
     NOTE_CONTEXT_CHARACTERS, NOTES_OWNER, NoteAnalysis, NoteBlobError, NoteRevision, is_markdown,
-    note_analysis_schema, note_context, note_generation_request, read_note_blob, read_note_text,
-    validate_note_analysis,
+    note_analysis_schema, note_context, note_context_version, note_generation_request,
+    read_note_blob, read_note_text, validate_note_analysis,
 };
 pub use notes_inbox::{NoteAdmission, NoteChange, NotesInbox};
 pub use openrouter::{
