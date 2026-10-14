@@ -488,6 +488,32 @@ create table if not exists knowledge.source_analysis_heads (
     constraint source_analysis_heads_digest_check check (content_digest_hex ~ '^[0-9a-f]{64}$')
 );
 
+-- Changeset OBS-023: the ordering guard of note file changes. One row per file holds the highest
+-- connection sequence that Knowledge applied and whether that change was a deletion, so a lower
+-- sequence is never applied and a deletion keeps its row. It holds no path and no text.
+create table if not exists knowledge.notes_files (
+    tenant_ref text not null,
+    file_id uuid not null,
+    connection_id uuid not null,
+    connection_sequence bigint not null,
+    deleted boolean not null,
+    updated_at timestamptz not null default now(),
+    primary key (tenant_ref, file_id),
+    constraint notes_files_sequence_check check (connection_sequence >= 1)
+);
+
+create index if not exists notes_files_connection_idx
+    on knowledge.notes_files (tenant_ref, connection_id);
+
+-- One row per removed vault connection: a late file change of a removed connection creates
+-- nothing. Connection ids are never reused, so the row is final.
+create table if not exists knowledge.notes_disconnections (
+    tenant_ref text not null,
+    connection_id uuid not null,
+    disconnected_at timestamptz not null default now(),
+    primary key (tenant_ref, connection_id)
+);
+
 create index if not exists repository_analysis_pending_idx
     on knowledge.repository_analysis_requests (tenant_ref, created_at)
     where state = 'pending';

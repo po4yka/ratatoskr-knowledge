@@ -457,7 +457,7 @@ impl<P: LlmProvider> IngestContext<P> {
             IngestFamily::AiArchive => self.ai_archive(bytes).await,
             IngestFamily::Repository => self.repository(bytes, delivered).await,
             IngestFamily::NotesFiles => self.notes_files(bytes).await,
-            IngestFamily::NotesVaults => crate::ingest_notes::notes_vaults(bytes),
+            IngestFamily::NotesVaults => self.notes_vaults(bytes).await,
         }
     }
 

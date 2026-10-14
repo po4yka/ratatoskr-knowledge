@@ -39,6 +39,7 @@ mod family_pipeline;
 mod github_readme;
 mod indexer;
 mod note_analysis;
+mod notes_inbox;
 mod openrouter;
 mod pipeline;
 mod provider;
@@ -153,6 +154,7 @@ pub use note_analysis::{
     NOTES_OWNER, NoteAnalysis, NoteBlobError, NoteRevision, is_markdown, note_analysis_schema,
     note_context, note_generation_request, read_note_blob, validate_note_analysis,
 };
+pub use notes_inbox::{NoteAdmission, NoteChange, NotesInbox};
 pub use openrouter::{
     OpenRouterProvider, OpenRouterSettings, OpenRouterWireError, RetryPolicy, chat_completion_body,
     classify_error, parse_success_envelope,

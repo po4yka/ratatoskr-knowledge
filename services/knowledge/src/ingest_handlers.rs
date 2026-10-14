@@ -99,7 +99,7 @@ impl From<EventOutboxError> for QueueFailure {
 
 /// A failed inbox write or read: a delivery the schema cannot hold is rejected, anything else is
 /// the database and is redelivered.
-fn inbox_failure(error: &SourceInboxError, retry_class: &'static str) -> Outcome {
+pub(crate) fn inbox_failure(error: &SourceInboxError, retry_class: &'static str) -> Outcome {
     if error.is_permanent() {
         Outcome::Reject("inbox_invalid")
     } else {

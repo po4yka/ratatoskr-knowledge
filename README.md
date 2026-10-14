@@ -59,7 +59,10 @@ analysis, and persists the evidence and result.
   removal or tombstone deletes the derived state; `knowledge.repository_analysis.requested.v1` is
   analysed with the README bytes resolved from GitHub's internal reader route;
   `notes.file.changed.v1` of a Markdown file is analysed once per `(file_id, revision)` with the
-  note bytes read from the notes blob root (changeset OBS-023). Completion and
+  note bytes read from the notes blob root, and a `deleted` change or
+  `notes.vault.disconnected.v1` removes the derived state of the file or of every file of the
+  connection; `knowledge.notes_files` orders the changes of one file by connection sequence, so an
+  older change never recreates a removed file (changeset OBS-023). Completion and
   failure facts are committed to `knowledge.event_outbox` in the transaction that produced them and
   published once to `evt.knowledge.*`;
 - a channel-recap chain that conforms to the channel-digests manifest contract (the path and the

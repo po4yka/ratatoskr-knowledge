@@ -44,6 +44,8 @@ async fn owned_schema_applies_twice_without_cross_schema_objects()
             "embedding_failures",
             "event_outbox",
             "highlights",
+            "notes_disconnections",
+            "notes_files",
             "provider_usage",
             "repository_analysis_requests",
             "search_documents",

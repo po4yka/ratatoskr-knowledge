@@ -2,14 +2,20 @@
 //!
 //! A file change is itself the analysis request: there is no command channel from
 //! `ratatoskr-notes` into Knowledge. One run exists for each `(file_id, revision)`, so a
-//! redelivery resumes that run instead of creating another one.
+//! redelivery resumes that run instead of creating another one. A deleted file and a removed
+//! connection remove the derived data, and the guard of each file keeps an older change from
+//! creating it again.
 
-use ratatoskr_event_envelope::EventPayload as _;
-use ratatoskr_knowledge::{LlmProvider, NoteRevision, is_markdown, read_note_blob};
+use ratatoskr_event_envelope::{EventEnvelope, EventPayload as _};
+use ratatoskr_identifiers::TenantRef;
+use ratatoskr_knowledge::{
+    LlmProvider, NoteAdmission, NoteChange, NoteRevision, NotesInbox, collect_pending_blobs,
+    is_markdown, read_note_blob,
+};
 use ratatoskr_notes_contracts::{FileChangeKind, FileChanged, VaultConnected, VaultDisconnected};
 
 use crate::ingest::IngestContext;
-use crate::ingest_handlers::{Outcome, analysis_failure, decode};
+use crate::ingest_handlers::{Outcome, analysis_failure, decode, inbox_failure};
 
 const NOTES_PRODUCERS: &[&str] = &["ratatoskr-notes"];
 
@@ -17,8 +23,12 @@ const NOTES_PRODUCERS: &[&str] = &["ratatoskr-notes"];
 /// digest, or under a root that is not configured. The notes service can still write them.
 const BLOB_UNAVAILABLE: &str = "notes_blob";
 
+/// The class of a removal that failed and will be applied by a later delivery.
+const REMOVAL: &str = "notes_removal";
+
 impl<P: LlmProvider> IngestContext<P> {
-    /// `notes.file.changed.v1`: analyse a Markdown revision once; acknowledge anything else.
+    /// `notes.file.changed.v1`: analyse a Markdown revision once, remove a deleted file, and
+    /// acknowledge anything else.
     pub(crate) async fn notes_files(&self, bytes: &[u8]) -> Outcome {
         let (envelope, tenant) = match decode(bytes, NOTES_PRODUCERS) {
             Ok(decoded) => decoded,
@@ -30,13 +40,47 @@ impl<P: LlmProvider> IngestContext<P> {
         let Ok(change) = envelope.payload_as::<FileChanged>() else {
             return Outcome::Reject("payload");
         };
+        let tenant_ref = tenant.to_string();
+        let guard = NoteChange {
+            tenant_ref: &tenant_ref,
+            connection_id: change.connection_id.0,
+            file_id: change.file_id.0,
+            connection_sequence: change.connection_sequence,
+        };
+        let inbox = NotesInbox::new(&self.database);
         match change.change_kind {
             FileChangeKind::Created | FileChangeKind::Updated | FileChangeKind::Renamed => {}
-            _ => return Outcome::Done,
+            FileChangeKind::Deleted => {
+                return match inbox.accept_deletion(&guard).await {
+                    Ok(_) => self.erase_removed_blobs().await,
+                    Err(error) => inbox_failure(&error, REMOVAL),
+                };
+            }
+            _ => return Outcome::Reject("change_kind"),
+        }
+        match inbox.accept_change(&guard).await {
+            Ok(NoteAdmission::Current) => {}
+            Ok(NoteAdmission::Stale) => return Outcome::Done,
+            Err(error) => return inbox_failure(&error, "notes_inbox"),
         }
         if !is_markdown(change.media_type.as_str()) {
             return Outcome::Done;
         }
+        let outcome = self.analyse(tenant, change).await;
+        if outcome != Outcome::Done {
+            return outcome;
+        }
+        // The connection may have been removed while the note was analysed: the removal then
+        // missed this analysis, so remove it here.
+        match inbox.settle_after_analysis(&guard).await {
+            Ok(NoteAdmission::Current) => Outcome::Done,
+            Ok(NoteAdmission::Stale) => self.erase_removed_blobs().await,
+            Err(error) => inbox_failure(&error, REMOVAL),
+        }
+    }
+
+    /// Reads the bytes of a Markdown revision and runs its one analysis.
+    async fn analyse(&self, tenant: TenantRef, change: FileChanged) -> Outcome {
         let Some(blob) = change.blob else {
             return Outcome::Reject("payload");
         };
@@ -63,22 +107,44 @@ impl<P: LlmProvider> IngestContext<P> {
             Err(error) => analysis_failure(&error, "note_analysis"),
         }
     }
-}
 
-/// `notes.vault.*`: a connected vault needs no work; its files arrive as file changes.
-pub(crate) fn notes_vaults(bytes: &[u8]) -> Outcome {
-    let (envelope, _tenant) = match decode(bytes, NOTES_PRODUCERS) {
-        Ok(decoded) => decoded,
-        Err(outcome) => return outcome,
-    };
-    let valid = match envelope.event_type.to_wire().as_str() {
-        VaultConnected::EVENT_TYPE => envelope.payload_as::<VaultConnected>().is_ok(),
-        VaultDisconnected::EVENT_TYPE => envelope.payload_as::<VaultDisconnected>().is_ok(),
-        _ => return Outcome::Reject("type"),
-    };
-    if valid {
-        Outcome::Done
-    } else {
-        Outcome::Reject("payload")
+    /// `notes.vault.*`: a connected vault needs no work, because its files arrive as file
+    /// changes; a removed vault loses the derived data of every file.
+    pub(crate) async fn notes_vaults(&self, bytes: &[u8]) -> Outcome {
+        let (envelope, tenant) = match decode(bytes, NOTES_PRODUCERS) {
+            Ok(decoded) => decoded,
+            Err(outcome) => return outcome,
+        };
+        match envelope.event_type.to_wire().as_str() {
+            VaultConnected::EVENT_TYPE => match envelope.payload_as::<VaultConnected>() {
+                Ok(_) => Outcome::Done,
+                Err(_) => Outcome::Reject("payload"),
+            },
+            VaultDisconnected::EVENT_TYPE => self.disconnected(&envelope, &tenant).await,
+            _ => Outcome::Reject("type"),
+        }
+    }
+
+    async fn disconnected(&self, envelope: &EventEnvelope, tenant: &TenantRef) -> Outcome {
+        let Ok(disconnected) = envelope.payload_as::<VaultDisconnected>() else {
+            return Outcome::Reject("payload");
+        };
+        match NotesInbox::new(&self.database)
+            .accept_disconnection(&tenant.to_string(), disconnected.connection_id.0)
+            .await
+        {
+            Ok(()) => self.erase_removed_blobs().await,
+            Err(error) => inbox_failure(&error, REMOVAL),
+        }
+    }
+
+    /// Erases the Knowledge blobs that a committed removal queued. A failed erasure is finished
+    /// by the redelivery, which drains the queue again.
+    async fn erase_removed_blobs(&self) -> Outcome {
+        match collect_pending_blobs(&self.database, &self.blobs).await {
+            Ok(_) => Outcome::Done,
+            Err(error) if error.is_permanent() => Outcome::Reject("unprocessable"),
+            Err(_) => Outcome::Retry(REMOVAL),
+        }
     }
 }
