@@ -299,11 +299,12 @@ async fn seed_failed_recap(database: &TestDatabase) -> TestResult {
     Ok(())
 }
 
-/// One valid message for each of the five durables.
 const NOTES_CONNECTION: &str = "018f0000-0000-7000-8000-00000000c001";
 const NOTES_EVENT_FILE: &str = "018f0000-0000-7000-8000-000000000b15";
 const NOTES_EVENT_VAULT: &str = "018f0000-0000-7000-8000-000000000b16";
 
+/// One valid message for each of the seven durables: the recap command and the six ingest
+/// families.
 async fn publish_one_valid_message_per_durable(
     fabric: &Authorized,
     recap_command: Vec<u8>,

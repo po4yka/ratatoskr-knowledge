@@ -39,4 +39,4 @@
 
 ## 8. Release artifact
 
-- [ ] 8.1 Add the `release-artifact` job that calls the workspace's `reusable-release-artifact.yml` at a full commit SHA for the `ratatoskr-knowledge-service` binary on linux/arm64, because the repository now ships a unit; and correct `deploy/README.md` on a missing group and a missing notes root. No test: CI configuration and documentation. Verify with `zizmor` and the gate.
+- [x] 8.1 Add the `release-artifact` job that calls the workspace's `reusable-release-artifact.yml` at a full commit SHA for the `ratatoskr-knowledge-service` binary on linux/arm64, because the repository now ships a unit; and correct `deploy/README.md` on a missing group and a missing notes root. No test: CI configuration and documentation. Verify with `zizmor` and the gate.

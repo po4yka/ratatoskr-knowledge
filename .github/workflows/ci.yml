@@ -87,3 +87,111 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny --locked check
+
+  # The artifact the deployment runs, built for the architecture it runs on, and started once.
+  #
+  # The gate above certifies an x86-64 build. The target is `aarch64` with glibc 2.36
+  # (`ratatoskr-workspace/docs/DEPLOYMENT_TARGET.md`), so this job builds the Dockerfile natively on
+  # an arm64 runner and answers the one question the suite cannot: does the thing we ship start on
+  # the thing we ship it to. It checks the configuration, applies `schema.sql` and serves readiness
+  # against a real pgvector database, takes SIGTERM and exits 0. A native runner, not QEMU: this
+  # repository is public, so GitHub's arm64 runners cost nothing, and emulating the build takes hours.
+  artifact:
+    name: linux/arm64 artifact
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: |
+          docker build \
+            --build-arg RATATOSKR_GIT_SHA="$GITHUB_SHA" \
+            --tag ratatoskr-knowledge:ci .
+
+      # The deployable set, exactly. `export` is the stage `ratatoskr-workspace`'s
+      # reusable-release-artifact workflow publishes; its check refuses a binary no unit starts as
+      # firmly as a missing one.
+      - name: The export stage holds exactly the Knowledge service, for aarch64
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --target export \
+            --build-arg RATATOSKR_GIT_SHA="$GITHUB_SHA" \
+            --output "type=local,dest=$RUNNER_TEMP/export" .
+          actual=$(python3 -c 'import os, sys; print(" ".join(sorted(os.listdir(sys.argv[1]))))' "$RUNNER_TEMP/export")
+          if [ "$actual" != "ratatoskr-knowledge-service" ]; then
+            echo "::error::the export stage holds '$actual', expected 'ratatoskr-knowledge-service'"
+            exit 1
+          fi
+          file "$RUNNER_TEMP/export/ratatoskr-knowledge-service" | tee /dev/stderr | grep -q 'ARM aarch64'
+
+      # Start, ready, SIGTERM, exit 0, against the real artifact. Knowledge applies its own
+      # `schema.sql`, which needs pgvector; ingest and the channel recap stay dormant, so no broker
+      # is needed. `--network host` for both, so every address is 127.0.0.1 as in the unit.
+      - name: The artifact serves and stops cleanly
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke-db --network host \
+            -e POSTGRES_USER=knowledge -e POSTGRES_PASSWORD=knowledge -e POSTGRES_DB=knowledge \
+            -e POSTGRES_INITDB_ARGS="--locale-provider=icu --icu-locale=und-x-icu --encoding=UTF8" \
+            pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+          for _ in $(seq 1 60); do
+            if docker exec smoke-db pg_isready -h 127.0.0.1 -U knowledge -d knowledge >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          cat > "$RUNNER_TEMP/smoke.env" <<'ENV'
+          RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9081
+          RATATOSKR__API__LISTEN_ADDRESS=127.0.0.1:8091
+          RATATOSKR__STORAGE__DATABASE_URL=postgres://knowledge:knowledge@127.0.0.1:5432/knowledge
+          RATATOSKR__STORAGE__BLOB_ROOT=/blobs
+          RATATOSKR__BLOBS__NOTES_ROOT=/notes
+          ENV
+          sed -i 's/^[[:space:]]*//' "$RUNNER_TEMP/smoke.env"
+          docker run --rm --network host --env-file "$RUNNER_TEMP/smoke.env" \
+            ratatoskr-knowledge:ci check-config >/dev/null
+          docker run -d --name smoke --network host --tmpfs /blobs:mode=1777 \
+            --env-file "$RUNNER_TEMP/smoke.env" ratatoskr-knowledge:ci
+          ready=no
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9081/ready >/dev/null; then ready=yes; break; fi
+            sleep 1
+          done
+          if [ "$ready" != yes ]; then
+            docker logs smoke >&2
+            echo "::error::Knowledge did not report ready within 60 s"
+            exit 1
+          fi
+          present=$(docker exec smoke-db psql -U knowledge -d knowledge -Atc \
+            "select to_regclass('knowledge.notes_files') is not null")
+          if [ "$present" != "t" ]; then
+            echo "::error::knowledge.notes_files is absent after Knowledge reported itself ready"
+            exit 1
+          fi
+          docker stop -t 40 smoke
+          code=$(docker inspect -f '{{.State.ExitCode}}' smoke)
+          if [ "$code" != 0 ]; then
+            docker logs smoke >&2
+            echo "::error::Knowledge exited $code after SIGTERM"
+            exit 1
+          fi
+          docker rm -f smoke smoke-db
+
+  # The artifact of this commit, published only after the gate and the arm64 smoke test have passed
+  # on it: `ghcr.io/po4yka/ratatoskr-knowledge:sha-<commit>` with SHA256SUMS, an SPDX SBOM and a
+  # build-provenance attestation. The steps live once, in ratatoskr-workspace (openspec
+  # `release-artifacts`). A tag that already exists is never moved.
+  release-artifact:
+    needs: [gate, artifact]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io
+      id-token: write      # the OIDC token the attestation is signed with
+      attestations: write  # record the attestation against this repository
+    uses: po4yka/ratatoskr-workspace/.github/workflows/reusable-release-artifact.yml@75b3ed8cb5f1e0bd638db99126f887b65fa73eb8 # main
