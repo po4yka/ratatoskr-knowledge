@@ -16,7 +16,11 @@ use async_nats::jetstream::{
     consumer::{AckPolicy, DeliverPolicy, PullConsumer, pull},
 };
 use ratatoskr_knowledge::test_support::{TemporaryBlobRoot, TestDatabase};
-use ratatoskr_knowledge::{BlobStore, Config, ProviderResponse, ProviderUsage, ScriptedProvider};
+use ratatoskr_knowledge::{
+    BlobStore, ChunkPolicy, Config, EMBEDDING_STORAGE_DIMENSIONS, Indexer, IndexerLimits,
+    ProviderResponse, ProviderUsage, ScriptedEmbeddingProvider, ScriptedEmbeddingSuccess,
+    ScriptedProvider, SearchQuery, search_page,
+};
 use ratatoskr_knowledge_service::{
     EVENTS_STREAM, Lifecycle, Metrics, Redelivery, RedeliverySchedule,
     spawn_ingest_workers_with_schedule,
@@ -388,4 +392,174 @@ async fn non_markdown_file_creates_no_run() -> TestResult {
         logs.text()
     );
     notes.finish(worker).await
+}
+
+/// The file id of the `index`th test file.
+fn file_id(index: u32) -> String {
+    format!("018f0000-0000-7000-8000-00000001{index:04x}")
+}
+
+/// Embeds every persisted analysis, as the background indexer does.
+async fn index_embeddings(setup: &Setup) -> TestResult {
+    let indexer = Indexer::new(
+        &setup.database.database,
+        ScriptedEmbeddingProvider::new(
+            u16::try_from(EMBEDDING_STORAGE_DIMENSIONS)?,
+            (0..64).map(|_| Ok(ScriptedEmbeddingSuccess { input_tokens: 12 })),
+        ),
+        ChunkPolicy::new(1_600, 200)?,
+        IndexerLimits {
+            batch_sources: 8,
+            max_input_characters: 120_000,
+            max_failure_attempts: 5,
+        },
+    );
+    for _pass in 0..10 {
+        if indexer.process_pending().await?.indexed == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The owner's search results that are notes, browsing every document.
+async fn note_search_results(setup: &Setup) -> Result<usize, Box<dyn std::error::Error>> {
+    let page = search_page(
+        setup.database.database.pool(),
+        &SearchQuery::new(OWNER, "", 100, 0)?,
+    )
+    .await?;
+    let lexical = search_page(
+        setup.database.database.pool(),
+        &SearchQuery::new(OWNER, "garden", 100, 0)?,
+    )
+    .await?;
+    Ok(page
+        .results
+        .iter()
+        .chain(&lexical.results)
+        .filter(|result| result.owner_context == "ratatoskr-notes")
+        .count())
+}
+
+#[tokio::test]
+async fn disconnect_removes_all_derived_data() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let worker = setup.spawn(analyses(30));
+    for index in 1..=30 {
+        let text = format!("# Note {index}\n\n{EXCERPT}\n");
+        let revision = setup.store_note(text.as_bytes())?;
+        let file = file_id(index);
+        let path = format!("Daily/Note {index}.md");
+        let created = Change {
+            file_id: &file,
+            sequence: u64::from(index),
+            kind: "created",
+            path: &path,
+            revision: &revision,
+            media_type: "text/markdown",
+            length: text.len(),
+        };
+        setup
+            .publish(
+                FILES_SUBJECT,
+                &event_id(100 + index),
+                created.envelope(&event_id(100 + index)),
+            )
+            .await?;
+    }
+    assert_eq!(setup.settle(FILES_DURABLE, 30).await?, (0, 0, 30));
+    index_embeddings(&setup).await?;
+    let embeddings = "select count(*) from knowledge.embedding_chunks
+                      where owner_context = 'ratatoskr-notes'";
+    assert_eq!(
+        note_search_results(&setup).await?,
+        60,
+        "30 notes are browsed and found"
+    );
+    assert!(
+        setup.count(embeddings).await? >= 30,
+        "every note is embedded"
+    );
+
+    setup
+        .publish(
+            "evt.notes.vault.disconnected.v1",
+            &event_id(200),
+            envelope(
+                &event_id(200),
+                "notes.vault.disconnected.v1",
+                &format!("notes_connection:{CONNECTION}"),
+                &serde_json::json!({
+                    "connection_id": CONNECTION,
+                    "channel": "plugin",
+                    "vault_display_name": "Personal",
+                }),
+            ),
+        )
+        .await?;
+    assert_eq!(setup.settle(VAULTS_DURABLE, 1).await?, (0, 0, 1));
+    assert_eq!(
+        note_search_results(&setup).await?,
+        0,
+        "no search result of the removed connection remains"
+    );
+    assert_eq!(
+        setup.count(embeddings).await?,
+        0,
+        "no embedding of the removed connection remains"
+    );
+    setup.finish(worker).await
+}
+
+#[tokio::test]
+async fn older_event_after_delete_creates_nothing() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let first = NOTE_TEXT;
+    let second = format!("{NOTE_TEXT}\nA second line.\n");
+    let first_revision = setup.store_note(first.as_bytes())?;
+    let second_revision = setup.store_note(second.as_bytes())?;
+    let worker = setup.spawn(analyses(2));
+    let change = |sequence, kind, revision, length| Change {
+        file_id: FILE,
+        sequence,
+        kind,
+        path: "Projects/Garden.md",
+        revision,
+        media_type: "text/markdown",
+        length,
+    };
+    let steps = [
+        change(1, "created", &first_revision, first.len()),
+        change(3, "deleted", &first_revision, first.len()),
+        change(2, "updated", &second_revision, second.len()),
+    ];
+    for (delivered, step) in (1..).zip(&steps) {
+        let event = event_id(300 + delivered);
+        setup
+            .publish(FILES_SUBJECT, &event, step.envelope(&event))
+            .await?;
+        assert_eq!(
+            setup.settle(FILES_DURABLE, u64::from(delivered)).await?,
+            (0, 0, u64::from(delivered))
+        );
+    }
+    assert_eq!(
+        setup.runs_for(FILE, &second_revision).await?,
+        0,
+        "no run for the older update"
+    );
+    assert_eq!(
+        setup
+            .count(
+                "select count(*) from knowledge.search_documents
+                 where owner_context = 'ratatoskr-notes'"
+            )
+            .await?,
+        0,
+        "no search entry for the deleted file"
+    );
+    setup.finish(worker).await
 }

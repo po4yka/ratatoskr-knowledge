@@ -9,7 +9,7 @@
 
 ## 2. Removal (workspace tasks 10.3 and 10.4)
 
-- [ ] 2.1 RED: `services/knowledge/tests/notes_intake.rs::disconnect_removes_all_derived_data` asserts that no search result and no embedding of 30 analysed files remains after `evt.notes.vault.disconnected.v1`; `older_event_after_delete_creates_nothing` asserts no run for an `updated` event with a lower sequence after a `deleted` event. Confirm that both fail because removal does not exist.
+- [x] 2.1 RED: `services/knowledge/tests/notes_intake.rs::disconnect_removes_all_derived_data` asserts that no search result and no embedding of 30 analysed files remains after `evt.notes.vault.disconnected.v1`; `older_event_after_delete_creates_nothing` asserts no run for an `updated` event with a lower sequence after a `deleted` event. Confirm that both fail because removal does not exist.
 - [ ] 2.2 GREEN: implement removal on `deleted` and on `ratatoskr_knowledge_notes_vaults`, with the guards `knowledge.notes_files` and `knowledge.notes_disconnections`. Verify 2.1.
 
 ## 3. The notes blob root (workspace tasks 10.5 and 10.6)
