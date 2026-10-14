@@ -534,3 +534,63 @@ async fn tombstone_path_keeps_its_own_dedup_receipt() -> Result<(), Box<dyn std:
     database.cleanup().await?;
     Ok(())
 }
+
+/// Changeset OBS-023: the notes guards name the tenant and one file or one connection, and a
+/// tenant deletion removes them with everything else the tenant owns.
+#[tokio::test]
+async fn tenant_deletion_removes_the_notes_guards() -> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::create().await?;
+    let root = TemporaryBlobRoot::create().await?;
+    let blobs = BlobStore::new(root.path(), 65_536);
+    for (tenant, tail) in [(T, 1), (U, 2)] {
+        sqlx::query(
+            "insert into knowledge.notes_files
+                 (tenant_ref, file_id, connection_id, connection_sequence, deleted)
+             values ($1, $2, $3, 1, false), ($1, $4, $3, 2, true)",
+        )
+        .bind(tenant)
+        .bind(uuid(100 + tail))
+        .bind(uuid(200 + tail))
+        .bind(uuid(300 + tail))
+        .execute(database.database.pool())
+        .await?;
+        sqlx::query(
+            "insert into knowledge.notes_disconnections (tenant_ref, connection_id)
+             values ($1, $2)",
+        )
+        .bind(tenant)
+        .bind(uuid(400 + tail))
+        .execute(database.database.pool())
+        .await?;
+    }
+
+    let receipt = delete_tenant(&database.database, &blobs, T).await?;
+
+    for table in ["notes_files", "notes_disconnections"] {
+        assert_eq!(
+            rows(&database, table, T).await?,
+            0,
+            "{table} rows of the deleted tenant survived"
+        );
+    }
+    assert_eq!(rows(&database, "notes_files", U).await?, 2);
+    assert_eq!(rows(&database, "notes_disconnections", U).await?, 1);
+    assert_eq!(
+        receipt.counts,
+        DeletionCounts {
+            notes_files: 2,
+            notes_disconnections: 1,
+            ..DeletionCounts::default()
+        }
+    );
+    let audited: (i32, i32) = sqlx::query_as(
+        "select notes_files_deleted, notes_disconnections_deleted
+         from knowledge.deletion_records where tenant_ref = $1",
+    )
+    .bind(T)
+    .fetch_one(database.database.pool())
+    .await?;
+    assert_eq!(audited, (2, 1), "the audit row counts the notes guards");
+    database.cleanup().await?;
+    Ok(())
+}

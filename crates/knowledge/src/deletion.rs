@@ -110,6 +110,10 @@ pub struct DeletionCounts {
     pub ai_archive_tombstones: u64,
     /// Deleted `knowledge.social_tombstones` rows.
     pub social_tombstones: u64,
+    /// Deleted `knowledge.notes_files` rows, the ordering guards of note files.
+    pub notes_files: u64,
+    /// Deleted `knowledge.notes_disconnections` rows, the guards of removed vault connections.
+    pub notes_disconnections: u64,
     /// Deleted rows of the six `knowledge.channel_recap_*` tables.
     pub channel_recap_rows: u64,
     /// Deleted `knowledge.event_outbox` rows.
@@ -411,6 +415,8 @@ async fn run_child_first_deletion(
         repository_analysis_requests: inbox_state.repository_analysis_requests,
         ai_archive_tombstones: inbox_state.ai_archive_tombstones,
         social_tombstones: inbox_state.social_tombstones,
+        notes_files: 0,
+        notes_disconnections: 0,
         event_outbox: inbox_state.event_outbox,
         channel_recap_rows,
     };
