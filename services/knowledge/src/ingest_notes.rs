@@ -60,7 +60,9 @@ impl<P: LlmProvider> IngestContext<P> {
         }
         match inbox.accept_change(&guard).await {
             Ok(NoteAdmission::Current) => {}
-            Ok(NoteAdmission::Stale) => return Outcome::Done,
+            // A stale change of a removed connection may have removed what a missed removal
+            // left, so its queued blobs are erased too.
+            Ok(NoteAdmission::Stale) => return self.erase_removed_blobs().await,
             Err(error) => return inbox_failure(&error, "notes_inbox"),
         }
         if !is_markdown(change.media_type.as_str()) {

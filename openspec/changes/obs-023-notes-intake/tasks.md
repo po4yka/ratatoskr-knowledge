@@ -20,7 +20,7 @@
 ## 4. A removal that overlaps an analysis (workspace tasks 10.7 and 10.8)
 
 - [x] 4.1 RED: `services/knowledge/tests/notes_intake.rs::disconnect_during_analysis_leaves_nothing` holds a disconnection transaction open (a statement trigger sleeps after its guard delete) while a `created` change of a new file is analysed, and asserts that no run and no search entry of the file remain after both commit; `redelivery_after_a_missed_removal_removes_the_file` analyses a file, then records the disconnection and drops the guard row as a removal that missed the analysis would leave them, redelivers the change, and asserts that no run remains. Confirm that both fail because the removal and the analysis are not serialized and a stale change removes nothing.
-- [ ] 4.2 GREEN: take `pg_advisory_xact_lock_shared` on the hash of `(tenant, connection)` in the claim and in the check after the analysis, and the exclusive lock at the start of the disconnection; when the claim finds the connection removed, remove the derived data of the file (idempotent). Verify 4.1.
+- [x] 4.2 GREEN: take `pg_advisory_xact_lock_shared` on the hash of `(tenant, connection)` in the claim and in the check after the analysis, and the exclusive lock at the start of the disconnection; when the claim finds the connection removed, remove the derived data of the file (idempotent). Verify 4.1.
 
 ## 5. Only the current revision is searchable (workspace tasks 10.9 and 10.10)
 

@@ -6,6 +6,12 @@
 //! applied, and a deletion keeps its row as the guard against an older change.
 //! `knowledge.notes_disconnections` holds one row per removed connection, so a late change of a
 //! removed connection creates nothing. Neither table holds a path or any text.
+//!
+//! One transaction-scoped advisory lock per `(tenant, connection)` serializes a removal with the
+//! changes of its connection: a claim and the check after an analysis take it shared, and a
+//! disconnection takes it exclusive before it reads anything. A change that waits for a removal
+//! therefore sees it, and a removal never deletes the guard rows while a claim that it cannot see
+//! inserts one.
 
 use uuid::Uuid;
 
@@ -95,6 +101,7 @@ impl<'a> NotesInbox<'a> {
         connection_id: Uuid,
     ) -> Result<(), SourceInboxError> {
         let mut transaction = self.begin().await?;
+        lock_connection(&mut transaction, tenant_ref, connection_id, Lock::Exclusive).await?;
         sqlx::query(
             "insert into knowledge.notes_disconnections (tenant_ref, connection_id)
              values ($1, $2) on conflict do nothing",
@@ -130,6 +137,13 @@ impl<'a> NotesInbox<'a> {
         change: &NoteChange<'_>,
     ) -> Result<NoteAdmission, SourceInboxError> {
         let mut transaction = self.begin().await?;
+        lock_connection(
+            &mut transaction,
+            change.tenant_ref,
+            change.connection_id,
+            Lock::Shared,
+        )
+        .await?;
         let admission = if connection_removed(&mut transaction, change).await? {
             remove_file(&mut transaction, change.tenant_ref, change.file_id).await?;
             NoteAdmission::Stale
@@ -180,7 +194,17 @@ async fn claim(
     change: &NoteChange<'_>,
     deleted: bool,
 ) -> Result<NoteAdmission, SourceInboxError> {
+    lock_connection(
+        transaction,
+        change.tenant_ref,
+        change.connection_id,
+        Lock::Shared,
+    )
+    .await?;
     if connection_removed(transaction, change).await? {
+        // A removal that missed this file, because its analysis was persisted after the removal
+        // and the worker died before its check, is finished here. Removing again changes nothing.
+        remove_file(transaction, change.tenant_ref, change.file_id).await?;
         return Ok(NoteAdmission::Stale);
     }
     let sequence =
@@ -220,12 +244,59 @@ async fn claim(
     })
 }
 
-/// Removes every analysis, search entry and embedding of one file, every revision included.
+/// How a transaction holds the lock of one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lock {
+    /// A change of the connection: many may hold it together.
+    Shared,
+    /// The removal of the connection: it waits for every change and holds them off.
+    Exclusive,
+}
+
+/// Takes the transaction-scoped advisory lock of `(tenant_ref, connection_id)`.
+async fn lock_connection(
+    transaction: &mut Transaction<'_>,
+    tenant_ref: &str,
+    connection_id: Uuid,
+    lock: Lock,
+) -> Result<(), SourceInboxError> {
+    let sql = match lock {
+        Lock::Shared => {
+            "select pg_advisory_xact_lock_shared(hashtextextended('notes/' || $1 || '/' || $2, 0))"
+        }
+        Lock::Exclusive => {
+            "select pg_advisory_xact_lock(hashtextextended('notes/' || $1 || '/' || $2, 0))"
+        }
+    };
+    sqlx::query(sql)
+        .bind(tenant_ref)
+        .bind(connection_id.to_string())
+        .execute(&mut **transaction)
+        .await
+        .map_err(PersistenceError::Query)?;
+    Ok(())
+}
+
+/// Removes every analysis, search entry and embedding of one file, every revision included. A file
+/// with no source revision writes no deletion record.
 async fn remove_file(
     transaction: &mut Transaction<'_>,
     tenant_ref: &str,
     file_id: Uuid,
 ) -> Result<(), SourceInboxError> {
+    let derived: bool = sqlx::query_scalar(
+        "select exists (select 1 from knowledge.source_refs
+                        where tenant_ref = $1 and owner_context = $2 and source_document_id = $3)",
+    )
+    .bind(tenant_ref)
+    .bind(NOTES_OWNER)
+    .bind(file_id.to_string())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(PersistenceError::Query)?;
+    if !derived {
+        return Ok(());
+    }
     execute_deletion(
         transaction,
         &DeletionScope::Source {
