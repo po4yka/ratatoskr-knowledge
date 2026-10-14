@@ -36,6 +36,8 @@ pub struct Config {
     pub channel_recap: ChannelRecapConfig,
     /// Optional ingest consumers and the repository README source.
     pub ingest: IngestConfig,
+    /// Blob roots that other services own and Knowledge reads.
+    pub blobs: BlobsConfig,
 }
 
 /// Provider selection for the recap worker.
@@ -102,6 +104,14 @@ pub struct StorageConfig {
     /// Knowledge-owned blob root.
     #[serde(skip_serializing)]
     pub blob_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+/// Blob roots that other services own. Knowledge only reads them.
+pub struct BlobsConfig {
+    /// The notes blob root, owned by `ratatoskr-notes`; absent means no note can be read.
+    #[serde(skip_serializing)]
+    pub notes_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -690,6 +700,7 @@ impl Default for Config {
                 ack_wait_seconds: CHANNEL_RECAP_ACK_WAIT_SECONDS,
             },
             ingest: IngestConfig::default(),
+            blobs: BlobsConfig::default(),
         }
     }
 }
