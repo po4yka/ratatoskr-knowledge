@@ -48,10 +48,17 @@ the cap in its context builder version, `note_context_v1-max-characters-32000`. 
 without the `.md` suffix, the lead is the first 280 characters of the note and the body is the note
 text.
 
+### Serialized removal and current revision
+
+One transaction-scoped advisory lock per `(tenant, connection)` serializes a disconnection
+(exclusive) with the claims and post-analysis checks of its changes (shared). A claim that finds the
+connection removed removes the file again, so a redelivery finishes a removal that an analysis
+outlived. A persisted note revision retires the search projections of every other revision of the
+file; the title follows the latest change; a current change that is not Markdown removes the file
+from search. A tenant deletion removes and counts both guard tables.
+
 ## Risks / Trade-offs
 
-- An updated note keeps the search entry of its earlier revision until a deletion, because the
-  supersession of search projections reads `source_analysis_heads`, which holds only the social and
-  AI-archive families. A follow-up change adds the notes head to that rule.
-- A tenant deletion does not yet remove the rows of `knowledge.notes_files` and
-  `knowledge.notes_disconnections`. They hold identifiers and digests, no text.
+- Embeddings and analyses of earlier note revisions stay as history, as for the other families.
+  Search does not serve them, because the semantic leg joins `search_documents`.
+- The release artifact job runs only on GitHub's arm64 runner; it was checked locally on arm64.
