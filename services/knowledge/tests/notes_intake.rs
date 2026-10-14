@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use ratatoskr_knowledge::{
     ChunkPolicy, Config, EMBEDDING_STORAGE_DIMENSIONS, Indexer, IndexerLimits,
-    ScriptedEmbeddingProvider, ScriptedEmbeddingSuccess, SearchQuery, search_page,
+    NOTE_CONTEXT_CHARACTERS, ScriptedEmbeddingProvider, ScriptedEmbeddingSuccess, SearchQuery,
+    search_page,
 };
 use ratatoskr_knowledge_service::Metrics;
 
@@ -653,6 +654,108 @@ async fn rename_to_non_markdown_removes_the_entry() -> TestResult {
         setup.count(NOTE_SEARCH_DOCUMENTS).await?,
         0,
         "a file that is no longer Markdown has no search entry"
+    );
+    setup.finish(worker).await
+}
+
+/// The guard sequence of one file.
+async fn guard_sequence(setup: &Setup, file: &str) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "select connection_sequence from knowledge.notes_files where file_id = $1::uuid",
+    )
+    .bind(file)
+    .fetch_one(setup.database.database.pool())
+    .await
+}
+
+#[tokio::test]
+async fn rejected_update_removes_the_old_search_entry() -> TestResult {
+    let _serial = BROKER.lock().await;
+    let setup = Setup::start().await?;
+    let worker = setup.spawn(analyses(3));
+    let embeddings = "select count(*) from knowledge.embedding_chunks
+                      where owner_context = 'ratatoskr-notes'";
+    let large = setup.store_note(b"# Large\n")?;
+    let not_utf8: &[u8] = b"# Bytes\n\xff\xfe\n";
+    let encoding = setup.store_note(not_utf8)?;
+    let long_text = "a".repeat(NOTE_CONTEXT_CHARACTERS + 1);
+    let long = setup.store_note(long_text.as_bytes())?;
+    // One file per class: the word its first revision names, and the rejected update.
+    let classes = [
+        ("alpaca", &large, 16_777_217),
+        ("badger", &encoding, not_utf8.len()),
+        ("heron", &long, long_text.len()),
+    ];
+    for (index, (word, _, _)) in (1..).zip(&classes) {
+        let text = format!("# Note {index}\n\n{word} beds come first.\n\n{EXCERPT}\n");
+        let revision = setup.store_note(text.as_bytes())?;
+        let file = file_id(700 + index);
+        let path = format!("Daily/Note {index}.md");
+        let created = Change {
+            length: text.len(),
+            file_id: &file,
+            ..garden(1, "created", &path, &revision)
+        };
+        setup
+            .publish(
+                FILES_SUBJECT,
+                &event_id(700 + index),
+                created.envelope(&event_id(700 + index)),
+            )
+            .await?;
+    }
+    assert_eq!(setup.settle(FILES_DURABLE, 3).await?, (0, 0, 3));
+    index_embeddings(&setup).await?;
+    for (word, _, _) in &classes {
+        assert_eq!(note_hits(&setup, word).await?, 1, "{word} is found");
+    }
+    assert!(
+        setup.count(embeddings).await? >= 3,
+        "every note is embedded"
+    );
+
+    for (index, (_, revision, length)) in (1..).zip(&classes) {
+        let file = file_id(700 + index);
+        let path = format!("Daily/Note {index}.md");
+        let updated = Change {
+            length: *length,
+            file_id: &file,
+            ..garden(2, "updated", &path, revision)
+        };
+        setup
+            .publish(
+                FILES_SUBJECT,
+                &event_id(710 + index),
+                updated.envelope(&event_id(710 + index)),
+            )
+            .await?;
+    }
+    assert_eq!(
+        setup.settle(FILES_DURABLE, 6).await?,
+        (0, 0, 6),
+        "each rejected update is delivered once and acknowledged"
+    );
+    for (index, (word, _, _)) in (1..).zip(&classes) {
+        assert_eq!(
+            guard_sequence(&setup, &file_id(700 + index)).await?,
+            2,
+            "the guard of the {word} file holds the rejected update"
+        );
+        assert_eq!(
+            note_hits(&setup, word).await?,
+            0,
+            "the text of the earlier {word} revision is not found"
+        );
+    }
+    assert_eq!(
+        setup.count(NOTE_SEARCH_DOCUMENTS).await?,
+        0,
+        "no search entry of a rejected file remains"
+    );
+    assert_eq!(
+        setup.count(embeddings).await?,
+        0,
+        "no embedding of a rejected file remains"
     );
     setup.finish(worker).await
 }

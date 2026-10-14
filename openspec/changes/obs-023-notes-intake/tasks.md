@@ -40,3 +40,8 @@
 ## 8. Release artifact
 
 - [x] 8.1 Add the `release-artifact` job that calls the workspace's `reusable-release-artifact.yml` at a full commit SHA for the `ratatoskr-knowledge-service` binary on linux/arm64, because the repository now ships a unit; and correct `deploy/README.md` on a missing group and a missing notes root. No test: CI configuration and documentation. Verify with `zizmor` and the gate.
+
+## 9. A rejected update leaves no old search entry (workspace tasks 10.15 and 10.16)
+
+- [x] 9.1 RED: `services/knowledge/tests/notes_intake.rs::rejected_update_removes_the_old_search_entry` analyses a note, then delivers an update of the same file that is rejected permanently, once for each class `note_too_large`, `note_encoding` and `note_too_long`. It asserts that the text of the earlier revision is no longer found by search and has no embedding, and that the event is acknowledged. Confirm that it fails because the search entry of the earlier revision stays.
+- [ ] 9.2 GREEN: when an update of a note file is rejected permanently (`note_too_large`, `note_encoding`, `note_too_long`), retire the search projections and the embeddings of every earlier revision of the same `(tenant, ratatoskr-notes, file_id)`, so old text does not stay searchable. Verify 9.1 and `updated_note_replaces_its_search_entry`.
