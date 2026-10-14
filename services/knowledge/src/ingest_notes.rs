@@ -66,7 +66,11 @@ impl<P: LlmProvider> IngestContext<P> {
             Err(error) => return inbox_failure(&error, "notes_inbox"),
         }
         if !is_markdown(change.media_type.as_str()) {
-            return Outcome::Done;
+            // A note renamed to another media type leaves the search.
+            return match inbox.remove_derived(&guard).await {
+                Ok(()) => self.erase_removed_blobs().await,
+                Err(error) => inbox_failure(&error, REMOVAL),
+            };
         }
         let outcome = self.analyse(tenant, change).await;
         if outcome != Outcome::Done {

@@ -433,6 +433,7 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
             lead: note.lead(),
             body: note.text.clone(),
         };
+        let title = fields.title.clone();
         let value = self
             .execute_value(run, request, fields, |value| {
                 validate_note_analysis(value, &note.text).and_then(|analysis| {
@@ -440,6 +441,19 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
                 })
             })
             .await?;
+        // A rename keeps the revision, so the run and its projection exist already: the title
+        // follows the latest change.
+        for table in ["search_documents", "search_projection_inputs"] {
+            sqlx::query(&format!(
+                "update knowledge.{table} set title = $2
+                 where source_ref_id = $1 and title <> $2"
+            ))
+            .bind(source)
+            .bind(&title)
+            .execute(self.database.pool())
+            .await
+            .map_err(PersistenceError::Query)?;
+        }
         serde_json::from_value(value).map_err(FamilyPipelineError::Contract)
     }
 

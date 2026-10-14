@@ -126,6 +126,25 @@ impl<'a> NotesInbox<'a> {
         commit(transaction).await
     }
 
+    /// Removes the derived data of a file whose current change is not Markdown, such as a note
+    /// renamed to an image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceInboxError`] when the deletion cannot be written.
+    pub async fn remove_derived(&self, change: &NoteChange<'_>) -> Result<(), SourceInboxError> {
+        let mut transaction = self.begin().await?;
+        lock_connection(
+            &mut transaction,
+            change.tenant_ref,
+            change.connection_id,
+            Lock::Shared,
+        )
+        .await?;
+        remove_file(&mut transaction, change.tenant_ref, change.file_id).await?;
+        commit(transaction).await
+    }
+
     /// Removes the derived data of a file whose connection was removed while its change was
     /// analysed, so that a late analysis does not outlive the removal.
     ///

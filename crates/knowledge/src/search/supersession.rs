@@ -18,6 +18,10 @@ use uuid::Uuid;
 /// was in flight when the head moved) retires itself. A source with no head row, such as a
 /// repository or an extracted document, is left alone.
 ///
+/// A note (owner context `ratatoskr-notes`) has no head row: the notes intake analyses only the
+/// current change of a file, in connection-sequence order, so the revision just persisted is the
+/// current one and retires the projections of every other revision of the same file.
+///
 /// # Errors
 ///
 /// Returns the underlying [`sqlx::Error`] when a write fails.
@@ -42,6 +46,35 @@ pub(crate) async fn retire_superseded_projections(
     .execute(&mut **transaction)
     .await?;
     sqlx::query(
+        "delete from knowledge.search_projection_inputs i
+         using knowledge.source_refs persisted, knowledge.source_refs revision
+         where persisted.source_ref_id = $1
+           and persisted.owner_context = 'ratatoskr-notes'
+           and revision.tenant_ref = persisted.tenant_ref
+           and revision.owner_context = persisted.owner_context
+           and revision.source_document_id = persisted.source_document_id
+           and revision.source_ref_id <> persisted.source_ref_id
+           and i.source_ref_id = revision.source_ref_id",
+    )
+    .bind(source_ref_id)
+    .execute(&mut **transaction)
+    .await?;
+    let notes = sqlx::query(
+        "delete from knowledge.search_documents d
+         using knowledge.source_refs persisted, knowledge.source_refs revision
+         where persisted.source_ref_id = $1
+           and persisted.owner_context = 'ratatoskr-notes'
+           and revision.tenant_ref = persisted.tenant_ref
+           and revision.owner_context = persisted.owner_context
+           and revision.source_document_id = persisted.source_document_id
+           and revision.source_ref_id <> persisted.source_ref_id
+           and d.source_ref_id = revision.source_ref_id",
+    )
+    .bind(source_ref_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    sqlx::query(
         "delete from knowledge.search_documents d
          using knowledge.source_refs persisted, knowledge.source_refs revision,
                knowledge.source_analysis_heads head
@@ -57,5 +90,5 @@ pub(crate) async fn retire_superseded_projections(
     .bind(source_ref_id)
     .execute(&mut **transaction)
     .await
-    .map(|result| result.rows_affected())
+    .map(|result| result.rows_affected() + notes)
 }
