@@ -18,6 +18,9 @@ const NOTE_TASK: &str = include_str!("../../../prompts/note-analysis.v1/task.txt
 /// The owner of every note blob, and the owner context of every note source reference.
 pub const NOTES_OWNER: &str = "ratatoskr-notes";
 
+/// The most characters of a note that `note_context_v1` sends to the model.
+pub const NOTE_CONTEXT_CHARACTERS: usize = 32_000;
+
 /// The characters of a note that become the lead of its search document.
 const NOTE_LEAD_CHARACTERS: usize = 280;
 
@@ -147,6 +150,12 @@ pub enum NoteBlobError {
     /// The reference names a blob larger than the configured blob ceiling.
     #[error("the note blob is larger than the blob ceiling")]
     TooLarge,
+    /// The bytes are not UTF-8 text.
+    #[error("the note is not UTF-8 text")]
+    NotUtf8,
+    /// The text has more characters than the note context holds.
+    #[error("the note is longer than the note context")]
+    TooLong,
 }
 
 impl NoteBlobError {
@@ -198,4 +207,18 @@ pub async fn read_note_blob(
         return Err(NoteBlobError::Unavailable);
     }
     Ok(bytes)
+}
+
+/// Reads the note text that `blob` names under the notes blob root `root`.
+///
+/// # Errors
+///
+/// Returns the errors of [`read_note_blob`].
+pub async fn read_note_text(
+    root: &Path,
+    blob: &BlobRef,
+    ceiling: u64,
+) -> Result<String, NoteBlobError> {
+    let bytes = read_note_blob(root, blob, ceiling).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }

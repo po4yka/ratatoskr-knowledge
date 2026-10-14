@@ -713,3 +713,31 @@ fn blob_bytes_below_the_snapshot_floor_or_the_response_cap_is_refused() {
     );
     Config::from_environment(std::iter::empty::<(&str, &str)>()).expect("the default validates");
 }
+
+/// Changeset OBS-023: the notes blob root is a fixed host path that the unit names in
+/// `ReadOnlyPaths`, so an empty or relative value is refused instead of resolved against the
+/// working directory.
+#[test]
+fn the_notes_blob_root_must_be_absolute() {
+    for refused in ["", "relative/notes", "./ratatoskr-notes"] {
+        let error = Config::from_environment([("RATATOSKR__BLOBS__NOTES_ROOT", refused)]);
+        assert!(
+            error
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("RATATOSKR__BLOBS__NOTES_ROOT")),
+            "{refused:?} is refused: {:?}",
+            error.map(|config| config.blobs.notes_root)
+        );
+    }
+    let accepted = Config::from_environment([(
+        "RATATOSKR__BLOBS__NOTES_ROOT",
+        "/mnt/nvme/ratatoskr/blobs/ratatoskr-notes",
+    )])
+    .expect("an absolute root is accepted");
+    assert_eq!(
+        accepted.blobs.notes_root,
+        Some(std::path::PathBuf::from(
+            "/mnt/nvme/ratatoskr/blobs/ratatoskr-notes"
+        ))
+    );
+}
