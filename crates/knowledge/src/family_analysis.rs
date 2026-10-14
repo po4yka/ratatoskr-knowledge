@@ -520,7 +520,7 @@ pub enum FamilyValidationError {
     Evidence,
 }
 
-fn validate_schema(
+pub(crate) fn validate_schema(
     value: &serde_json::Value,
     schema: &serde_json::Value,
 ) -> Result<(), FamilyValidationError> {

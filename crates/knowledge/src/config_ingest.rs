@@ -16,7 +16,7 @@ const ACK_WAIT_SECONDS: &str = "RATATOSKR__INGEST__ACK_WAIT_SECONDS";
 const README_BASE_URL: &str = "RATATOSKR__INGEST__GITHUB_README_BASE_URL";
 const README_SECRET: &str = "RATATOSKR__INGEST__GITHUB_README_SERVICE_SECRET";
 
-/// The ack wait, in seconds, that Edge fixes on the four ingest durables (XR-021 CONTRACTS.md S04).
+/// The ack wait, in seconds, that Edge fixes on the six ingest durables (XR-021 CONTRACTS.md S04).
 ///
 /// The worker verifies the durable against this value and refuses to consume from one that
 /// differs, so the configuration key only states it.
@@ -38,7 +38,7 @@ pub enum IngestProviderMode {
 /// Dormant-by-default ingest consumers, their broker, and the repository README source.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestConfig {
-    /// Whether the four ingest consumers are part of this process.
+    /// Whether the six ingest consumers are part of this process.
     pub enabled: bool,
     /// Provider mode for analysis.
     pub provider_mode: IngestProviderMode,

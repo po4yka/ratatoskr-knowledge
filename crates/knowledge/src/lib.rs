@@ -38,6 +38,7 @@ mod family_analysis;
 mod family_pipeline;
 mod github_readme;
 mod indexer;
+mod note_analysis;
 mod openrouter;
 mod pipeline;
 mod provider;
@@ -147,6 +148,10 @@ pub use indexer::{
     EMBEDDING_STORAGE_DIMENSIONS, EmbeddingWrite, Indexer, IndexerLimits, IndexingIdentity,
     IndexingOutcome, IndexingTarget, PendingSource, failure_attempt_count, pending_indexing_batch,
     record_indexing_failure, store_embeddings,
+};
+pub use note_analysis::{
+    NOTES_OWNER, NoteAnalysis, NoteBlobError, NoteRevision, is_markdown, note_analysis_schema,
+    note_context, note_generation_request, read_note_blob, validate_note_analysis,
 };
 pub use openrouter::{
     OpenRouterProvider, OpenRouterSettings, OpenRouterWireError, RetryPolicy, chat_completion_body,

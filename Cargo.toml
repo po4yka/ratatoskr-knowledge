@@ -22,6 +22,7 @@ ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-cont
 ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
 ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
 ratatoskr-github-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
+ratatoskr-notes-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
 ratatoskr-social-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
 ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }
 ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "a9289e27bcf53f496b5917889580965d97ff2358" }

@@ -1,0 +1,1 @@
+Summarize only the supplied note. List concise topics that the note text supports, and cite one exact excerpt of the note.

@@ -57,7 +57,9 @@ analysis, and persists the evidence and result.
   document; `social.source.captured|updated|removed.v1` and the eight `ai_archive.*` facts go
   through the durable source inbox, are analysed when they are the head of their source, and a
   removal or tombstone deletes the derived state; `knowledge.repository_analysis.requested.v1` is
-  analysed with the README bytes resolved from GitHub's internal reader route. Completion and
+  analysed with the README bytes resolved from GitHub's internal reader route;
+  `notes.file.changed.v1` of a Markdown file is analysed once per `(file_id, revision)` with the
+  note bytes read from the notes blob root (changeset OBS-023). Completion and
   failure facts are committed to `knowledge.event_outbox` in the transaction that produced them and
   published once to `evt.knowledge.*`;
 - a channel-recap chain that conforms to the channel-digests manifest contract (the path and the
@@ -251,6 +253,8 @@ ratatoskr_events / ratatoskr_knowledge_documents           evt.content.document.
 ratatoskr_events / ratatoskr_knowledge_social_sources      evt.social.source.>
 ratatoskr_events / ratatoskr_knowledge_ai_archive          evt.ai_archive.>
 ratatoskr_events / ratatoskr_knowledge_repository_requests evt.knowledge.repository_analysis.requested.v1
+ratatoskr_events / ratatoskr_knowledge_notes_files         evt.notes.file.changed.v1
+ratatoskr_events / ratatoskr_knowledge_notes_vaults        evt.notes.vault.>
 ```
 
 Each durable is explicit-ack, deliver-all, unlimited redelivery, with an ack wait of 120 seconds
@@ -331,7 +335,7 @@ The provider failure classes recorded on an attempt, and what the ingest worker 
 repository facts are rows of `knowledge.event_outbox`, committed with the state change that produced
 them and published to `evt.<subject>` with `Nats-Msg-Id` equal to the outbox id, so a crash between
 the broker's acknowledgement and the `published_at` update republishes a message the broker drops.
-`/ready` additionally requires the four consumers to be verified and connected and the publisher not
+`/ready` additionally requires the six consumers to be verified and connected and the publisher not
 to have failed for more than 30 seconds. If a worker task ends for any reason before shutdown, the
 process begins drain and exits non-zero.
 
@@ -450,7 +454,7 @@ remains a separate planned change.
 `ratatoskr-workspace` pins this repository as `repos/knowledge` (profiles `core`, `social` and
 `ai-archive`) together with the producers and contracts it consumes, and its harness checks the
 parts of this repository that other services depend on: `deploy/nats/identity.conf` against the
-KNOWLEDGE stanza of Platform's ACL, the five durables this service verifies against the table Edge
+KNOWLEDGE stanza of Platform's ACL, the seven durables this service verifies against the table Edge
 provisions, and the ports in `deploy/systemd/knowledge.conf.example` against the deployment target.
 The workspace's Telegram library profile starts Knowledge for search and read-state; it needs Docker
 and has not been run for this snapshot. The only cross-service run of Knowledge so far is the native

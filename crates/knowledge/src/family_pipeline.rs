@@ -25,12 +25,13 @@ use crate::search::{
 };
 use crate::{
     AnalysisIdentity, BlobError, BlobStore, Database, EventCause, EventOutboxError,
-    FamilyValidationError, GenerationRequest, LlmProvider, PersistenceError, ProviderError,
-    RepositoryAnalysis, RepositoryAnalysisAdmission, RepositoryAnalysisConsumer,
-    RepositoryAnalysisError, SocialAnalysis, SourceInbox, SourceInboxError, SourceReference,
-    archive_generation_request, archive_project_generation_request, repository_generation_request,
+    FamilyValidationError, GenerationRequest, LlmProvider, NoteAnalysis, NoteRevision,
+    PersistenceError, ProviderError, RepositoryAnalysis, RepositoryAnalysisAdmission,
+    RepositoryAnalysisConsumer, RepositoryAnalysisError, SocialAnalysis, SourceInbox,
+    SourceInboxError, SourceReference, archive_generation_request,
+    archive_project_generation_request, note_generation_request, repository_generation_request,
     social_generation_request, validate_archive_analysis, validate_archive_project_analysis,
-    validate_repository_analysis, validate_social_analysis,
+    validate_note_analysis, validate_repository_analysis, validate_social_analysis,
 };
 
 /// Authorized byte resolver for a GitHub-owned README reference.
@@ -391,6 +392,50 @@ impl<'a, P: LlmProvider> FamilyPipeline<'a, P> {
         let value = self
             .execute_value(run, request, SearchFields { title, lead, body }, |value| {
                 validate_archive_project_analysis(value, project).and_then(|analysis| {
+                    serde_json::to_value(analysis).map_err(|_| FamilyValidationError::Decode)
+                })
+            })
+            .await?;
+        serde_json::from_value(value).map_err(FamilyPipelineError::Contract)
+    }
+
+    /// Executes one note revision idempotently: one run for each `(file_id, revision)`.
+    ///
+    /// The source reference names the blob of `ratatoskr-notes`; Knowledge stores no copy of the
+    /// note.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FamilyPipelineError`] for provider, validation, or persistence failure.
+    pub async fn execute_note(
+        &self,
+        note: &NoteRevision,
+    ) -> Result<NoteAnalysis, FamilyPipelineError> {
+        let source = self
+            .external_source(
+                note.tenant,
+                &note.file_id.to_string(),
+                note.blob.digest.clone(),
+                note.blob.clone(),
+            )
+            .await?;
+        let run = self
+            .create_run(
+                source,
+                "note_analysis_v1",
+                "note_prompt_v1",
+                "note_context_v1",
+            )
+            .await?;
+        let request = note_generation_request(note)?;
+        let fields = SearchFields {
+            title: note.title(),
+            lead: note.lead(),
+            body: note.text.clone(),
+        };
+        let value = self
+            .execute_value(run, request, fields, |value| {
+                validate_note_analysis(value, &note.text).and_then(|analysis| {
                     serde_json::to_value(analysis).map_err(|_| FamilyValidationError::Decode)
                 })
             })

@@ -164,7 +164,7 @@ The test provisions only its fixed command stream and durable on this disposable
 topology remains an operator-owned precondition; Knowledge never creates or widens it.
 
 The ingest tests (`services/knowledge/tests/ingest_bus/`) recreate the `ratatoskr_events` stream and
-the four ingest durables on that same broker before every test, because the names are compiled
+the six ingest durables on that same broker before every test, because the names are compiled
 constants of the service; they run one at a time. Two kinds of test start their own broker process on
 a port the kernel picks: the outage test, and the authorized-broker tests, which boot an
 authorization-enabled server with exactly the stanza in `deploy/nats/identity.conf` and run the
@@ -208,7 +208,7 @@ without a provider call. A run that failed with an invalid response or a permane
 `RATATOSKR__LIMITS__PROVIDER_REQUESTS_PER_MINUTE` bounds the process: the recap and ingest workers
 share one limiter that `main` builds, and the spend ledger is shared through the database.
 
-The ack waits must equal the durables Edge provisions (30 s for the recap command, 120 s for the four
+The ack waits must equal the durables Edge provisions (30 s for the recap command, 120 s for the six
 ingest durables); a worker verifies its durable at startup and stays not ready on any difference.
 `RATATOSKR__INGEST__PROVIDER_MODE=fixture` builds a deterministic first-paragraph provider for the
 article family only and is accepted only on a loopback broker; it exists so a captured URL becomes

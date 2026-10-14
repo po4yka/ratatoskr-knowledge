@@ -300,6 +300,10 @@ async fn seed_failed_recap(database: &TestDatabase) -> TestResult {
 }
 
 /// One valid message for each of the five durables.
+const NOTES_CONNECTION: &str = "018f0000-0000-7000-8000-00000000c001";
+const NOTES_EVENT_FILE: &str = "018f0000-0000-7000-8000-000000000b15";
+const NOTES_EVENT_VAULT: &str = "018f0000-0000-7000-8000-000000000b16";
+
 async fn publish_one_valid_message_per_durable(
     fabric: &Authorized,
     recap_command: Vec<u8>,
@@ -350,6 +354,50 @@ async fn publish_one_valid_message_per_durable(
                 "ratatoskr-github",
                 Some(OWNER),
                 &serde_json::to_value(repository_request(OWNER, None)?)?,
+            ),
+        )
+        .await?;
+    // An image needs no note bytes and makes no run; a connected vault needs no work.
+    let png_revision = "1".repeat(64);
+    fabric
+        .publish(
+            "evt.notes.file.changed.v1",
+            envelope(
+                NOTES_EVENT_FILE,
+                "notes.file.changed.v1",
+                "ratatoskr-notes",
+                Some(OWNER),
+                &serde_json::json!({
+                    "connection_id": NOTES_CONNECTION,
+                    "file_id": "018f0000-0000-7000-8000-00000000f001",
+                    "connection_sequence": 1,
+                    "change_kind": "created",
+                    "path": "Attachments/photo.png",
+                    "revision": png_revision,
+                    "media_type": "image/png",
+                    "blob": {
+                        "owner_service": "ratatoskr-notes",
+                        "digest": { "algorithm": "sha256", "hex": png_revision },
+                        "media_type": "image/png",
+                        "length_bytes": 4,
+                    },
+                }),
+            ),
+        )
+        .await?;
+    fabric
+        .publish(
+            "evt.notes.vault.connected.v1",
+            envelope(
+                NOTES_EVENT_VAULT,
+                "notes.vault.connected.v1",
+                "ratatoskr-notes",
+                Some(OWNER),
+                &serde_json::json!({
+                    "connection_id": NOTES_CONNECTION,
+                    "channel": "plugin",
+                    "vault_display_name": "Personal",
+                }),
             ),
         )
         .await

@@ -5,7 +5,7 @@
 ## 1. Intake (workspace tasks 10.1 and 10.2)
 
 - [x] 1.1 RED: `services/knowledge/tests/notes_intake.rs::one_run_per_file_revision` delivers one `created` event three times and asserts exactly one analysis run for its `file_id` and revision; `non_markdown_file_creates_no_run` asserts no run and an acknowledged message for a PNG. Confirm that both fail because Knowledge has no consumer on `ratatoskr_knowledge_notes_files`.
-- [ ] 1.2 GREEN: implement the intake on `ratatoskr_knowledge_notes_files`, with the inbox key `(file_id, revision)`, the `note_analysis_v1` family, and the grants of both notes durables in `deploy/nats/identity.conf`. Verify both tests of 1.1.
+- [x] 1.2 GREEN: implement the intake on `ratatoskr_knowledge_notes_files`, with the inbox key `(file_id, revision)`, the `note_analysis_v1` family, and the grants of both notes durables in `deploy/nats/identity.conf`. Verify both tests of 1.1.
 
 ## 2. Removal (workspace tasks 10.3 and 10.4)
 

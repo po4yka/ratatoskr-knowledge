@@ -11,6 +11,7 @@ mod channel_recap_delivery;
 mod ingest;
 mod ingest_deletion;
 mod ingest_handlers;
+mod ingest_notes;
 mod ingest_publish;
 mod metrics;
 mod provider_runtime;

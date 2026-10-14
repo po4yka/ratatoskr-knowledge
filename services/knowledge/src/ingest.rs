@@ -1,5 +1,6 @@
-//! Supervised `JetStream` intake of the four ingest durables and publication of Knowledge's
-//! completion facts (XR-021 CONTRACTS.md S02, S04 and S09).
+//! Supervised `JetStream` intake of the six ingest durables and publication of Knowledge's
+//! completion facts (XR-021 CONTRACTS.md S02, S04 and S09; the two notes durables are changeset
+//! OBS-023).
 //!
 //! One consumer loop per durable, each verifying its Edge-provisioned durable and never creating
 //! one, plus one publisher loop for the transactional outbox. A loop that loses its broker
@@ -45,7 +46,7 @@ pub const TERMINAL_DELIVERY: i64 = 5;
 /// How long the completion publisher may keep failing before the worker stops being ready.
 pub const PUBLISH_READINESS_GRACE: Duration = Duration::from_secs(30);
 
-/// One of the four ingest durables.
+/// One of the six ingest durables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestFamily {
     /// Extracted documents.
@@ -56,15 +57,21 @@ pub enum IngestFamily {
     AiArchive,
     /// Repository analysis requests.
     Repository,
+    /// Note file changes of connected vaults.
+    NotesFiles,
+    /// Vault connection lifecycle facts.
+    NotesVaults,
 }
 
 impl IngestFamily {
-    /// The four families, in durable-table order.
-    pub const ALL: [Self; 4] = [
+    /// The six families, in durable-table order.
+    pub const ALL: [Self; 6] = [
         Self::Documents,
         Self::Social,
         Self::AiArchive,
         Self::Repository,
+        Self::NotesFiles,
+        Self::NotesVaults,
     ];
 
     /// The Edge-provisioned durable name.
@@ -75,6 +82,8 @@ impl IngestFamily {
             Self::Social => "ratatoskr_knowledge_social_sources",
             Self::AiArchive => "ratatoskr_knowledge_ai_archive",
             Self::Repository => "ratatoskr_knowledge_repository_requests",
+            Self::NotesFiles => "ratatoskr_knowledge_notes_files",
+            Self::NotesVaults => "ratatoskr_knowledge_notes_vaults",
         }
     }
 
@@ -86,6 +95,8 @@ impl IngestFamily {
             Self::Social => "evt.social.source.>",
             Self::AiArchive => "evt.ai_archive.>",
             Self::Repository => "evt.knowledge.repository_analysis.requested.v1",
+            Self::NotesFiles => "evt.notes.file.changed.v1",
+            Self::NotesVaults => "evt.notes.vault.>",
         }
     }
 
@@ -97,6 +108,8 @@ impl IngestFamily {
             Self::Social => "social",
             Self::AiArchive => "ai_archive",
             Self::Repository => "repository",
+            Self::NotesFiles => "notes_files",
+            Self::NotesVaults => "notes_vaults",
         }
     }
 
@@ -106,6 +119,8 @@ impl IngestFamily {
             Self::Social => 1,
             Self::AiArchive => 2,
             Self::Repository => 3,
+            Self::NotesFiles => 4,
+            Self::NotesVaults => 5,
         }
     }
 }
@@ -140,7 +155,7 @@ impl PublishHealth {
 #[derive(Debug)]
 struct IngestHealth {
     lifecycle: Lifecycle,
-    families: [AtomicBool; 4],
+    families: [AtomicBool; 6],
     publisher_healthy: AtomicBool,
     failed: AtomicBool,
     guard: Mutex<()>,
@@ -150,12 +165,7 @@ impl IngestHealth {
     fn new(lifecycle: Lifecycle) -> Self {
         Self {
             lifecycle,
-            families: [
-                AtomicBool::new(false),
-                AtomicBool::new(false),
-                AtomicBool::new(false),
-                AtomicBool::new(false),
-            ],
+            families: [const { AtomicBool::new(false) }; 6],
             publisher_healthy: AtomicBool::new(true),
             failed: AtomicBool::new(false),
             guard: Mutex::new(()),
@@ -191,7 +201,7 @@ impl IngestHealth {
     }
 }
 
-/// Everything the handlers need, shared by the four consumer loops and the publisher.
+/// Everything the handlers need, shared by the six consumer loops and the publisher.
 #[derive(Debug)]
 pub(crate) struct IngestContext<P> {
     pub(crate) config: Config,
@@ -446,6 +456,8 @@ impl<P: LlmProvider> IngestContext<P> {
             IngestFamily::Social => self.social(bytes).await,
             IngestFamily::AiArchive => self.ai_archive(bytes).await,
             IngestFamily::Repository => self.repository(bytes, delivered).await,
+            IngestFamily::NotesFiles => self.notes_files(bytes).await,
+            IngestFamily::NotesVaults => crate::ingest_notes::notes_vaults(bytes),
         }
     }
 

@@ -57,7 +57,10 @@ pub(crate) enum Outcome {
     Retry(&'static str),
 }
 
-fn decode(bytes: &[u8], producers: &[&str]) -> Result<(EventEnvelope, TenantRef), Outcome> {
+pub(crate) fn decode(
+    bytes: &[u8],
+    producers: &[&str],
+) -> Result<(EventEnvelope, TenantRef), Outcome> {
     let envelope = EventEnvelope::from_json(bytes).map_err(|_| Outcome::Reject("undecodable"))?;
     if !producers.contains(&envelope.producer.as_str()) {
         return Err(Outcome::Reject("producer"));
@@ -106,7 +109,7 @@ fn inbox_failure(error: &SourceInboxError, retry_class: &'static str) -> Outcome
 
 /// A failed analysis: a source that can never be analysed is rejected, anything else is the
 /// provider, a timeout, a held run or the database and is redelivered.
-fn analysis_failure(error: &FamilyPipelineError, retry_class: &'static str) -> Outcome {
+pub(crate) fn analysis_failure(error: &FamilyPipelineError, retry_class: &'static str) -> Outcome {
     if error.is_permanent() {
         Outcome::Reject("unanalysable")
     } else if error.needs_operator() {
@@ -121,7 +124,7 @@ impl<P: LlmProvider> IngestContext<P> {
         Duration::from_millis(self.config.limits.provider_timeout_ms)
     }
 
-    fn pipeline(&self) -> FamilyPipeline<'_, P> {
+    pub(crate) fn pipeline(&self) -> FamilyPipeline<'_, P> {
         FamilyPipeline::new(
             &self.database,
             &*self.provider,

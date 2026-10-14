@@ -14,7 +14,7 @@ pub(crate) type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// The ack wait the platform provisions on every ingest durable.
 pub(crate) const PLATFORM_ACK_WAIT: Duration = Duration::from_mins(2);
 
-/// Recreates the events stream and the four durables as the platform provisions them, with an
+/// Recreates the events stream and the six durables as the platform provisions them, with an
 /// ack wait of `ack_wait`: [`PLATFORM_ACK_WAIT`], or a shorter one so a delivery abandoned by a
 /// killed worker comes back within the test deadline.
 pub(crate) async fn provision_with_ack_wait(
