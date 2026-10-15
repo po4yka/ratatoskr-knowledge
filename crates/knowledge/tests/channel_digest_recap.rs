@@ -12,7 +12,7 @@ use ratatoskr_knowledge::{
 };
 
 const WORKSPACE_MANIFEST: &str = include_str!("../../../Cargo.toml");
-const CONTRACT_REVISION: &str = "a9289e27bcf53f496b5917889580965d97ff2358";
+const CONTRACT_REVISION: &str = "2c726027da79e0e899ad482afead0a2000b03e61";
 
 mod channel_recap_support;
 
