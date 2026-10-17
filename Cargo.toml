@@ -17,15 +17,15 @@ http-body-util = "0.1.5"
 jsonschema = { version = "0.50.0", default-features = false }
 nkeys = "0.4.5"
 pgvector = { version = "0.4.1", features = ["sqlx"] }
-ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-github-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-notes-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-social-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
-ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66bdb0c0545363f06137f13687084c21db9b27c5" }
+ratatoskr-channel-digest-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-document-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-github-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-notes-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-social-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
+ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "1756034314a15d3a83d5c7d15b172da502990e98" }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
